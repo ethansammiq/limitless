@@ -75,6 +75,7 @@ class TradeEvent(str, Enum):
     SELL_EXPIRED = "sell_expired"                 # stale sell cancelled
     SETTLEMENT_HOLD = "settlement_hold"           # efficiency hold for $1
     BOT_WINDOW_PULL = "bot_window_pull"           # order pulled before DSM
+    STALE_ORDER_CANCELLED = "stale_order_cancelled" # resting buy order timed out
 
     # ── Scans ──
     SCAN_STARTED = "scan_started"

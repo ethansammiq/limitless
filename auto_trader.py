@@ -339,6 +339,18 @@ async def auto_trade(
                 })
                 continue
 
+            # ── Duplicate order guard ──
+            # Don't place a new order if we already have a resting or open position for this ticker
+            existing = [p for p in positions
+                        if p.get("ticker") == opp.ticker and p.get("status") in ("resting", "open")]
+            if existing:
+                skipped.append({"opp": opp, "reason": f"Already have {existing[0]['status']} position"})
+                logger.info("  SKIPPED — already %s for %s", existing[0]["status"], opp.ticker)
+                log_event(TradeEvent.TRADE_SKIPPED, "auto_trader", {
+                    "ticker": opp.ticker, "reason": f"duplicate_{existing[0]['status']}",
+                })
+                continue
+
             # ── Execute ──
             if dry_run:
                 logger.info("  [DRY RUN] Would place: %s %s @ %dc x%d", opp.side.upper(), opp.ticker, entry_price, contracts)

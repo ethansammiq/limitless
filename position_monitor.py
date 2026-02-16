@@ -58,6 +58,7 @@ from config import (
     THESIS_BREAK_CONFIDENCE,
     STATIONS,
     PENDING_SELL_EXPIRY_MINUTES,
+    RESTING_ORDER_TIMEOUT_MINUTES,
     # ── Exit strategy upgrades ──
     TIME_DECAY_ENABLED,
     TIME_DECAY_MIDPOINT_HOURS,
@@ -373,6 +374,68 @@ async def _pull_orders_before_bot_windows(
     return actions
 
 
+async def _cancel_stale_resting_orders(
+    positions: list, client: KalshiClient, now: datetime,
+) -> list[str]:
+    """Cancel resting buy orders that have been unfilled past the timeout.
+
+    A limit buy order that hasn't filled in RESTING_ORDER_TIMEOUT_MINUTES
+    means the market moved away from our price. Cancel it to:
+      1. Free up the daily exposure budget for fresh opportunities
+      2. Avoid a stale fill if price briefly dips back to our level
+         after the thesis has shifted
+    """
+    actions = []
+    resting = [p for p in positions if p.get("status") == "resting"]
+    if not resting:
+        return actions
+
+    for pos in resting:
+        entry_time_str = pos.get("entry_time", "")
+        if not entry_time_str:
+            continue
+        try:
+            entry_time = datetime.fromisoformat(entry_time_str)
+        except (ValueError, TypeError):
+            continue
+
+        elapsed_min = (now - entry_time).total_seconds() / 60
+        if elapsed_min < RESTING_ORDER_TIMEOUT_MINUTES:
+            continue
+
+        ticker = pos["ticker"]
+        order_id = pos.get("order_id", "")
+        logger.info("STALE ORDER: %s resting for %.0f min (limit: %d) — cancelling",
+                     ticker, elapsed_min, RESTING_ORDER_TIMEOUT_MINUTES)
+
+        if order_id:
+            try:
+                await client.cancel_order(order_id)
+            except Exception as e:
+                logger.warning("Failed to cancel stale order %s: %s", order_id, e)
+
+        pos["status"] = "cancelled"
+        pos.setdefault("notes", []).append(
+            f"{now.isoformat()}: Stale order cancelled after {elapsed_min:.0f}min "
+            f"(timeout: {RESTING_ORDER_TIMEOUT_MINUTES}min)"
+        )
+        actions.append(f"STALE CANCEL: {ticker} (resting {elapsed_min:.0f}min)")
+        log_event(TradeEvent.STALE_ORDER_CANCELLED, "position_monitor", {
+            "ticker": ticker, "order_id": order_id,
+            "elapsed_min": round(elapsed_min, 1),
+            "timeout_min": RESTING_ORDER_TIMEOUT_MINUTES,
+        })
+        await send_discord_alert(
+            "STALE ORDER CANCELLED",
+            f"**{ticker}** limit buy order cancelled after **{elapsed_min:.0f} min** unfilled.\n"
+            f"Timeout: {RESTING_ORDER_TIMEOUT_MINUTES} min.\n"
+            f"Exposure budget freed for next scan.",
+            color=0xFF9900,
+        )
+
+    return actions
+
+
 async def _check_pending_sells(positions: list, client: KalshiClient, now: datetime) -> list[str]:
     """Check positions with pending_sell status — confirm fill or cancel stale orders."""
     actions = []
@@ -613,6 +676,10 @@ async def check_and_manage_positions():
         # First: pull resting buy orders before DSM/6-hour bot windows
         bot_actions = await _pull_orders_before_bot_windows(client, positions, now)
         actions_taken.extend(bot_actions)
+
+        # Cancel resting buy orders that have been unfilled past the timeout
+        stale_actions = await _cancel_stale_resting_orders(positions, client, now)
+        actions_taken.extend(stale_actions)
 
         # Check pending sell orders for fill confirmation
         if pending_sells:

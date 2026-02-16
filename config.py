@@ -501,6 +501,11 @@ LLM_MODELS = [
 # How long to wait for a limit sell order to fill before cancelling and re-evaluating
 PENDING_SELL_EXPIRY_MINUTES = 30
 
+# How long to wait for a limit buy order to fill before cancelling as stale.
+# A resting buy order that hasn't filled in 2 hours means the market moved away
+# from our price. Cancel it to free up the exposure budget for fresh opportunities.
+RESTING_ORDER_TIMEOUT_MINUTES = 120
+
 # Minutes before a DSM/6-hour observation release to pull resting buy orders
 # The DSM Bot and 6-Hour Bot will reprice the market instantly after release
 BOT_WINDOW_BUFFER_MIN = 15
