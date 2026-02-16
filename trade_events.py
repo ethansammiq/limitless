@@ -89,6 +89,7 @@ class TradeEvent(str, Enum):
     KILL_SWITCH_ACTIVE = "kill_switch_active"
     SAFETY_CHECK_FAILED = "safety_check_failed"
     CIRCUIT_BREAKER = "circuit_breaker"
+    INTRADAY_DRAWDOWN = "intraday_drawdown"
 
     # ── System ──
     ERROR = "error"

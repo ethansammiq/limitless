@@ -101,6 +101,27 @@ MODEL_WEIGHTS = _CALIBRATED_WEIGHTS if _CALIBRATED_WEIGHTS else _DEFAULT_MODEL_W
 # Derive CITIES dict from canonical config.py STATIONS (single source of truth)
 from config import STATIONS as _STATIONS
 
+# Load model bias corrections (per-model, per-city adjustments)
+# Correction is added to each member: if model runs +2F hot, correction = -2F.
+_BIAS_CORRECTIONS: dict[tuple[str, str], float] = {}
+try:
+    from config import MODEL_BIAS_CORRECTION_ENABLED
+    if MODEL_BIAS_CORRECTION_ENABLED:
+        from model_bias import get_bias_correction, _load_records
+        _bias_records = _load_records()
+        if _bias_records:
+            for _model in ENSEMBLE_MODELS:
+                for _city in _STATIONS:
+                    _corr = get_bias_correction(_model, _city, _bias_records)
+                    if _corr != 0.0:
+                        _BIAS_CORRECTIONS[(_model, _city)] = _corr
+            if _BIAS_CORRECTIONS:
+                logger.info("Loaded %d model bias corrections from backtest data", len(_BIAS_CORRECTIONS))
+except ImportError:
+    pass  # model_bias.py not available
+except Exception as e:
+    logger.debug("Bias correction load failed (using defaults): %s", e)
+
 CITIES = {
     code: {
         "name": s.city_name,
@@ -430,11 +451,18 @@ async def fetch_ensemble_v2(session: aiohttp.ClientSession, city_key: str, targe
                 if v is not None:
                     model_members[matched_model].append(float(v))
 
-        # Build per-model groups
+        # Build per-model groups (with bias correction if available)
         all_temps = []
         for model_name in ENSEMBLE_MODELS:
             members = model_members.get(model_name, [])
             if members:
+                # Apply bias correction: shift all members to remove systematic bias
+                bias_corr = _BIAS_CORRECTIONS.get((model_name, city_key), 0.0)
+                if bias_corr != 0.0:
+                    members = [v + bias_corr for v in members]
+                    logger.debug("  %s bias correction for %s: %+.2f°F (%d members)",
+                                 model_name, city_key, bias_corr, len(members))
+
                 mg = ModelGroup(
                     name=model_name,
                     members=sorted(members),

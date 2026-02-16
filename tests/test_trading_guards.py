@@ -13,6 +13,7 @@ from trading_guards import (
     check_daily_trade_count,
     check_daily_exposure,
     check_circuit_breaker,
+    check_intraday_drawdown,
     check_correlated_exposure,
     check_bot_window,
     run_all_pre_trade_checks,
@@ -142,6 +143,88 @@ def test_circuit_breaker_win_breaks_streak():
     assert ok
 
 
+# ── Intraday drawdown ──
+
+def test_intraday_drawdown_no_losses():
+    """No closed positions today → allowed."""
+    ok, reason = check_intraday_drawdown([], balance=100.0)
+    assert ok
+    assert "today PnL: $+0.00" in reason
+
+
+def test_intraday_drawdown_small_loss():
+    """Losses under 10% of balance → allowed."""
+    positions = [
+        {"status": "closed", "pnl_realized": -5.0, "entry_time": NOW_ISO},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert ok  # $5 < 10% of $100 = $10
+
+
+def test_intraday_drawdown_at_limit():
+    """Losses at exactly 10% of balance → blocked."""
+    positions = [
+        {"status": "closed", "pnl_realized": -10.0, "entry_time": NOW_ISO},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert not ok
+    assert "Intraday drawdown" in reason
+
+
+def test_intraday_drawdown_multiple_losses():
+    """Cumulative losses across multiple positions → blocked."""
+    positions = [
+        {"status": "closed", "pnl_realized": -4.0, "entry_time": NOW_ISO},
+        {"status": "closed", "pnl_realized": -3.0, "entry_time": NOW_ISO},
+        {"status": "closed", "pnl_realized": -4.0, "entry_time": NOW_ISO},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert not ok  # $11 > 10% of $100
+
+
+def test_intraday_drawdown_wins_offset_losses():
+    """Wins reduce net PnL → allowed if net is positive."""
+    positions = [
+        {"status": "closed", "pnl_realized": -8.0, "entry_time": NOW_ISO},
+        {"status": "closed", "pnl_realized": 5.0, "entry_time": NOW_ISO},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert ok  # net -$3 < $10
+
+
+def test_intraday_drawdown_ignores_open_positions():
+    """Only closed/settled positions count toward drawdown."""
+    positions = [
+        {"status": "open", "pnl_realized": -50.0, "entry_time": NOW_ISO},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert ok  # open positions ignored
+
+
+def test_intraday_drawdown_ignores_other_days():
+    """Losses from other days don't count."""
+    positions = [
+        {"status": "closed", "pnl_realized": -50.0, "entry_time": "2020-01-01T12:00:00"},
+    ]
+    ok, reason = check_intraday_drawdown(positions, balance=100.0)
+    assert ok
+
+
+def test_intraday_drawdown_zero_balance():
+    """Zero balance → blocked."""
+    ok, reason = check_intraday_drawdown([], balance=0.0)
+    assert not ok
+    assert "Balance is $0" in reason
+
+
+def test_intraday_drawdown_returns_2tuple():
+    """check_intraday_drawdown should return (bool, str)."""
+    result = check_intraday_drawdown([], balance=100.0)
+    assert len(result) == 2
+    assert isinstance(result[0], bool)
+    assert isinstance(result[1], str)
+
+
 # ── Correlated exposure ──
 
 def test_correlated_exposure_under_cap():
@@ -209,7 +292,7 @@ def test_all_checks_pass():
     )
     # May or may not pass depending on current time vs bot window
     assert isinstance(ok, bool)
-    assert len(reasons) == 6  # 6 checks total
+    assert len(reasons) == 7  # 7 checks total
 
 
 # ── Type hint consistency ──

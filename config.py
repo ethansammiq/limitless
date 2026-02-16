@@ -518,6 +518,18 @@ AUTO_CIRCUIT_BREAKER_LOSSES = 4
 # Daily loss limit as % of NLV (halt trading if exceeded)
 AUTO_DAILY_LOSS_LIMIT_PCT = 0.15
 
+# Intraday drawdown circuit breaker — halt if cumulative realized losses
+# today exceed this % of starting balance. More responsive than consecutive-loss
+# breaker because it catches correlated losses across multiple cities.
+AUTO_INTRADAY_DRAWDOWN_PCT = 0.10  # 10% of NLV = hard stop for the day
+
+# ── Model Bias Corrections ──
+# Apply per-model, per-city bias corrections before KDE probability computation.
+# Requires >= MIN_RECORDS_FOR_BIAS (5) days of backtest data per model+city.
+# When enabled, each model member gets shifted by -mean_bias (e.g., if ICON runs
+# +2.0°F hot in CHI, subtract 2.0 from all ICON-CHI members before KDE).
+MODEL_BIAS_CORRECTION_ENABLED = True
+
 # Re-entry after trailing stop exit
 # If scanner still shows high confidence and the market dipped (trailing stop
 # triggered by thin-book volatility, not thesis break), re-enter.

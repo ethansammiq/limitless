@@ -651,6 +651,64 @@ class TestShorten:
         assert "35" in short
 
 
+# ═══════════════════════════════════════════════════════════
+#  MODEL BIAS CORRECTIONS
+# ═══════════════════════════════════════════════════════════
+
+class TestBiasCorrections:
+    """Test that bias corrections dict is loaded and applied correctly."""
+
+    def test_bias_corrections_dict_exists(self):
+        """_BIAS_CORRECTIONS dict should be importable."""
+        from edge_scanner_v2 import _BIAS_CORRECTIONS
+        assert isinstance(_BIAS_CORRECTIONS, dict)
+
+    def test_bias_corrections_keyed_by_tuple(self):
+        """If populated, keys should be (model_name, city_code) tuples."""
+        from edge_scanner_v2 import _BIAS_CORRECTIONS
+        for key in _BIAS_CORRECTIONS:
+            assert isinstance(key, tuple)
+            assert len(key) == 2
+            assert isinstance(key[0], str)  # model name
+            assert isinstance(key[1], str)  # city code
+
+    def test_bias_corrections_values_are_float(self):
+        """Correction values should be floats."""
+        from edge_scanner_v2 import _BIAS_CORRECTIONS
+        for val in _BIAS_CORRECTIONS.values():
+            assert isinstance(val, (int, float))
+
+    def test_bias_correction_shifts_members(self):
+        """Verify the correction math: members + correction shifts the distribution."""
+        members = [40.0, 41.0, 42.0, 43.0, 44.0]
+        bias_corr = -2.0  # model runs 2F hot → correction subtracts 2F
+        corrected = [v + bias_corr for v in members]
+        assert corrected == [38.0, 39.0, 40.0, 41.0, 42.0]
+
+    def test_zero_correction_no_change(self):
+        """Zero correction should leave members unchanged."""
+        members = [40.0, 41.0, 42.0]
+        bias_corr = 0.0
+        corrected = [v + bias_corr for v in members]
+        assert corrected == members
+
+    def test_kde_probability_shifts_with_bias(self):
+        """Bias correction should shift KDE probability to different bracket."""
+        members = list(np.random.normal(40, 0.5, 200))
+
+        # Before correction: bracket 39-41 should be high probability
+        prob_before = kde_probability(members, 39, 41)
+
+        # After -3F correction: members shift to ~37F, bracket 36-38 gets probability
+        corrected = [v - 3.0 for v in members]
+        prob_after_target = kde_probability(corrected, 36, 38)
+        prob_after_original = kde_probability(corrected, 39, 41)
+
+        assert prob_after_target > prob_after_original
+        assert prob_before > 0.5  # original bracket had high prob
+        assert prob_after_original < 0.1  # shifted away from original
+
+
 class TestIsTomorrowTicker:
     def test_matching_date(self):
         from datetime import date

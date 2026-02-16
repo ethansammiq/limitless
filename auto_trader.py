@@ -55,6 +55,7 @@ from edge_scanner_v2 import shorten_bracket_title
 from execute_trade import execute_auto
 from kalshi_client import KalshiClient
 from notifications import send_discord_alert
+from outcome_tracker import log_trade_prediction
 from position_store import load_positions, position_transaction
 from preflight import preflight_check
 from trading_guards import check_kill_switch, run_all_pre_trade_checks
@@ -361,6 +362,14 @@ async def auto_trade(
                         "trade_score": round(trade_scores[opp.ticker].score, 3) if opp.ticker in trade_scores else None,
                         "order_id": result["order_id"],
                     })
+                    # Log prediction for calibration tracking
+                    log_trade_prediction(
+                        opp,
+                        trade_score=trade_scores.get(opp.ticker),
+                        hours_to_settlement=hours_to_settlement,
+                        entry_price=entry_price,
+                        action="entry",
+                    )
                     # Refresh for next iteration's checks
                     positions = load_positions()
                     balance = await client.get_balance()
@@ -436,6 +445,13 @@ async def auto_trade(
                         "order_id": result["order_id"],
                         "exited_reason": exited_pos.get("_exit_reason", "trailing_stop"),
                     })
+                    log_trade_prediction(
+                        opp,
+                        trade_score=trade_scores.get(opp.ticker),
+                        hours_to_settlement=hours_to_settlement,
+                        entry_price=entry_price,
+                        action="reentry",
+                    )
                     positions = load_positions()
                     balance = await client.get_balance()
                 else:

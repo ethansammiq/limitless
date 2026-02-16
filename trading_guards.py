@@ -21,6 +21,7 @@ from config import (
     MAX_CORRELATED_EXPOSURE,
     AUTO_MAX_TRADES_PER_DAY,
     AUTO_CIRCUIT_BREAKER_LOSSES,
+    AUTO_INTRADAY_DRAWDOWN_PCT,
     BOT_WINDOW_BUFFER_MIN,
 )
 
@@ -111,6 +112,36 @@ def check_circuit_breaker(positions: list[dict]) -> tuple[bool, str]:
     return True, f"OK ({consecutive_losses} consecutive losses)"
 
 
+def check_intraday_drawdown(positions: list[dict], balance: float) -> tuple[bool, str]:
+    """Check if cumulative realized losses today exceed the intraday drawdown limit.
+
+    Unlike check_circuit_breaker (which only catches consecutive losses),
+    this catches correlated losses across multiple cities in the same day.
+    E.g., if NYC, CHI, and DEN all lose on the same cold front, total losses
+    may exceed the limit even if interspersed with small wins.
+    """
+    today = datetime.now(ET).date()
+    today_pnl = 0.0
+    for p in positions:
+        if p.get("status") not in ("closed", "settled"):
+            continue
+        entry = p.get("entry_time", "")
+        if entry:
+            try:
+                if datetime.fromisoformat(entry).date() == today:
+                    today_pnl += p.get("pnl_realized", 0)
+            except (ValueError, TypeError):
+                pass
+
+    if balance <= 0:
+        return False, "Balance is $0"
+
+    max_loss = balance * AUTO_INTRADAY_DRAWDOWN_PCT
+    if today_pnl < 0 and abs(today_pnl) >= max_loss:
+        return False, f"Intraday drawdown: ${today_pnl:.2f} loss >= ${max_loss:.2f} limit ({AUTO_INTRADAY_DRAWDOWN_PCT:.0%} of NLV)"
+    return True, f"OK (today PnL: ${today_pnl:+.2f}, limit: -${max_loss:.2f})"
+
+
 def check_correlated_exposure(
     positions: list[dict], city_key: str, new_cost: float,
     balance: float, series_to_city: dict[str, str] | None = None,
@@ -170,6 +201,7 @@ def run_all_pre_trade_checks(
         (check_kill_switch, ()),
         (check_daily_trade_count, (positions,)),
         (check_circuit_breaker, (positions,)),
+        (check_intraday_drawdown, (positions, balance)),
     ]:
         ok, reason = check_fn(*args)
         results.append(f"{'PASS' if ok else 'FAIL'}: {reason}")
