@@ -288,7 +288,7 @@ async def run_scan(city_filter: str = None, quiet: bool = False, dry_run: bool =
                         "kde_bandwidth": getattr(ensemble, "kde_bandwidth", None),
                         "per_model_means": {mg.name: mg.mean for mg in ensemble.models},
                         "per_model_stds": {mg.name: mg.std for mg in ensemble.models},
-                        "per_model_counts": {mg.name: mg.count for mg in ensemble.models},
+                        "per_model_counts": {mg.name: len(mg.members) for mg in ensemble.models},
                         "nws_forecast_high": nws_data.forecast_high,
                         "nws_physics_high": nws_data.physics_high,
                         "nws_current_temp": nws_data.current_temp,
