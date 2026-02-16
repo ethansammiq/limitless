@@ -49,6 +49,8 @@ from config import (
     SETTLEMENT_HOUR_ET,
     TRADE_SCORE_ENABLED,
     TRADE_SCORE_THRESHOLD,
+    WATCHLIST,
+    WATCHLIST_MIN_CONFIDENCE,
 )
 from trade_score import compute_trade_score, should_trade
 from edge_scanner_v2 import shorten_bracket_title
@@ -249,6 +251,24 @@ async def auto_trade(
         gate_desc = f"TS>={TRADE_SCORE_THRESHOLD}" if TRADE_SCORE_ENABLED else "90+ confidence"
         miss_note = f" ({len(near_misses)} near-miss)" if near_misses else ""
         logger.info("No %s setups%s. Patience is the edge.", gate_desc, miss_note)
+
+        # Log watchlist cities even when nothing is tradeable
+        for cs in city_summaries:
+            if cs["key"] not in WATCHLIST:
+                continue
+            city_opps = cs.get("opps", [])
+            if not city_opps:
+                continue
+            best = max(city_opps, key=lambda o: o.confidence_score)
+            if best.confidence_score >= WATCHLIST_MIN_CONFIDENCE:
+                short = shorten_bracket_title(best.bracket_title)
+                price = best.yes_bid if best.side == "yes" else (100 - best.yes_ask)
+                logger.info(
+                    "  👁️ WATCHLIST %s: conf=%d, %s %s @ %d¢, KDE=%.1f%%, σ=%.1f°, trend=%s",
+                    cs["key"], best.confidence_score, best.side.upper(), short, price,
+                    best.kde_prob * 100, cs.get("std", 0), cs.get("temp_trend", "?"),
+                )
+
         _write_heartbeat()
         return
 

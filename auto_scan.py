@@ -53,7 +53,10 @@ from edge_scanner_v2 import (
     compute_confidence_score,
     shorten_bracket_title,
 )
-from config import TRADE_SCORE_ENABLED, TRADE_SCORE_THRESHOLD, SETTLEMENT_HOUR_ET, STALE_PRICE_ENABLED
+from config import (
+    TRADE_SCORE_ENABLED, TRADE_SCORE_THRESHOLD, SETTLEMENT_HOUR_ET, STALE_PRICE_ENABLED,
+    WATCHLIST, WATCHLIST_MIN_CONFIDENCE,
+)
 from notifications import send_discord_embeds
 from trade_score import should_trade
 from stale_price_detector import (
@@ -169,6 +172,37 @@ def format_discord_alert(
             "description": city_text,
             "color": 0x00FF00 if any(_is_tradeable(o, h2s) for o in cs.get("opps", [])) else 0x808080,
         })
+
+    # Watchlist highlight — flag developing setups before they cross the gate
+    for cs in city_summaries:
+        city_key = cs["key"]
+        if city_key not in WATCHLIST:
+            continue
+        city_opps = cs.get("opps", [])
+        if not city_opps:
+            continue
+        best_conf = max(o.confidence_score for o in city_opps)
+        if best_conf < WATCHLIST_MIN_CONFIDENCE:
+            continue
+        best = max(city_opps, key=lambda o: o.confidence_score)
+        short = shorten_bracket_title(best.bracket_title)
+        price = best.yes_bid if best.side == "yes" else (100 - best.yes_ask)
+        ts_txt = f" | TS:{best.trade_score:.3f}" if TRADE_SCORE_ENABLED and hasattr(best, "trade_score") and best.trade_score else ""
+        watch_text = (
+            f"**Best: {best.side.upper()} {short} @ {price}¢**\n"
+            f"KDE: {best.kde_prob*100:.1f}% | Edge: {best.edge_after_fees*100:+.1f}¢\n"
+            f"Confidence: {best.confidence} ({best.confidence_score:.0f}/100){ts_txt}\n"
+            f"Ensemble: {cs['mean']:.1f}°F ±{cs['std']:.1f}° | NWS: {cs['nws_high']:.0f}°F\n"
+            f"Trend: {cs.get('temp_trend', '?')}\n"
+            f"Watching for conf→90+ at next scan window."
+        )
+        embeds.append({
+            "title": f"👁️ WATCHLIST — {cs['name']}",
+            "description": watch_text,
+            "color": 0x3498DB,  # Blue — developing, not yet tradeable
+        })
+        logger.info("WATCHLIST %s: conf=%d, best=%s %s @ %d¢, KDE=%.1f%%",
+                     city_key, best_conf, best.side, short, price, best.kde_prob * 100)
 
     # Tradeable alert (if any)
     if tradeable:
@@ -407,8 +441,15 @@ async def run_scan(city_filter: str = None, quiet: bool = False, dry_run: bool =
 
     logger.info("Log saved: %s", log_file)
 
+    # Check if any watchlist city has a notable setup
+    watchlist_active = any(
+        cs["key"] in WATCHLIST
+        and any(o.confidence_score >= WATCHLIST_MIN_CONFIDENCE for o in cs.get("opps", []))
+        for cs in city_summaries
+    )
+
     # Send Discord alert
-    if quiet and not tradeable and not stale_alerts:
+    if quiet and not tradeable and not stale_alerts and not watchlist_active:
         logger.info("Quiet mode — no tradeable opportunities, skipping Discord alert")
     else:
         embeds = format_discord_alert(all_opps, city_summaries, balance, scan_time, failed_cities, h2s)

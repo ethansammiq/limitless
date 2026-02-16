@@ -136,6 +136,16 @@ STATIONS: Dict[str, StationConfig] = {
 # Default city if none specified
 DEFAULT_CITY = "NYC"
 
+# =============================================================================
+# WATCHLIST — Cities to highlight in scans and Discord alerts
+# =============================================================================
+# When a watched city's best opportunity exceeds WATCHLIST_MIN_CONFIDENCE,
+# the scanner sends an extra highlighted Discord embed and logs extra detail.
+# Edit this set to track developing setups before they cross the 90+ gate.
+
+WATCHLIST: set[str] = {"LAX"}
+WATCHLIST_MIN_CONFIDENCE = 50  # Highlight if best opp confidence >= this
+
 
 def get_station_config(city_code: str) -> StationConfig:
     """Get station configuration for a city code. Raises KeyError if not found."""
