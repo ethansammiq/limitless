@@ -195,9 +195,11 @@ class TestExecutePeakTrade:
         monkeypatch.setattr("peak_trader.PEAK_TRADE_ENABLED", True)
         monkeypatch.setattr("peak_trader._hours_until_settlement", lambda: 5.0)
 
-        # Mock balance fetch
+        # Mock balance fetch — execute_peak_trade does `from kalshi_client import
+        # fetch_balance_quick` at call time, so the mock must target the source
+        # module (kalshi_client), not peak_trader's namespace.
         mock_balance = AsyncMock(return_value=100.0)
-        monkeypatch.setattr("peak_trader.fetch_balance_quick", mock_balance, raising=False)
+        monkeypatch.setattr("kalshi_client.fetch_balance_quick", mock_balance, raising=False)
 
         # Import at module level causes issues, so we mock the full import chain
         import peak_trader

@@ -334,6 +334,22 @@ async def run_scan(city_filter: str = None, quiet: bool = False, dry_run: bool =
                 except Exception as cal_err:
                     logger.warning("Calibration record save failed for %s: %s", city_key, cal_err)
 
+                # Save ALL signals for per-bracket probability calibration
+                try:
+                    from signal_tracker import save_signals
+                    signal_context = {
+                        "ensemble_mean": ensemble.mean,
+                        "ensemble_std": ensemble.std,
+                        "nws_forecast_high": nws_data.forecast_high,
+                        "nws_physics_high": nws_data.physics_high,
+                        "lead_time_hours": h2s,
+                    }
+                    n_signals = save_signals(city_key, opps, signal_context)
+                    if n_signals:
+                        logger.info("  %s: saved %d signals", city_key, n_signals)
+                except Exception as sig_err:
+                    logger.warning("Signal save failed for %s: %s", city_key, sig_err)
+
                 city_summaries.append({
                     "name": CITIES[city_key]["name"],
                     "key": city_key,

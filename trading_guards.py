@@ -185,10 +185,67 @@ def check_bot_window(
     return True, "OK"
 
 
+def check_upwind_shield(
+    city_key: str,
+    bracket_low: float,
+    bracket_high: float,
+    vectors: list,
+    trade_side: str = "yes",
+) -> tuple[bool, str]:
+    """Block trades when an incoming upwind front is on track to breach the bracket.
+
+    Iterates PropagationVector objects from proxy_arb_engine. A converging proxy
+    with ETA <= 240 min whose temperature falls outside the bracket boundary triggers
+    the shield.  Non-converging vectors and those without temperature data are skipped.
+    """
+    if not vectors:
+        return True, "OK (no upwind vectors)"
+
+    for v in vectors:
+        if not getattr(v, "is_converging", False):
+            continue
+        eta = getattr(v, "eta_minutes", float("inf"))
+        if eta > 240:
+            continue
+        proxy_temp = getattr(v, "proxy_temp_f", None)
+        if proxy_temp is None:
+            continue
+        proxy_name = (
+            getattr(v.proxy, "name", "proxy") if hasattr(v, "proxy") else "proxy"
+        )
+
+        if trade_side == "yes":
+            if proxy_temp < bracket_low:
+                return (
+                    False,
+                    f"SHIELD: Cold front at {proxy_name} ({proxy_temp:.1f}°F) "
+                    f"ETA {eta:.0f} min will breach floor ({bracket_low}°F)",
+                )
+            if proxy_temp >= bracket_high:
+                return (
+                    False,
+                    f"SHIELD: Warm front at {proxy_name} ({proxy_temp:.1f}°F) "
+                    f"ETA {eta:.0f} min will breach ceiling ({bracket_high}°F)",
+                )
+        elif trade_side == "no":
+            if bracket_low <= proxy_temp < bracket_high:
+                return (
+                    False,
+                    f"SHIELD: Proxy temp at {proxy_name} ({proxy_temp:.1f}°F) "
+                    f"ETA {eta:.0f} min is inside bracket ({bracket_low}–{bracket_high}°F)",
+                )
+
+    return True, "OK (upwind shield clear)"
+
+
 def run_all_pre_trade_checks(
     positions: list[dict], balance: float, city_key: str,
     new_cost: float, dsm_times_z: list[str], six_hour_z: list[str],
     series_to_city: dict[str, str] | None = None, dry_run: bool = False,
+    *,
+    proxy_vectors: list | None = None,
+    bracket_bounds: tuple[float, float] | None = None,
+    trade_side: str = "yes",
 ) -> tuple[bool, list[str]]:
     """Run all safety checks. Returns (all_passed, list_of_reasons)."""
     if dry_run:
@@ -225,5 +282,13 @@ def run_all_pre_trade_checks(
     results.append(f"{'PASS' if ok else 'FAIL'}: {reason}")
     if not ok:
         all_ok = False
+
+    if proxy_vectors is not None and bracket_bounds is not None:
+        ok, reason = check_upwind_shield(
+            city_key, bracket_bounds[0], bracket_bounds[1], proxy_vectors, trade_side,
+        )
+        results.append(f"{'PASS' if ok else 'FAIL'}: {reason}")
+        if not ok:
+            all_ok = False
 
     return all_ok, results

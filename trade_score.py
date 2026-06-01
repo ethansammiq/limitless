@@ -101,8 +101,19 @@ def _compute_weights(hours_to_settlement: float) -> tuple[float, float, float]:
     return w1, w2, w3
 
 
-def _liquidity_penalty(volume: int, spread: int) -> float:
-    """Penalize illiquid brackets that are hard to exit."""
+def _liquidity_penalty(
+    volume: int,
+    spread: int,
+    bid_depth: int = 0,
+    ask_depth: int = 0,
+    depth_grade: str = "",
+    imbalance: float = 0.0,
+    trade_side: str = "yes",
+) -> float:
+    """Penalize illiquid brackets that are hard to exit.
+
+    Enhanced with order book depth data when available.
+    """
     penalty = 0.0
 
     # Volume penalty
@@ -116,6 +127,26 @@ def _liquidity_penalty(volume: int, spread: int) -> float:
         penalty += 0.05
     elif spread > 3:
         penalty += 0.02
+
+    # ── Depth-based penalties (additive, when data available) ──
+    if bid_depth > 0 or ask_depth > 0:
+        # Can't exit easily if bid side is thin
+        if bid_depth < 50:
+            penalty += 0.05
+
+        # Hard to buy YES if ask side is thin
+        if ask_depth < 50 and trade_side == "yes":
+            penalty += 0.03
+
+        # Grade D = illiquid overall
+        if depth_grade == "D":
+            penalty += 0.08
+
+        # Imbalance opposing our direction (sellers stacking when we want YES)
+        if trade_side == "yes" and imbalance < -0.3:
+            penalty += 0.03
+        elif trade_side == "no" and imbalance > 0.3:
+            penalty += 0.03
 
     return penalty
 
@@ -140,6 +171,7 @@ def compute_trade_score(
     opp,
     hours_to_settlement: float,
     threshold: float | None = None,
+    depth: object | None = None,
 ) -> TradeScore:
     """Compute hybrid trade score for an opportunity.
 
@@ -152,6 +184,9 @@ def compute_trade_score(
         Hours until market settlement (~7 AM ET).
     threshold : float, optional
         Override for TRADE_SCORE_THRESHOLD. Defaults to config value.
+    depth : OrderBookDepth-like, optional
+        If provided, used for enhanced liquidity penalty. Must have:
+        bid_depth, ask_depth, grade, imbalance.
 
     Returns
     -------
@@ -185,7 +220,16 @@ def compute_trade_score(
 
     # ── Liquidity ──
     spread = opp.yes_ask - opp.yes_bid
-    liq_pen = _liquidity_penalty(opp.volume, spread)
+    _depth_kwargs = {}
+    if depth is not None:
+        _depth_kwargs = {
+            "bid_depth": getattr(depth, "bid_depth", 0),
+            "ask_depth": getattr(depth, "ask_depth", 0),
+            "depth_grade": getattr(depth, "grade", ""),
+            "imbalance": getattr(depth, "imbalance", 0.0),
+            "trade_side": getattr(opp, "side", "yes"),
+        }
+    liq_pen = _liquidity_penalty(opp.volume, spread, **_depth_kwargs)
 
     # ── Entry price ──
     entry_pen = _entry_price_penalty(opp.yes_bid)
@@ -201,7 +245,8 @@ def compute_trade_score(
         f"conf={opp.confidence_score:.0f} → sig={conf_sig:.3f} (w={w1:.2f})",
         f"edge={edge_cents:.1f}¢ → sig={edge_sig:.3f} (w={w2:.2f})",
         f"urgency={hours_to_settlement:.1f}h → sig={urg_sig:.3f} (w={w3:.2f})",
-        f"liquidity_penalty={liq_pen:.3f} (vol={opp.volume}, spread={spread})",
+        f"liquidity_penalty={liq_pen:.3f} (vol={opp.volume}, spread={spread})"
+        + (f" [depth: bid={getattr(depth, 'bid_depth', 0)}+ask={getattr(depth, 'ask_depth', 0)}, grade={getattr(depth, 'grade', '?')}]" if depth else ""),
         f"entry_price_penalty={entry_pen:.3f} (bid={opp.yes_bid}¢)",
     ]
     if tradeable:

@@ -22,3 +22,7 @@ structlog~=24.1
 
 # Terminal formatting
 rich~=13.7
+
+# Anthropic SDK for Claude Opus 4.7 (LLM doc synthesis)
+anthropic~=0.39
+

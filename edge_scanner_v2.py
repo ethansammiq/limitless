@@ -48,16 +48,19 @@ logger = get_logger(__name__)
 # ─── Configuration ─────────────────────────────────────
 
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"  # HRRR + NBM deterministic
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # All available ensemble models on Open-Meteo (free tier)
 # API param name → suffix in response keys
 ENSEMBLE_MODELS = [
-    "ecmwf_ifs025",       # ECMWF IFS physics-based (51 members) → key suffix: ecmwf_ifs025_ensemble
-    "ecmwf_aifs025",      # ECMWF AIFS AI model (51 members) ← FRONTIER → key suffix: ecmwf_aifs025_ensemble
-    "gfs_seamless",       # GFS (31 members) → key suffix: ncep_gefs_seamless
-    "icon_seamless",      # ICON (40 members) → key suffix: icon_seamless_eps
-    "gem_global",         # GEM Canada (21 members) → key suffix: gem_global_ensemble
+    "ecmwf_ifs025",                # ECMWF IFS physics-based (51 members)
+    "ecmwf_aifs025",               # ECMWF AIFS AI model (51 members) ← FRONTIER
+    "gfs_seamless",                # GFS (31 members)
+    "icon_seamless",               # ICON (40 members)
+    "gem_global",                  # GEM Canada (21 members)
+    "bom_access_global_ensemble",  # BOM ACCESS-GE Australia (18 members)
+    "ukmo_global_ensemble_20km",   # UK Met MOGREPS-G (18 members)
 ]
 
 # Map API model name → response key suffix (Open-Meteo renames them)
@@ -67,16 +70,20 @@ MODEL_KEY_SUFFIXES = {
     "gfs_seamless": "ncep_gefs_seamless",
     "icon_seamless": "icon_seamless_eps",
     "gem_global": "gem_global_ensemble",
+    "bom_access_global_ensemble": "bom_access_global_ensemble",
+    "ukmo_global_ensemble_20km": "ukmo_global_ensemble_20km",
 }
 
 # Model weights — defaults based on general verification performance
 # Overridden by calibration.py when backtest data is available
 _DEFAULT_MODEL_WEIGHTS = {
-    "ecmwf_aifs025": 1.30,   # AI model — 10% better than IFS per ECMWF
-    "ecmwf_ifs025": 1.15,    # Gold standard physics model
-    "gfs_seamless": 1.00,    # Baseline
-    "icon_seamless": 0.95,   # Slightly less skillful at US sites
-    "gem_global": 0.85,      # Lower resolution, less verification data
+    "ecmwf_aifs025": 1.30,                # AI model — 10% better than IFS per ECMWF
+    "ecmwf_ifs025": 1.15,                 # Gold standard physics model
+    "gfs_seamless": 1.00,                 # Baseline
+    "icon_seamless": 0.95,                # Slightly less skillful at US sites
+    "gem_global": 0.85,                   # Lower resolution, less verification data
+    "bom_access_global_ensemble": 0.80,   # 40km, 6-hourly — less US skill
+    "ukmo_global_ensemble_20km": 0.85,    # 20km global, decent skill
 }
 
 # Load calibrated params if available (falls back to defaults gracefully)
@@ -121,6 +128,24 @@ except ImportError:
     pass  # model_bias.py not available
 except Exception as e:
     logger.debug("Bias correction load failed (using defaults): %s", e)
+
+# Also load Previous Runs API corrections (from bias_collector.py output)
+# These take precedence over backtest-derived corrections when available.
+_PREV_RUNS_CORR_FILE = Path(__file__).resolve().parent / "model_bias_corrections.json"
+try:
+    if _PREV_RUNS_CORR_FILE.exists():
+        import json as _json
+        _prev_corr = _json.loads(_PREV_RUNS_CORR_FILE.read_text())
+        _prev_count = 0
+        for _key, _val in _prev_corr.items():
+            _parts = _key.split("|")
+            if len(_parts) == 2:
+                _BIAS_CORRECTIONS[(_parts[0], _parts[1])] = _val
+                _prev_count += 1
+        if _prev_count:
+            logger.info("Loaded %d Previous Runs API bias corrections", _prev_count)
+except Exception as e:
+    logger.debug("Previous Runs corrections load failed: %s", e)
 
 CITIES = {
     code: {
@@ -175,6 +200,13 @@ class EnsembleV2:
 
 
 @dataclass
+class HRRRNBMData:
+    """Deterministic high-res forecasts: HRRR (3km) + NBM (2.5km, bias-corrected)."""
+    hrrr_high: float = 0.0  # HRRR daily max from hourly temps
+    nbm_high: float = 0.0   # NBM daily max from hourly temps
+
+
+@dataclass
 class NWSData:
     forecast_high: float = 0.0
     current_temp: float = 0.0
@@ -190,6 +222,21 @@ class NWSData:
     physics_high: float = 0.0
     temp_trend: str = ""  # "running_hot", "running_cold", "on_track"
     hourly_temps: list[tuple] = field(default_factory=list)
+
+
+@dataclass
+class OrderBookDepth:
+    """Order book depth metrics for a single bracket."""
+    ticker: str = ""
+    bid_depth: int = 0        # Total contracts resting on bid side
+    ask_depth: int = 0        # Total contracts resting on ask side
+    bid_levels: int = 0       # Number of price levels with bids
+    ask_levels: int = 0       # Number of price levels with asks
+    spread: int = 0           # Best ask - best bid (cents)
+    bid_wall: int = 0         # Largest single bid quantity
+    ask_wall: int = 0         # Largest single ask quantity
+    imbalance: float = 0.0    # (bid_depth - ask_depth) / (bid+ask), range -1 to +1
+    grade: str = "?"          # A/B/C/D liquidity grade
 
 
 @dataclass
@@ -225,180 +272,29 @@ class Opportunity:
     trade_score_components: dict = field(default_factory=dict)
 
 
-# ─── KDE Engine (vectorized with numpy) ───────────────
+# ─── KDE Engine — imported from utils.stats ───────────
 
-def kde_probability(members: list[float], low: float, high: float, bandwidth: float = None,
-                    n_points: int = 200, weights: list[float] = None,
-                    min_bandwidth: float = 0.3) -> float:
-    """
-    Compute bracket probability using Gaussian KDE (numpy-vectorized).
-
-    Smooths the discrete ensemble members into a continuous PDF,
-    then integrates over the bracket range using the trapezoidal rule.
-
-    If `weights` is provided, each kernel is weighted proportionally
-    (e.g., AIFS members get 1.30x weight). This avoids resampling artifacts.
-
-    ~50x faster than the pure-Python version for 200+ members.
-    """
-    if not members or len(members) < 2:
-        return 0.0
-
-    m = np.asarray(members, dtype=np.float64)
-
-    # Silverman's rule of thumb for bandwidth selection
-    if bandwidth is None:
-        std = np.std(m, ddof=1)
-        if std == 0:
-            return 1.0 if low <= m[0] < high else 0.0
-        bandwidth = 1.06 * std * len(m) ** (-0.2)
-    # Floor: prevent under-smoothing with very tight ensembles
-    # Default 0.3°F for weather; CPI passes min_bandwidth=0.005 for % scale
-    bandwidth = max(min_bandwidth, bandwidth)
-
-    # Clamp integration range
-    range_low = max(low, m.min() - 4 * bandwidth)
-    range_high = min(high, m.max() + 4 * bandwidth)
-
-    if range_low >= range_high:
-        if low <= m.min() and high >= m.max():
-            return 1.0
-        return 0.0
-
-    # Vectorized KDE: evaluate density at all x-points at once
-    # x_grid shape: (n_points+1,), members shape: (n_members,)
-    # Broadcasting: (n_points+1, 1) - (1, n_members) → (n_points+1, n_members)
-    x_grid = np.linspace(range_low, range_high, n_points + 1)
-    z = (x_grid[:, np.newaxis] - m[np.newaxis, :]) / bandwidth
-    kernel_vals = np.exp(-0.5 * z * z) / (bandwidth * np.sqrt(2 * np.pi))
-
-    if weights is not None and len(weights) == len(members):
-        # Weighted KDE: each kernel contributes proportionally to its model weight
-        w = np.asarray(weights, dtype=np.float64)
-        w_total = w.sum()
-        if w_total > 0:
-            w = w / w_total  # Normalize to sum to 1
-        else:
-            w = np.ones_like(w) / len(w)  # Fallback: equal weights if all zero
-        density = (kernel_vals * w[np.newaxis, :]).sum(axis=1)
-    else:
-        density = kernel_vals.mean(axis=1)  # Unweighted: equal contribution
-
-    # Trapezoidal integration
-    # np.trapezoid (numpy ≥2.0) replaces deprecated np.trapz
-    _trapz = getattr(np, "trapezoid", None) or np.trapz
-    prob = float(_trapz(density, x_grid))
-    return min(1.0, max(0.0, prob))
-
-
-def _detect_bimodal(members_sorted: np.ndarray, gap_threshold: float = 3.0) -> bool:
-    """Detect bimodality in ensemble distribution.
-
-    Uses a gap-based heuristic: if the largest gap between adjacent sorted
-    members (in the middle 60% of the distribution) exceeds `gap_threshold`
-    degrees AND is at least 1.5× the median gap, the distribution is bimodal.
-
-    This catches the common case where AIFS clusters around 35°F and IFS
-    clusters around 31°F — the gap between clusters will be much larger
-    than the within-cluster spacing.
-
-    Args:
-        members_sorted: Pre-sorted numpy array of ensemble values.
-        gap_threshold: Minimum gap size (°F) to consider bimodal.
-
-    Returns:
-        True if distribution appears bimodal.
-    """
-    n = len(members_sorted)
-    if n < 20:
-        return False
-
-    # Focus on middle 60% to avoid tail outliers
-    lo_idx = int(n * 0.2)
-    hi_idx = int(n * 0.8)
-    middle = members_sorted[lo_idx:hi_idx]
-
-    if len(middle) < 5:
-        return False
-
-    gaps = np.diff(middle)
-    max_gap = float(gaps.max())
-    median_gap = float(np.median(gaps))
-
-    # Bimodal if: largest gap is big enough AND clearly anomalous
-    return max_gap >= gap_threshold and (median_gap == 0 or max_gap >= 1.5 * median_gap)
+from utils.stats import kde_probability, _detect_bimodal, build_member_weights
+from utils.stats import silverman_bandwidth as _silverman_bandwidth_base
 
 
 def silverman_bandwidth(members: list[float], min_bandwidth: float = 0.3) -> float:
-    """Adaptive bandwidth: Silverman's rule with bimodal correction.
-
-    Uses Silverman's rule of thumb as baseline, then checks for bimodality.
-    When the ensemble splits into two clusters (e.g., AIFS vs IFS disagree
-    by 3+°F), Silverman over-smooths because it assumes unimodal Gaussian.
-    In that case, we reduce bandwidth by 40% to preserve the two peaks.
-
-    Args:
-        members: Ensemble member values.
-        min_bandwidth: Floor to prevent under-smoothing. Default 0.3°F for weather;
-                       CPI should pass 0.005 for percentage-scale data.
-    """
-    if len(members) < 2:
-        return 1.0
-    m = np.asarray(members, dtype=np.float64)
-    m_sorted = np.sort(m)
-    std = float(np.std(m, ddof=1))
-    bw = 1.06 * std * len(m) ** (-0.2)
-
-    # Bimodal correction: reduce bandwidth to prevent over-smoothing
-    if _detect_bimodal(m_sorted):
-        bw *= 0.6  # 40% narrower — preserves two distinct peaks
-
-    # Apply calibration factor from backtest data (1.0 = no correction)
-    bw *= _BANDWIDTH_FACTOR
-    return max(min_bandwidth, bw)
+    """Silverman bandwidth with calibration factor applied (from backtest data)."""
+    return _silverman_bandwidth_base(
+        members, min_bandwidth=min_bandwidth, bandwidth_factor=_BANDWIDTH_FACTOR
+    )
 
 
 # ─── Model Weighting ──────────────────────────────────
 
 def weight_ensemble_members(models: list[ModelGroup]) -> list[float]:
-    """
-    Create a weighted member list (backward-compatible return for stats).
-
-    Returns all raw members sorted. Use build_member_weights() for
-    per-member KDE weights that avoid resampling artifacts.
-    """
+    """Backward-compatible helper: returns flat sorted member list."""
     all_members = []
     for mg in models:
         if not mg.members:
             continue
         all_members.extend(mg.members)
     return sorted(all_members)
-
-
-def build_member_weights(models: list[ModelGroup]) -> tuple[list[float], list[float]]:
-    """
-    Build parallel (members, weights) arrays for weighted KDE.
-
-    Each member gets a weight equal to its model weight. The KDE then
-    weights each kernel proportionally, avoiding duplication artifacts
-    from the old resampling approach.
-
-    Returns (sorted_members, corresponding_weights).
-    """
-    pairs = []
-    for mg in models:
-        if not mg.members:
-            continue
-        for val in mg.members:
-            pairs.append((val, mg.weight))
-
-    if not pairs:
-        return [], []
-
-    pairs.sort(key=lambda x: x[0])
-    members = [p[0] for p in pairs]
-    weights = [p[1] for p in pairs]
-    return members, weights
 
 
 # ─── Fetchers ──────────────────────────────────────────
@@ -508,6 +404,58 @@ async def fetch_ensemble_v2(session: aiohttp.ClientSession, city_key: str, targe
 
     except Exception as e:
         logger.error("Ensemble fetch failed for %s: %s", city_key, e)
+
+    return result
+
+
+async def fetch_hrrr_nbm(session: aiohttp.ClientSession, city_key: str, target_date: str) -> HRRRNBMData:
+    """Fetch HRRR (3km) and NBM (2.5km, bias-corrected) deterministic daily max.
+
+    Both are hourly-updated US models served via Open-Meteo forecast API.
+    HRRR: best short-range model, 18h horizon.
+    NBM: NOAA's post-processed blend of ~40 models, already bias-corrected.
+    """
+    city = CITIES[city_key]
+    result = HRRRNBMData()
+
+    params = {
+        "latitude": city["lat"],
+        "longitude": city["lon"],
+        "models": "ncep_hrrr_conus,ncep_nbm_conus",
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "start_date": target_date,
+        "end_date": target_date,
+    }
+
+    try:
+        async with session.get(FORECAST_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.debug("HRRR/NBM returned %d for %s: %s", resp.status, city_key, body[:200])
+                return result
+            data = await resp.json()
+
+        hourly = data.get("hourly", {})
+
+        # HRRR temps — key: temperature_2m_ncep_hrrr_conus (or temperature_2m if single model)
+        hrrr_temps = hourly.get("temperature_2m_ncep_hrrr_conus") or []
+        hrrr_valid = [t for t in hrrr_temps if t is not None]
+        if hrrr_valid:
+            result.hrrr_high = max(hrrr_valid)
+
+        # NBM temps — key: temperature_2m_ncep_nbm_conus
+        nbm_temps = hourly.get("temperature_2m_ncep_nbm_conus") or []
+        nbm_valid = [t for t in nbm_temps if t is not None]
+        if nbm_valid:
+            result.nbm_high = max(nbm_valid)
+
+        if result.hrrr_high or result.nbm_high:
+            logger.debug("HRRR/NBM %s: HRRR=%.1f°F NBM=%.1f°F",
+                         city_key, result.hrrr_high, result.nbm_high)
+
+    except Exception as e:
+        logger.debug("HRRR/NBM fetch failed for %s: %s", city_key, e)
 
     return result
 
@@ -683,6 +631,90 @@ async def fetch_kalshi_brackets(session: aiohttp.ClientSession, city_key: str) -
         return []
 
 
+async def fetch_orderbook_depth(
+    session: aiohttp.ClientSession,
+    tickers: list[str],
+) -> dict[str, OrderBookDepth]:
+    """Fetch order book depth for a list of tickers and compute liquidity metrics.
+
+    Calls GET /markets/{ticker}/orderbook?depth=10 for each ticker in parallel.
+    Returns dict keyed by ticker → OrderBookDepth.
+    Non-critical: returns empty dict on total failure.
+    """
+    if not tickers:
+        return {}
+
+    depth_map: dict[str, OrderBookDepth] = {}
+
+    async def _fetch_one(ticker: str) -> tuple[str, OrderBookDepth]:
+        ob = OrderBookDepth(ticker=ticker)
+        try:
+            url = f"{KALSHI_BASE}/markets/{ticker}/orderbook?depth=10"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return ticker, ob
+                data = await resp.json()
+
+            book = data.get("orderbook", data)  # Sometimes nested, sometimes flat
+            yes_bids = book.get("yes", [])  # [[price, qty], ...]
+            no_bids = book.get("no", [])    # [[price, qty], ...]
+
+            # Bid side (YES bids)
+            if yes_bids:
+                ob.bid_levels = len(yes_bids)
+                ob.bid_depth = sum(entry[1] for entry in yes_bids)
+                ob.bid_wall = max(entry[1] for entry in yes_bids)
+                best_bid = max(entry[0] for entry in yes_bids)
+            else:
+                best_bid = 0
+
+            # Ask side (derived from NO bids: yes_ask = 100 - no_bid)
+            if no_bids:
+                ob.ask_levels = len(no_bids)
+                ob.ask_depth = sum(entry[1] for entry in no_bids)
+                ob.ask_wall = max(entry[1] for entry in no_bids)
+                best_no_bid = max(entry[0] for entry in no_bids)
+                best_ask = 100 - best_no_bid
+            else:
+                best_ask = 100
+
+            # Spread
+            ob.spread = max(0, best_ask - best_bid) if best_bid > 0 else 99
+
+            # Imbalance: positive = buyers stacking, negative = sellers stacking
+            total = ob.bid_depth + ob.ask_depth
+            if total > 0:
+                ob.imbalance = round((ob.bid_depth - ob.ask_depth) / total, 2)
+
+            # Liquidity grade
+            if total > 500 and ob.spread <= 2 and ob.bid_levels >= 3 and ob.ask_levels >= 3:
+                ob.grade = "A"
+            elif total > 200 and ob.spread <= 3:
+                ob.grade = "B"
+            elif total > 50 and ob.spread <= 5:
+                ob.grade = "C"
+            else:
+                ob.grade = "D"
+
+        except Exception as e:
+            logger.debug("Orderbook fetch failed for %s: %s", ticker, e)
+
+        return ticker, ob
+
+    # Fetch all in parallel (small batches with stagger for rate limiting)
+    batch_size = 8
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        results = await asyncio.gather(*[_fetch_one(t) for t in batch], return_exceptions=True)
+        for r in results:
+            if isinstance(r, tuple) and len(r) == 2:
+                depth_map[r[0]] = r[1]
+        if i + batch_size < len(tickers):
+            await asyncio.sleep(0.2)  # Small stagger between batches
+
+    return depth_map
+
+
 # ─── Analysis ──────────────────────────────────────────
 
 def get_bid(mkt: dict) -> int:
@@ -727,7 +759,8 @@ def is_tomorrow_ticker(ticker: str, tomorrow_date) -> bool:
 
 
 def compute_confidence_score(ensemble: EnsembleV2, nws: NWSData, bracket_low: float = 0,
-                             bracket_high: float = 999, lead_hours: float = 18.0) -> tuple[str, float, list[str]]:
+                             bracket_high: float = 999, lead_hours: float = 18.0,
+                             hrrr_nbm: HRRRNBMData = None) -> tuple[str, float, list[str]]:
     """
     Multi-factor confidence scoring — calibrated for 90+ threshold.
 
@@ -882,6 +915,32 @@ def compute_confidence_score(ensemble: EnsembleV2, nws: NWSData, bracket_low: fl
     else:
         reasons.append(f"Lead time {lead_hours:.0f}h (long)")
 
+    # ── Factor 7: HRRR/NBM agreement with ensemble ── max +5
+    # HRRR is the best short-range model; NBM is NOAA's bias-corrected blend.
+    # When both agree with ensemble, it's a strong validation signal.
+    if hrrr_nbm and ensemble.mean > 0:
+        _hrrr_checks = []
+        if hrrr_nbm.hrrr_high > 0:
+            hrrr_div = abs(hrrr_nbm.hrrr_high - ensemble.mean)
+            _hrrr_checks.append(("HRRR", hrrr_div, hrrr_nbm.hrrr_high))
+        if hrrr_nbm.nbm_high > 0:
+            nbm_div = abs(hrrr_nbm.nbm_high - ensemble.mean)
+            _hrrr_checks.append(("NBM", nbm_div, hrrr_nbm.nbm_high))
+        if _hrrr_checks:
+            avg_div = sum(d for _, d, _ in _hrrr_checks) / len(_hrrr_checks)
+            labels = ", ".join(f"{n}={t:.1f}°F (Δ{d:.1f})" for n, d, t in _hrrr_checks)
+            if avg_div < 1.0:
+                score += 5
+                reasons.append(f"HRRR/NBM aligned with ensemble ({labels}) ✓")
+            elif avg_div < 2.0:
+                score += 2
+                reasons.append(f"HRRR/NBM close to ensemble ({labels})")
+            elif avg_div > 3.0:
+                score -= 5
+                reasons.append(f"HRRR/NBM DIVERGE from ensemble ({labels}) ⚠")
+            else:
+                reasons.append(f"HRRR/NBM moderate divergence ({labels})")
+
     # Clamp
     score = max(0, min(100, score))
 
@@ -984,6 +1043,8 @@ def analyze_opportunities_v2(
     brackets: list[dict],
     balance: float,
     existing_exposure: dict = None,
+    hrrr_nbm: HRRRNBMData = None,
+    depth_map: dict[str, OrderBookDepth] = None,
 ) -> list[Opportunity]:
     """Analyze brackets using KDE probabilities and weighted ensemble.
 
@@ -1000,6 +1061,28 @@ def analyze_opportunities_v2(
         hour=SETTLEMENT_HOUR_ET, tzinfo=ZoneInfo("America/New_York"))
     lead_hours = max(0, (settlement_time - datetime.now(ZoneInfo("America/New_York"))).total_seconds() / 3600)
 
+    # ── HRRR pseudo-member injection ──
+    # HRRR is deterministic (1 value), so inject as pseudo-members to give it
+    # KDE presence without dominating 230+ real ensemble members.
+    # Weight scales with lead time: HRRR is best < 8h out.
+    _hrrr_members = list(ensemble.weighted_members)  # Copy
+    _hrrr_weights = list(ensemble.member_weights)
+    _hrrr_bw = ensemble.kde_bandwidth
+    if hrrr_nbm and hrrr_nbm.hrrr_high > 0 and ensemble.weighted_members:
+        hrrr_w = 2.0 if lead_hours < 8 else 1.5
+        hrrr_n = 8  # 8 pseudo-members × weight → ~12-16 effective members
+        for _ in range(hrrr_n):
+            _hrrr_members.append(hrrr_nbm.hrrr_high)
+            _hrrr_weights.append(hrrr_w)
+        # Re-sort for KDE (member order matters for kernel placement)
+        pairs = sorted(zip(_hrrr_members, _hrrr_weights))
+        _hrrr_members = [p[0] for p in pairs]
+        _hrrr_weights = [p[1] for p in pairs]
+        # Recalculate bandwidth with augmented members
+        _hrrr_bw = silverman_bandwidth(_hrrr_members)
+        logger.debug("HRRR injection: +%d pseudo @ %.1f°F w=%.1f → %d total effective members",
+                      hrrr_n, hrrr_nbm.hrrr_high, hrrr_w, len(_hrrr_members))
+
     opps = []
     for mkt in brackets:
         ticker = mkt.get("ticker", "")
@@ -1015,12 +1098,12 @@ def analyze_opportunities_v2(
         yes_ask = mkt.get("yes_ask", 0)
         volume = mkt.get("volume", 0)
 
-        # KDE probability (weighted members with per-member model weights)
+        # KDE probability (augmented with HRRR pseudo-members if available)
         kde_prob = kde_probability(
-            ensemble.weighted_members, low, high,
-            bandwidth=ensemble.kde_bandwidth,
-            weights=ensemble.member_weights,
-        ) if ensemble.weighted_members else 0
+            _hrrr_members, low, high,
+            bandwidth=_hrrr_bw,
+            weights=_hrrr_weights,
+        ) if _hrrr_members else 0
 
         # Histogram probability (weighted, for comparison)
         if ensemble.weighted_members and ensemble.member_weights:
@@ -1060,7 +1143,8 @@ def analyze_opportunities_v2(
 
         # ── Per-bracket confidence scoring (uses bracket bounds + lead time) ──
         confidence_label, confidence_score, _ = compute_confidence_score(
-            ensemble, nws, bracket_low=low, bracket_high=high, lead_hours=lead_hours
+            ensemble, nws, bracket_low=low, bracket_high=high, lead_hours=lead_hours,
+            hrrr_nbm=hrrr_nbm,
         )
 
         # ── Risk Management Gates ──
@@ -1159,7 +1243,8 @@ def analyze_opportunities_v2(
         # Compute hybrid trade score
         try:
             from trade_score import compute_trade_score as _compute_ts
-            ts = _compute_ts(opp, lead_hours)
+            _opp_depth = depth_map.get(opp.ticker) if depth_map else None
+            ts = _compute_ts(opp, lead_hours, depth=_opp_depth)
             opp.trade_score = round(ts.score, 4)
             opp.trade_score_components = {
                 "confidence_signal": round(ts.confidence_signal, 4),
@@ -1219,12 +1304,22 @@ def print_model_breakdown(ensemble: EnsembleV2):
             print(f"  └─ ✗ Models DISAGREE strongly (spread {spread:.1f}°F)")
 
 
+def _ticker_to_title(ticker: str, brackets: list[dict]) -> str:
+    """Look up a bracket title from its ticker."""
+    for m in brackets:
+        if m.get("ticker") == ticker:
+            return m.get("title", "") or m.get("subtitle", "") or ticker
+    return ticker
+
+
 def print_city_report_v2(
     city_key: str,
     ensemble: EnsembleV2,
     nws: NWSData,
     brackets: list[dict],
     opps: list[Opportunity],
+    hrrr_nbm: HRRRNBMData = None,
+    depth_map: dict[str, OrderBookDepth] = None,
 ):
     city = CITIES[city_key]
     tz = ZoneInfo(city["tz"])
@@ -1234,7 +1329,7 @@ def print_city_report_v2(
     settlement_time = datetime.combine(tomorrow, datetime.min.time()).replace(
         hour=SETTLEMENT_HOUR_ET, tzinfo=ZoneInfo("America/New_York"))
     _lead_hours = max(0, (settlement_time - datetime.now(ZoneInfo("America/New_York"))).total_seconds() / 3600)
-    conf_label, conf_score, conf_reasons = compute_confidence_score(ensemble, nws, lead_hours=_lead_hours)
+    conf_label, conf_score, conf_reasons = compute_confidence_score(ensemble, nws, lead_hours=_lead_hours, hrrr_nbm=hrrr_nbm)
 
     print(f"\n{'='*72}")
     print(f"  {city['name'].upper()} — {tomorrow.strftime('%A %B %d, %Y')}")
@@ -1272,6 +1367,17 @@ def print_city_report_v2(
             div = nws.forecast_high - ensemble.mean
             print(f"  └─ NWS vs Ensemble: {div:+.1f}°F {'⚠ DIVERGENT' if abs(div) > 2 else '✓ aligned'}")
 
+    # HRRR / NBM deterministic models
+    if hrrr_nbm and (hrrr_nbm.hrrr_high > 0 or hrrr_nbm.nbm_high > 0):
+        print(f"\n  HIGH-RES DETERMINISTIC")
+        if hrrr_nbm.hrrr_high > 0:
+            hrrr_div = hrrr_nbm.hrrr_high - ensemble.mean if ensemble.mean > 0 else 0
+            print(f"  ├─ HRRR (3km):  {hrrr_nbm.hrrr_high:.1f}°F  (Δ{hrrr_div:+.1f} vs ensemble)")
+        if hrrr_nbm.nbm_high > 0:
+            nbm_div = hrrr_nbm.nbm_high - ensemble.mean if ensemble.mean > 0 else 0
+            nbm_nws_div = hrrr_nbm.nbm_high - nws.forecast_high if nws.forecast_high > 0 else 0
+            print(f"  └─ NBM (2.5km): {hrrr_nbm.nbm_high:.1f}°F  (Δ{nbm_div:+.1f} vs ensemble, Δ{nbm_nws_div:+.1f} vs NWS)")
+
     # Confidence breakdown
     if conf_reasons:
         print(f"\n  CONFIDENCE FACTORS")
@@ -1283,19 +1389,70 @@ def print_city_report_v2(
     # Bot risk
     print(f"\n  ⚡ BOT RISK: {bot_risk}")
 
+    # Order book intelligence
+    if depth_map:
+        tmrw_depths = [d for t, d in depth_map.items() if d.bid_depth + d.ask_depth > 0]
+        if tmrw_depths:
+            total_contracts = sum(d.bid_depth + d.ask_depth for d in tmrw_depths)
+            most_liquid = max(tmrw_depths, key=lambda d: d.bid_depth + d.ask_depth)
+            least_liquid = min(tmrw_depths, key=lambda d: d.bid_depth + d.ask_depth)
+            ml_total = most_liquid.bid_depth + most_liquid.ask_depth
+            ll_total = least_liquid.bid_depth + least_liquid.ask_depth
+            ml_short = shorten_bracket_title(_ticker_to_title(most_liquid.ticker, brackets))
+            ll_short = shorten_bracket_title(_ticker_to_title(least_liquid.ticker, brackets))
+
+            print(f"\n  ORDER BOOK INTELLIGENCE")
+            print(f"  ├─ Total market depth: {total_contracts:,} contracts across {len(tmrw_depths)} brackets")
+            print(f"  ├─ Most liquid:  {ml_short} ({ml_total:,} contracts, spread {most_liquid.spread}¢, grade {most_liquid.grade})")
+            print(f"  ├─ Least liquid: {ll_short} ({ll_total:,} contracts, spread {least_liquid.spread}¢, grade {least_liquid.grade})")
+
+            # Find strongest imbalance signal
+            imb_sorted = sorted(tmrw_depths, key=lambda d: abs(d.imbalance), reverse=True)
+            top_imb = imb_sorted[0]
+            if abs(top_imb.imbalance) > 0.2:
+                imb_title = shorten_bracket_title(_ticker_to_title(top_imb.ticker, brackets))
+                if top_imb.imbalance > 0:
+                    print(f"  ├─ Imbalance signal: {imb_title} shows {top_imb.imbalance:+.2f} bid stacking → buyers loading YES")
+                else:
+                    print(f"  ├─ Imbalance signal: {imb_title} shows {top_imb.imbalance:+.2f} ask stacking → sellers loading NO")
+            else:
+                print(f"  ├─ Imbalance signal: balanced across all brackets (max |imb| = {abs(top_imb.imbalance):.2f})")
+
+            # Fair value gaps: find brackets with very thin ask side
+            thin_asks = [d for d in tmrw_depths if d.ask_depth < 50 and d.bid_depth > 100]
+            thin_bids = [d for d in tmrw_depths if d.bid_depth < 50 and d.ask_depth > 100]
+            if thin_asks:
+                ta = thin_asks[0]
+                ta_title = shorten_bracket_title(_ticker_to_title(ta.ticker, brackets))
+                print(f"  └─ Fair value gap: {ta_title} thin ask side ({ta.ask_depth} contracts) — slippage risk on YES entry")
+            elif thin_bids:
+                tb = thin_bids[0]
+                tb_title = shorten_bracket_title(_ticker_to_title(tb.ticker, brackets))
+                print(f"  └─ Fair value gap: {tb_title} thin bid side ({tb.bid_depth} contracts) — slippage risk on exit")
+            else:
+                print(f"  └─ No significant fair value gaps detected")
+
     # Brackets with KDE probabilities
+    if depth_map is None:
+        depth_map = {}
     tomorrow_brackets = [m for m in brackets if is_tomorrow_ticker(m.get("ticker", ""), tomorrow)]
     if tomorrow_brackets:
         bracket_sum = sum(get_bid(m) for m in tomorrow_brackets)
+        has_depth = bool(depth_map)
         print(f"\n  BRACKETS ({len(tomorrow_brackets)} markets, Σbid={bracket_sum}¢)")
-        print(f"  {'Bracket':<16} {'Bid':>5} {'Ask':>5} {'KDE':>6} {'Hist':>5} {'Edge':>8} {'Vol':>8}")
-        print(f"  {'─'*16} {'─'*5} {'─'*5} {'─'*6} {'─'*5} {'─'*8} {'─'*8}")
+        if has_depth:
+            print(f"  {'Bracket':<16} {'Bid':>5} {'Ask':>5} {'KDE':>6} {'Hist':>5} {'Edge':>8} {'Vol':>8} {'BidDp':>6} {'AskDp':>6} {'Imb':>5} {'Liq':>3}")
+            print(f"  {'─'*16} {'─'*5} {'─'*5} {'─'*6} {'─'*5} {'─'*8} {'─'*8} {'─'*6} {'─'*6} {'─'*5} {'─'*3}")
+        else:
+            print(f"  {'Bracket':<16} {'Bid':>5} {'Ask':>5} {'KDE':>6} {'Hist':>5} {'Edge':>8} {'Vol':>8}")
+            print(f"  {'─'*16} {'─'*5} {'─'*5} {'─'*6} {'─'*5} {'─'*8} {'─'*8}")
 
         for mkt in sorted(tomorrow_brackets, key=lambda x: x.get("title", "")):
             title = mkt.get("title", "") or mkt.get("subtitle", "")
             bid = get_bid(mkt)
             ask = mkt.get("yes_ask", 0)
             vol = mkt.get("volume", 0)
+            ticker = mkt.get("ticker", "")
 
             low, high, _ = parse_bracket_range(title)
             kde_p = kde_probability(ensemble.weighted_members, low, high, ensemble.kde_bandwidth, weights=ensemble.member_weights) * 100 if ensemble.weighted_members else 0
@@ -1312,7 +1469,12 @@ def print_city_report_v2(
 
             # Shorten title for display
             short = shorten_bracket_title(title)
-            print(f"  {short:<16} {bid:>4}¢ {ask:>4}¢ {kde_p:>5.1f}% {hist_p:>4.0f}% {edge:>+7.1f}¢{marker} {vol:>7,}")
+            if has_depth and ticker in depth_map:
+                d = depth_map[ticker]
+                imb_str = f"{d.imbalance:+.2f}" if d.bid_depth + d.ask_depth > 0 else "  —"
+                print(f"  {short:<16} {bid:>4}¢ {ask:>4}¢ {kde_p:>5.1f}% {hist_p:>4.0f}% {edge:>+7.1f}¢{marker} {vol:>7,} {d.bid_depth:>6,} {d.ask_depth:>6,} {imb_str:>5} {d.grade:>3}")
+            else:
+                print(f"  {short:<16} {bid:>4}¢ {ask:>4}¢ {kde_p:>5.1f}% {hist_p:>4.0f}% {edge:>+7.1f}¢{marker} {vol:>7,}")
 
     # Opportunities
     if opps:
@@ -1341,6 +1503,13 @@ def print_city_report_v2(
                 print(f"      TradeScore: {opp.trade_score:.3f} ({ts_label})")
             if opp.strategies:
                 print(f"      Strategies: {', '.join(opp.strategies)}")
+            if depth_map and opp.ticker in depth_map:
+                d = depth_map[opp.ticker]
+                dt = d.bid_depth + d.ask_depth
+                if dt > 0:
+                    print(f"      Depth:      Bid={d.bid_depth:,} Ask={d.ask_depth:,} (Imb: {d.imbalance:+.2f}, Grade: {d.grade})")
+                    if d.bid_wall > 0 or d.ask_wall > 0:
+                        print(f"      Walls:      Bid wall={d.bid_wall:,}  Ask wall={d.ask_wall:,}")
             print(f"      Rationale:  {opp.rationale}")
     else:
         print(f"\n  No opportunities above threshold.")
@@ -1530,30 +1699,40 @@ async def scan(city_filter: str = None, show_timing: bool = False):
                 ens_task = fetch_ensemble_v2(session, city_key, target_date_str)
                 nws_task = fetch_nws(session, city_key, tomorrow)
                 mkt_task = fetch_kalshi_brackets(session, city_key)
+                hrrr_task = fetch_hrrr_nbm(session, city_key, target_date_str)
 
-                results = await asyncio.gather(ens_task, nws_task, mkt_task, return_exceptions=True)
+                results = await asyncio.gather(ens_task, nws_task, mkt_task, hrrr_task, return_exceptions=True)
 
                 # Check for exceptions in any fetch — each result must be typed correctly
-                fetch_labels = ["ensemble", "NWS", "brackets"]
+                fetch_labels = ["ensemble", "NWS", "brackets", "HRRR/NBM"]
                 error_msgs = []
                 for i, r in enumerate(results):
                     if isinstance(r, BaseException):
-                        error_msgs.append(f"{fetch_labels[i]}: {type(r).__name__}: {r}")
+                        # HRRR/NBM failure is non-critical — log but don't block
+                        if fetch_labels[i] == "HRRR/NBM":
+                            logger.debug("HRRR/NBM fetch failed for %s (non-critical): %s", city_key, r)
+                            results[i] = HRRRNBMData()  # Fallback to empty
+                        else:
+                            error_msgs.append(f"{fetch_labels[i]}: {type(r).__name__}: {r}")
                 if error_msgs:
                     raise RuntimeError(f"Fetch errors: {'; '.join(error_msgs)}")
 
-                ensemble, nws_data, brackets = results
+                ensemble, nws_data, brackets, hrrr_nbm = results
 
                 # Defensive: verify results are correct types (not exceptions that slipped through)
                 if isinstance(ensemble, BaseException) or isinstance(nws_data, BaseException) or isinstance(brackets, BaseException):
                     raise RuntimeError("Unexpected exception in fetch results after type check")
+                if isinstance(hrrr_nbm, BaseException):
+                    hrrr_nbm = HRRRNBMData()  # Graceful fallback
 
                 # ── Data source health checks ──
                 data_warnings = []
                 if ensemble.total_count == 0:
                     data_warnings.append("ENSEMBLE: 0 members (Open-Meteo may be down)")
                 elif ensemble.total_count < 100:
-                    data_warnings.append(f"ENSEMBLE: only {ensemble.total_count} members (expected ~194)")
+                    data_warnings.append(f"ENSEMBLE: only {ensemble.total_count} members (expected ~230)")
+                if hrrr_nbm.hrrr_high <= 0 and hrrr_nbm.nbm_high <= 0:
+                    data_warnings.append("HRRR/NBM: no data (non-critical, Open-Meteo forecast API may be down)")
                 if nws_data.forecast_high <= 0:
                     data_warnings.append("NWS: no forecast high (NWS API may be down)")
                 if nws_data.current_temp <= 0:
@@ -1577,9 +1756,31 @@ async def scan(city_filter: str = None, show_timing: bool = False):
                 print(f"    Ensemble: {ensemble.total_count} raw members → {len(ensemble.weighted_members)} weighted")
                 bimodal_flag = " [BIMODAL]" if ensemble.is_bimodal else ""
                 print(f"    Mean: {ensemble.mean:.1f}°F ±{ensemble.std:.1f}  KDE bw: {ensemble.kde_bandwidth:.2f}{bimodal_flag}")
-                print(f"    NWS: {nws_data.forecast_high:.0f}°F  Physics: {nws_data.physics_high:.1f}°F")
+                hrrr_str = f"HRRR: {hrrr_nbm.hrrr_high:.1f}°F" if hrrr_nbm.hrrr_high > 0 else "HRRR: N/A"
+                nbm_str = f"NBM: {hrrr_nbm.nbm_high:.1f}°F" if hrrr_nbm.nbm_high > 0 else "NBM: N/A"
+                print(f"    NWS: {nws_data.forecast_high:.0f}°F  Physics: {nws_data.physics_high:.1f}°F  {hrrr_str}  {nbm_str}")
 
-                opps = analyze_opportunities_v2(city_key, ensemble, nws_data, brackets, balance, existing_exposure)
+                # ── Fetch order book depth for tomorrow's brackets ──
+                tz_city = ZoneInfo(CITIES[city_key]["tz"])
+                tomorrow_date = (datetime.now(tz_city) + timedelta(days=1)).date()
+                tmrw_tickers = [
+                    m.get("ticker", "") for m in brackets
+                    if is_tomorrow_ticker(m.get("ticker", ""), tomorrow_date)
+                ]
+                depth_map: dict[str, OrderBookDepth] = {}
+                if tmrw_tickers:
+                    try:
+                        depth_map = await fetch_orderbook_depth(session, tmrw_tickers)
+                        grade_counts = {}
+                        for d in depth_map.values():
+                            grade_counts[d.grade] = grade_counts.get(d.grade, 0) + 1
+                        grade_str = " ".join(f"{g}:{n}" for g, n in sorted(grade_counts.items()))
+                        total_depth = sum(d.bid_depth + d.ask_depth for d in depth_map.values())
+                        print(f"    Depth: {len(depth_map)} books fetched, {total_depth:,} contracts ({grade_str})")
+                    except Exception as e:
+                        logger.debug("Orderbook depth fetch failed for %s (non-critical): %s", city_key, e)
+
+                opps = analyze_opportunities_v2(city_key, ensemble, nws_data, brackets, balance, existing_exposure, hrrr_nbm=hrrr_nbm, depth_map=depth_map)
 
                 # ── LLM Confidence Blend (if enabled) ──
                 llm_module = _get_llm_module()
@@ -1624,7 +1825,7 @@ async def scan(city_filter: str = None, show_timing: bool = False):
                 # Save ensemble snapshot for backtest calibration
                 _save_snapshot(city_key, tomorrow, ensemble, nws_data, brackets, opps)
 
-                print_city_report_v2(city_key, ensemble, nws_data, brackets, opps)
+                print_city_report_v2(city_key, ensemble, nws_data, brackets, opps, hrrr_nbm=hrrr_nbm, depth_map=depth_map)
 
             except Exception as e:
                 failed_cities.append(city_key)

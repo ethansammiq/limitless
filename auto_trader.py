@@ -61,6 +61,8 @@ from outcome_tracker import log_trade_prediction
 from position_store import load_positions, position_transaction
 from preflight import preflight_check
 from trading_guards import check_kill_switch, run_all_pre_trade_checks
+from proxy_arb_engine import run_proxy_scan
+from utils.state_db import get_db
 from log_setup import get_logger
 from trade_events import log_event, TradeEvent
 
@@ -195,6 +197,29 @@ async def auto_trade(
     scan_result = await run_scan(city_filter=city_filter, quiet=False, dry_run=False)
     all_opps = scan_result.get("opps", [])
     balance = scan_result.get("balance", 0.0)
+    city_summaries = scan_result.get("city_summaries", [])
+
+    # ── Step 1.5: Run concurrent proxy scan for upwind front data ──
+    # The proxy engine fetches 1-min ASOS + wind vectors for every city.
+    # dry_run=True here prevents the proxy engine from placing its own orders;
+    # auto_trader controls all order placement in Step 3.
+    proxy_signals: dict = {}
+    try:
+        from core.broker_factory import get_broker as _get_broker
+        _proxy_broker = await _get_broker()
+        try:
+            proxy_signals = await run_proxy_scan(
+                kalshi_client=_proxy_broker,
+                db=get_db(),
+                city_codes=list(cities_to_scan.keys()) if city_filter else None,
+                nws_forecasts={},
+                dry_run=True,
+            )
+            logger.info("Proxy front scan complete (%d cities)", len(proxy_signals))
+        finally:
+            await _proxy_broker.stop()
+    except Exception as _proxy_err:
+        logger.warning("Proxy front scan failed (non-critical, continuing): %s", _proxy_err)
 
     # ── Step 2: Compute hours to settlement ──
     # Target today's settlement if before settlement hour, else tomorrow's.
@@ -243,8 +268,6 @@ async def auto_trade(
             })
 
     # ── Step 2.7: Update open positions with latest confidence + trend ──
-    # This feeds the thesis-break stop and settlement-hold override in position_monitor.py.
-    city_summaries = scan_result.get("city_summaries", [])
     _update_position_confidence(all_opps, city_summaries)
 
     if not tradeable:
@@ -290,22 +313,20 @@ async def auto_trade(
     else:
         tradeable.sort(key=lambda o: o.confidence_score, reverse=True)
 
-    # Single Kalshi client for all trades
-    api_key = os.getenv("KALSHI_API_KEY_ID")
-    pk_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-    if not api_key or not pk_path:
-        logger.error("Missing Kalshi credentials. Cannot execute.")
+    # Broker (live or paper based on PAPER_TRADING_MODE)
+    from core.broker_factory import get_broker
+    try:
+        client = await get_broker()
+    except RuntimeError as e:
+        logger.error("Broker init failed: %s", e)
         await send_discord_alert(
             "AUTO TRADER ERROR",
-            "Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PATH",
+            str(e),
             color=0xFF0000,
             context="auto_trader",
         )
         _write_heartbeat()
         return
-
-    client = KalshiClient(api_key_id=api_key, private_key_path=pk_path, demo_mode=False)
-    await client.start()
 
     try:
         for opp in tradeable:
@@ -325,9 +346,11 @@ async def auto_trade(
             logger.info("Evaluating: %s %s @ %dc x%d (conf:%.0f%s)",
                         opp.side.upper(), short, entry_price, contracts, opp.confidence_score, ts_info)
 
-            # ── Safety checks ──
+            # ── Safety checks (including upwind shield if proxy data available) ──
             dsm_times = station.dsm_times_z if station else []
             six_hour = station.six_hour_z if station else []
+            _proxy_sig = proxy_signals.get(city_code)
+            _proxy_vectors = _proxy_sig.propagation_vectors if _proxy_sig else None
             all_ok, check_results = run_all_pre_trade_checks(
                 positions=positions,
                 balance=balance,
@@ -337,6 +360,9 @@ async def auto_trade(
                 six_hour_z=six_hour,
                 series_to_city=SERIES_TO_CITY,
                 dry_run=dry_run,
+                proxy_vectors=_proxy_vectors,
+                bracket_bounds=(opp.low, opp.high),
+                trade_side=opp.side,
             )
 
             for cr in check_results:
@@ -430,11 +456,13 @@ async def auto_trade(
                         opp.side.upper(), short, entry_price, contracts,
                         opp.confidence_score, exited_pos.get("_exit_reason", "trailing_stop"))
 
-            # Safety checks (same as fresh trades)
+            # Safety checks (same as fresh trades, including upwind shield)
             dsm_times = station.dsm_times_z if station else []
             six_hour = station.six_hour_z if station else []
             # Refresh positions for accurate guard checks
             positions = load_positions()
+            _proxy_sig = proxy_signals.get(city_code)
+            _proxy_vectors = _proxy_sig.propagation_vectors if _proxy_sig else None
             all_ok, check_results = run_all_pre_trade_checks(
                 positions=positions,
                 balance=balance,
@@ -444,6 +472,9 @@ async def auto_trade(
                 six_hour_z=six_hour,
                 series_to_city=SERIES_TO_CITY,
                 dry_run=dry_run,
+                proxy_vectors=_proxy_vectors,
+                bracket_bounds=(opp.low, opp.high),
+                trade_side=opp.side,
             )
             for cr in check_results:
                 logger.debug("    %s", cr)

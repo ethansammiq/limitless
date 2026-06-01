@@ -602,3 +602,67 @@ CPI_MIN_EDGE_THRESHOLD = 0.12       # 12% minimum edge (vs 15% for weather)
 CPI_MIN_KDE_PROBABILITY = 0.15      # 15% minimum model probability (vs 20%)
 CPI_MIN_CONFIDENCE_TO_TRADE = 85    # 85/100 (vs 90 for weather)
 CPI_MAX_ENTRY_PRICE_CENTS = 65      # 65 cents (vs 50 for weather)
+
+
+# =============================================================================
+# PAPER TRADING MODE
+# =============================================================================
+# When PAPER_TRADING_MODE=true, order placement routes through PaperBroker:
+# real Kalshi quotes are fetched, but orders are simulated locally. No real
+# capital and no real orders on Kalshi. State is isolated in positions_paper.json
+# so paper and live state never mix.
+#
+# Env vars:
+#   PAPER_TRADING_MODE      "true"/"false" (default: false)
+#   PAPER_INITIAL_BALANCE   Starting paper bankroll in dollars (default: 1000.0)
+#   PAPER_FILL_MODE         "resting" (default) — order rests; fills only when a
+#                             real quote touches the limit price. Realistic for
+#                             the bid+1 strategy.
+#                           "instant" — fills immediately if the limit crosses
+#                             the book; rejects otherwise. Simpler for tests.
+
+import os as _os
+
+PAPER_TRADING_MODE = _os.getenv("PAPER_TRADING_MODE", "false").lower() in ("true", "1", "yes")
+PAPER_INITIAL_BALANCE = float(_os.getenv("PAPER_INITIAL_BALANCE", "1000.0"))
+PAPER_FILL_MODE = _os.getenv("PAPER_FILL_MODE", "resting").lower()
+if PAPER_FILL_MODE not in ("resting", "instant"):
+    PAPER_FILL_MODE = "resting"
+
+# Project root — used for resolving state-file paths regardless of cwd
+_PROJECT_ROOT = Path(__file__).resolve().parent
+
+# State files (paper and live kept strictly separate)
+LIVE_POSITIONS_FILE = _PROJECT_ROOT / "positions.json"
+PAPER_POSITIONS_FILE = _PROJECT_ROOT / "positions_paper.json"
+PAPER_BALANCE_FILE = _PROJECT_ROOT / "paper_balance.json"
+PAPER_ORDERS_FILE = _PROJECT_ROOT / "paper_orders.json"
+
+
+def get_positions_file() -> Path:
+    """Return the positions-state file for the active trading mode.
+
+    Callers that want their code to honor the PAPER_TRADING_MODE env var
+    should invoke this at call time rather than import a module-level constant.
+    """
+    return PAPER_POSITIONS_FILE if PAPER_TRADING_MODE else LIVE_POSITIONS_FILE
+
+
+# =============================================================================
+# POLICY SCANNER (Kalshi Congress.gov-backed markets)
+# =============================================================================
+# See markets/policy/config.py for the full configuration surface. These
+# constants are re-exported here for uniformity with MIN_EDGE_THRESHOLD etc.
+
+POLICY_SCAN_MAX_VOLUME = int(_os.getenv("POLICY_SCAN_MAX_VOLUME", "500000"))   # $ depth ceiling
+POLICY_SCAN_MIN_HOURS_TO_SETTLE = float(_os.getenv("POLICY_SCAN_MIN_HOURS_TO_SETTLE", "48"))
+POLICY_SCAN_FRESHNESS_DAYS = int(_os.getenv("POLICY_SCAN_FRESHNESS_DAYS", "7"))
+POLICY_DIVERGENCE_THRESHOLD_PP = float(_os.getenv("POLICY_DIVERGENCE_THRESHOLD_PP", "10"))
+POLICY_MIN_LLM_CONFIDENCE = _os.getenv("POLICY_MIN_LLM_CONFIDENCE", "MEDIUM").upper()  # HIGH/MEDIUM/LOW
+POLICY_MAX_ENTRY_PRICE_CENTS = int(_os.getenv("POLICY_MAX_ENTRY_PRICE_CENTS", "60"))
+
+# Claude Opus 4.7 is the primary synthesizer (1M context)
+LLM_SYNTH_MODEL = _os.getenv("LLM_SYNTH_MODEL", "claude-opus-4-7")
+LLM_SYNTH_MAX_TOKENS = int(_os.getenv("LLM_SYNTH_MAX_TOKENS", "2048"))
+LLM_SYNTH_TIMEOUT_SEC = float(_os.getenv("LLM_SYNTH_TIMEOUT_SEC", "120"))
+

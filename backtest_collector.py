@@ -306,6 +306,19 @@ async def collect_daily_data(target_date: datetime = None):
     except Exception as cal_err:
         logger.warning(f"Calibration enrichment failed: {cal_err}")
 
+    # Enrich signal tracker records with settlement data
+    try:
+        from signal_tracker import enrich_signals
+        enriched_sig = 0
+        for r in records:
+            if r.get("actual_high") is not None:
+                n = enrich_signals(r["date"], r["city"], r["actual_high"])
+                enriched_sig += n
+        if enriched_sig:
+            print(f"  Enriched {enriched_sig} signal records with settlement data")
+    except Exception as sig_err:
+        logger.warning(f"Signal enrichment failed: {sig_err}")
+
     # Record successful completion for watchdog
     from heartbeat import write_heartbeat
     write_heartbeat("backtest_collector")

@@ -277,32 +277,33 @@ def _extract_sell_prices(orderbook: dict, side: str) -> tuple:
 
     if side == "yes":
         # Sell YES: our bid is the YES bid, ask is the YES ask
-        if orderbook.get("yes"):
-            bids = [lvl for lvl in orderbook["yes"] if lvl[1] > 0]
-            if bids:
-                bid = max(b[0] for b in bids)
-        if orderbook.get("no"):
-            no_bids = [lvl for lvl in orderbook["no"] if lvl[1] > 0]
-            if no_bids:
-                ask = 100 - min(b[0] for b in no_bids)
+        yes_levels = orderbook.get("yes") or []
+        bids = [lvl for lvl in yes_levels if lvl[1] > 0]
+        if bids:
+            bid = max(b[0] for b in bids)
+        no_levels = orderbook.get("no") or []
+        no_bids = [lvl for lvl in no_levels if lvl[1] > 0]
+        if no_bids:
+            ask = 100 - min(b[0] for b in no_bids)
         if ask == 0 and bid > 0:
             ask = bid  # fallback: treat bid as ask when no ask available
     else:
         # Sell NO: our bid is the NO bid, ask is the NO ask
-        if orderbook.get("no"):
-            no_bids = [lvl for lvl in orderbook["no"] if lvl[1] > 0]
-            if no_bids:
-                bid = max(b[0] for b in no_bids)
-        elif orderbook.get("yes"):
+        no_levels = orderbook.get("no") or []
+        no_bids = [lvl for lvl in no_levels if lvl[1] > 0]
+        if no_bids:
+            bid = max(b[0] for b in no_bids)
+        else:
             # Fallback: derive NO bid from YES ask (100 - YES ask)
-            asks = [lvl for lvl in orderbook["yes"] if lvl[1] > 0]
+            yes_levels = orderbook.get("yes") or []
+            asks = [lvl for lvl in yes_levels if lvl[1] > 0]
             if asks:
                 bid = 100 - min(a[0] for a in asks)
         # NO ask derived from YES bid
-        if orderbook.get("yes"):
-            yes_bids = [lvl for lvl in orderbook["yes"] if lvl[1] > 0]
-            if yes_bids:
-                ask = 100 - max(b[0] for b in yes_bids)
+        yes_levels = orderbook.get("yes") or []
+        yes_bids = [lvl for lvl in yes_levels if lvl[1] > 0]
+        if yes_bids:
+            ask = 100 - max(b[0] for b in yes_bids)
         if ask == 0 and bid > 0:
             ask = bid
 
@@ -579,14 +580,12 @@ async def check_and_manage_positions():
         logger.info("No open positions to monitor.")
         return
 
-    api_key = os.getenv("KALSHI_API_KEY_ID")
-    pk_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-    if not api_key or not pk_path:
-        logger.error("Missing Kalshi credentials")
+    from core.broker_factory import get_broker
+    try:
+        client = await get_broker()
+    except RuntimeError as e:
+        logger.error("Broker init failed: %s", e)
         return
-
-    client = KalshiClient(api_key_id=api_key, private_key_path=pk_path, demo_mode=False)
-    await client.start()
 
     try:
         # Get current positions from Kalshi (actual fills)
@@ -727,11 +726,10 @@ async def check_and_manage_positions():
             # Compute bid volume + thin book check (used by trailing stop + stop-loss)
             bid_volume = 0
             book_key = "yes" if side == "yes" else "no"
-            if orderbook.get(book_key):
-                for lvl in orderbook[book_key]:
-                    if lvl[0] == sell_price and lvl[1] > 0:
-                        bid_volume = lvl[1]
-                        break
+            for lvl in (orderbook.get(book_key) or []):
+                if lvl[0] == sell_price and lvl[1] > 0:
+                    bid_volume = lvl[1]
+                    break
             thin_book = (bid_volume < 3 and sell_price <= 5)
 
             # Check if position actually exists on Kalshi
