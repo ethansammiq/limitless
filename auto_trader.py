@@ -211,7 +211,7 @@ async def auto_trade(
             proxy_signals = await run_proxy_scan(
                 kalshi_client=_proxy_broker,
                 db=get_db(),
-                city_codes=list(cities_to_scan.keys()) if city_filter else None,
+                city_codes=[city_filter.upper()] if city_filter else None,
                 nws_forecasts={},
                 dry_run=True,
             )
