@@ -60,6 +60,8 @@ from math import asin, atan2, cos, degrees, exp, log, radians, sin, sqrt
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+import yarl
+
 import aiohttp
 
 from log_setup import get_logger
@@ -79,8 +81,31 @@ KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # ─── IEM ASOS endpoints ───────────────────────────────────────────────────────
 
-IEM_1MIN_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py"
+IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 IEM_CURRENTS_URL = "https://mesonet.agron.iastate.edu/api/1/currents.json"
+
+
+def _iem_url(station: str, day: "datetime.date") -> yarl.URL:
+    """Build IEM ASOS request URL for a full UTC calendar day.
+
+    Uses the standard ASOS endpoint (asos.py, report_type=3) rather than the
+    1-minute feed (asos1min.py) because the 1-minute feed has no data for
+    most ASOS stations — they only report via routine METAR (~hourly).
+
+    aiohttp/yarl percent-encodes '[' and ']' in query param keys regardless
+    of how params are passed, producing vars%5B%5D which IEM rejects.
+    Building the query string manually and wrapping it in yarl.URL(...,
+    encoded=True) preserves the literal bracket syntax IEM requires.
+
+    Wind speed variable is `sknt` (knots); the parser converts to mph.
+    """
+    sts = f"{day.isoformat()}T00:00:00Z"
+    ets = f"{day.isoformat()}T23:59:59Z"
+    qs = (
+        f"station={station}&sts={sts}&ets={ets}"
+        f"&vars[]=tmpf&vars[]=drct&vars[]=sknt&direct=no&report_type=3"
+    )
+    return yarl.URL(f"{IEM_ASOS_URL}?{qs}", encoded=True)
 
 # NWS observation fallback
 NWS_OBS_URL = "https://api.weather.gov/stations/{station}/observations/latest"
@@ -285,21 +310,26 @@ def _thermal_decay(delta_temp_f: float, distance_km: float) -> float:
 
 # ─── IEM CSV parser ───────────────────────────────────────────────────────────
 
-def _parse_iem_1min_csv(
+def _parse_iem_asos_csv(
     text: str,
     station_iem_id: str,
-    day_utc: datetime.date,
+    day_utc: "datetime.date",
 ) -> tuple[float | None, float | None, float | None, float | None, int]:
-    """
-    Parse IEM 1-minute ASOS CSV response.
+    """Parse IEM ASOS CSV response (standard asos.py endpoint, report_type=3).
+
+    Columns: station, valid, tmpf, dwpf, relh, drct, sknt, ...
+    The `valid` field uses UTC without a timezone suffix ("2026-06-01 15:51").
+    Wind speed `sknt` is in knots; returned current_wind_speed is in mph.
 
     Returns:
-        peak_temp_f        : highest tmpf in the UTC calendar day
+        peak_temp_f        : highest tmpf for the UTC calendar day
         current_temp_f     : most recent valid tmpf
-        current_wind_dir   : most recent valid drct (degrees)
-        current_wind_speed : most recent valid sped (mph)
+        current_wind_dir   : most recent valid drct (degrees, meteorological FROM)
+        current_wind_speed : most recent valid sknt converted to mph
         record_count       : number of valid rows parsed
     """
+    _KNOTS_TO_MPH = 1.15078
+
     peak_temp: float | None = None
     current_temp: float | None = None
     current_dir: float | None = None
@@ -312,50 +342,51 @@ def _parse_iem_1min_csv(
         )
         rows: list[dict] = []
         for row in reader:
-            valid_str = row.get("valid", "")
+            valid_str = (row.get("valid(UTC)") or row.get("valid") or "").strip()
             if not valid_str:
                 continue
             try:
-                # IEM format: "2026-06-01 10:30:00+00"
-                ts = datetime.fromisoformat(valid_str.replace("+00", "+00:00"))
+                # IEM ASOS format: "2026-06-01 15:51" (no timezone suffix — UTC)
+                ts = datetime.strptime(valid_str, "%Y-%m-%d %H:%M").replace(
+                    tzinfo=timezone.utc
+                )
                 if ts.date() != day_utc:
                     continue
             except (ValueError, TypeError):
                 continue
 
-            tmpf_str = row.get("tmpf", "M")
-            if tmpf_str and tmpf_str.strip() not in ("M", "", "None"):
+            tmpf_str = (row.get("tmpf") or "M").strip()
+            if tmpf_str not in ("M", "", "None"):
                 try:
                     t = float(tmpf_str)
-                    if -60 < t < 150:          # sanity bounds (°F)
+                    if -60 < t < 150:
                         count += 1
                         if peak_temp is None or t > peak_temp:
                             peak_temp = t
-                        rows.append({"ts": ts, "tmpf": t,
-                                     "drct": row.get("drct", "M"),
-                                     "sped": row.get("sped", "M")})
+                        rows.append({
+                            "ts": ts, "tmpf": t,
+                            "drct": (row.get("drct") or "M").strip(),
+                            "sknt": (row.get("sknt") or "M").strip(),
+                        })
                 except ValueError:
                     pass
 
-        # Most recent row with valid temp
         if rows:
             last = rows[-1]
             current_temp = last["tmpf"]
-            drct_str = last["drct"]
-            sped_str = last["sped"]
-            if drct_str not in ("M", "", None):
+            if last["drct"] not in ("M", "", None):
                 try:
-                    current_dir = float(drct_str) % 360
+                    current_dir = float(last["drct"]) % 360
                 except ValueError:
                     pass
-            if sped_str not in ("M", "", None):
+            if last["sknt"] not in ("M", "", None):
                 try:
-                    current_spd = float(sped_str)
+                    current_spd = float(last["sknt"]) * _KNOTS_TO_MPH
                 except ValueError:
                     pass
 
     except Exception as exc:
-        logger.warning("IEM CSV parse error for %s: %s", station_iem_id, exc)
+        logger.warning("IEM ASOS CSV parse error for %s: %s", station_iem_id, exc)
 
     return peak_temp, current_temp, current_dir, current_spd, count
 
@@ -513,21 +544,9 @@ class ProxyArbEngine:
         # For 1-min we only need the station ID.
         today_utc = now_utc.date()
 
-        params = {
-            "station": station_id,
-            "year":    today_utc.year,
-            "month":   today_utc.month,
-            "day":     today_utc.day,
-            "tz":      "UTC",
-            "vars[]":  ["tmpf", "drct", "sped"],
-            "direct":  "no",
-            "report_type": "1",      # 1-minute ASOS records
-        }
-
         try:
             async with self.session.get(
-                IEM_1MIN_URL,
-                params=params,
+                _iem_url(station_id, today_utc),
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
@@ -536,7 +555,7 @@ class ProxyArbEngine:
                     )
                 text = await resp.text()
 
-            peak_f, current_f, _, _, count = _parse_iem_1min_csv(text, station_id, today_utc)
+            peak_f, current_f, _, _, count = _parse_iem_asos_csv(text, station_id, today_utc)
             if count == 0:
                 raise ValueError("IEM returned 0 valid 1-minute records")
 
@@ -625,19 +644,8 @@ class ProxyArbEngine:
         today_utc = now_utc.date()
 
         try:
-            params = {
-                "station": proxy.iem_id,
-                "year":    today_utc.year,
-                "month":   today_utc.month,
-                "day":     today_utc.day,
-                "tz":      "UTC",
-                "vars[]":  ["tmpf", "drct", "sped"],
-                "direct":  "no",
-                "report_type": "1",
-            }
             async with self.session.get(
-                IEM_1MIN_URL,
-                params=params,
+                _iem_url(proxy.iem_id, today_utc),
                 timeout=aiohttp.ClientTimeout(total=12),
             ) as resp:
                 if resp.status != 200:
@@ -646,7 +654,7 @@ class ProxyArbEngine:
                     )
                 text = await resp.text()
 
-            _, current_f, current_dir, current_spd, count = _parse_iem_1min_csv(
+            _, current_f, current_dir, current_spd, count = _parse_iem_asos_csv(
                 text, proxy.iem_id, today_utc
             )
             if count == 0 or current_f is None:
