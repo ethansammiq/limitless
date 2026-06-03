@@ -41,3 +41,6 @@ backtest/
 Thumbs.db
 CODEBASE.txt
 *.txt
+
+# Generated bundle (created by user request, not part of codebase)
+weather_edge_complete.py

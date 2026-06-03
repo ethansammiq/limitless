@@ -55,7 +55,6 @@ from config import (
 from trade_score import compute_trade_score, should_trade
 from edge_scanner_v2 import shorten_bracket_title
 from execute_trade import execute_auto
-from kalshi_client import KalshiClient
 from notifications import send_discord_alert
 from outcome_tracker import log_trade_prediction
 from position_store import load_positions, position_transaction

@@ -56,7 +56,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from math import asin, atan2, cos, degrees, exp, log, radians, sin, sqrt
+from math import asin, atan2, cos, degrees, exp, radians, sin, sqrt
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -82,7 +82,6 @@ KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 # ─── IEM ASOS endpoints ───────────────────────────────────────────────────────
 
 IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
-IEM_CURRENTS_URL = "https://mesonet.agron.iastate.edu/api/1/currents.json"
 
 
 def _iem_url(station: str, day: "datetime.date") -> yarl.URL:
