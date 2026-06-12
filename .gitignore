@@ -44,3 +44,15 @@ CODEBASE.txt
 
 # Generated bundle (created by user request, not part of codebase)
 weather_edge_complete.py
+
+# Runtime state (additions)
+*.lock
+heartbeats.json
+paper_balance.json
+paper_orders.json
+positions_paper.json
+peak_state.json
+stale_price_state.json
+scan_data.json
+calibration_cache.json
+weather_edge.db
