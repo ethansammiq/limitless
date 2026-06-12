@@ -594,6 +594,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Peak Monitor — Strategy F: Post-Peak Lock-In")
     parser.add_argument("--city", type=str, default=None, help="City code (NYC, CHI, DEN, MIA, LAX)")
     parser.add_argument("--watch", action="store_true", help="Continuous polling mode")
+    parser.add_argument("--once", action="store_true", help="Single check (for cron)")
     parser.add_argument("--quiet", action="store_true", help="Only print when peak is confirmed")
     parser.add_argument("--dry-run", action="store_true", help="Print alerts, don't send to Discord")
     args = parser.parse_args()

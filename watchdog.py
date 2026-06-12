@@ -30,6 +30,7 @@ EXPECTED_INTERVALS = {
     "auto_scan": 7,            # Runs 4x daily, max gap ~5h. Allow 7h.
     "auto_trader": 7,          # Replaces auto_scan in cron. Same schedule.
     "position_monitor": 0.25,  # Runs every 5 min. Allow 15 min.
+    "peak_monitor": 16,        # Runs every 10 min, 13-22 ET. Overnight gap ~14h. Allow 16h.
     "backtest_collector": 25,  # Runs daily at 8 AM. Allow 25h.
     "morning_check": 25,       # Runs daily at 6:30 AM. Allow 25h.
 }

@@ -842,7 +842,7 @@ async def check_and_manage_positions():
                         pos["_pending_remaining_qty"] = 0  # Expect full close
                         pos["_pre_sell_qty"] = contracts
                         pos["_sell_price_placed"] = eff_price
-                        pos["pnl_realized"] += (eff_price - entry_price) / 100 * contracts
+                        pos["pnl_realized"] = pos.get("pnl_realized", 0) + (eff_price - entry_price) / 100 * contracts
                         pos["notes"].append(f"{now.isoformat()}: EFFICIENCY EXIT sell placed at {eff_price}c (order: {order_id})")
                         actions_taken.append(f"EFFICIENCY EXIT: Sell {contracts}x {ticker} @ {eff_price}c placed (pending fill)")
                         log_event(TradeEvent.EXIT_EFFICIENCY, "position_monitor", {
@@ -894,7 +894,7 @@ async def check_and_manage_positions():
                     pos["_pre_sell_qty"] = contracts
                     pos["_sell_price_placed"] = fr_price
                     pos["freerolled"] = True
-                    pos["pnl_realized"] += realized
+                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
                     pos["peak_price"] = sell_price
                     trailing_offset = _trailing_offset_for_price(sell_price)
                     pos["trailing_floor"] = max(entry_price, sell_price - trailing_offset)
@@ -1003,7 +1003,7 @@ async def check_and_manage_positions():
                     pos["_pre_sell_qty"] = contracts
                     pos["_sell_price_placed"] = mp_price
                     pos["mid_profit_taken"] = True
-                    pos["pnl_realized"] += realized
+                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
                     pos["notes"].append(
                         f"{now.isoformat()}: MID-PROFIT sell {sell_qty}x @ {mp_price}c (order: {order_id})"
                     )
@@ -1073,7 +1073,7 @@ async def check_and_manage_positions():
                     if result:
                         order_id = result.get("order", {}).get("order_id", "")
                         realized = (sell_price - entry_price) / 100 * contracts
-                        pos["pnl_realized"] += realized
+                        pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
                         pos["status"] = "pending_sell"
                         pos["sell_order_id"] = order_id
                         pos["sell_placed_at"] = now.isoformat()
