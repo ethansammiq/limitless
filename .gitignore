@@ -29,8 +29,10 @@ logs/
 
 # Runtime files
 *.pid
+*.db
 nyc_daily_max_temp.json
 positions.json
+positions_paper.json
 .positions.lock
 alerts_fallback.jsonl
 scan_logs/
