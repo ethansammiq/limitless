@@ -61,3 +61,4 @@ calibration_map.json
 alert_state.json
 temp_history.json
 dashboard_day_anchor.json
+watchdog_catchup.json
