@@ -56,3 +56,8 @@ stale_price_state.json
 scan_data.json
 calibration_cache.json
 weather_edge.db
+price_history.json
+calibration_map.json
+alert_state.json
+temp_history.json
+dashboard_day_anchor.json
