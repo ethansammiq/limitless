@@ -39,7 +39,44 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["KalshiClient", "KalshiAPIError", "KalshiRateLimitError", "fetch_balance_quick"]
+__all__ = [
+    "KalshiClient",
+    "KalshiAPIError",
+    "KalshiRateLimitError",
+    "fetch_balance_quick",
+    "parse_fp",
+    "parse_dollars",
+    "normalize_market",
+    "normalize_orderbook",
+]
+
+
+def parse_fp(value, default: int = 0) -> int:
+    """Parse a Kalshi fixed-point contract field to a whole-contract int.
+
+    Kalshi removed the legacy integer ``position``/``count`` fields on
+    2026-03-12, replacing them with fixed-point STRING fields suffixed ``_fp``
+    ("13.00" == 13 contracts, 0.01-contract granularity). This bot trades whole
+    contracts, so we round to the nearest int. Tolerates the legacy int / None
+    form too, so callers stay correct across the rollout and for the
+    PaperBroker mirror.
+    """
+    if value is None:
+        return default
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_dollars(value, default: float = 0.0) -> float:
+    """Parse a Kalshi ``_dollars`` money string to a float ("12.34" -> 12.34)."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class KalshiAPIError(Exception):
@@ -55,6 +92,73 @@ class KalshiRateLimitError(KalshiAPIError):
     def __init__(self, retry_after: int = 0):
         self.retry_after = retry_after
         super().__init__(429, f"Rate limited. Retry after {retry_after}s")
+
+
+def normalize_market(mkt: dict) -> dict:
+    """Backfill the legacy integer market fields from Kalshi's post-2026-03-12
+    fixed-point fields, in place, and return the dict.
+
+    Kalshi removed the integer fields (yes_bid, yes_ask, volume, ...) and now
+    returns yes_bid_dollars ('0.09'), volume_fp ('27578.07'), etc. Much of the
+    codebase still reads the old keys; rather than patch every call site, every
+    entry point that hands back raw market dicts runs them through this so
+    consumers keep working. Idempotent: a legacy key is only filled when it is
+    absent/None and a fixed-point source exists, so real integers (and genuine
+    zeros) are preserved.
+    """
+    if not isinstance(mkt, dict):
+        return mkt
+    for legacy, src in (
+        ("yes_bid", "yes_bid_dollars"), ("yes_ask", "yes_ask_dollars"),
+        ("no_bid", "no_bid_dollars"), ("no_ask", "no_ask_dollars"),
+        ("last_price", "last_price_dollars"), ("previous_price", "previous_price_dollars"),
+    ):
+        if mkt.get(legacy) is None and mkt.get(src) is not None:
+            mkt[legacy] = round(parse_dollars(mkt[src]) * 100)
+    for legacy, src in (
+        ("volume", "volume_fp"), ("volume_24h", "volume_24h_fp"),
+        ("open_interest", "open_interest_fp"),
+    ):
+        if mkt.get(legacy) is None and mkt.get(src) is not None:
+            mkt[legacy] = parse_fp(mkt[src])
+    return mkt
+
+
+def normalize_orderbook(raw: dict) -> dict:
+    """Return a Kalshi orderbook in the legacy ``{"yes": [[cents, qty], ...],
+    "no": [...]}`` shape, regardless of API version.
+
+    The 2026-03-12 fixed-point migration replaced the ``orderbook`` key
+    (integer-cent prices, integer quantities) with ``orderbook_fp`` whose
+    ``yes_dollars``/``no_dollars`` levels are ['0.4000', '35.15'] — dollar-string
+    price, fixed-point-string size. Every consumer (PaperBroker fill sim,
+    edge_scanner depth map, get_orderbook callers) still reads the old ``yes``/
+    ``no`` integer shape, so a raw response silently parsed to an EMPTY book —
+    the root cause of the 0% fill rate. Idempotent across both shapes.
+    """
+    if not isinstance(raw, dict):
+        return {"yes": [], "no": []}
+
+    legacy = raw.get("orderbook")
+    if isinstance(legacy, dict) and (legacy.get("yes") is not None or legacy.get("no") is not None):
+        return {"yes": legacy.get("yes") or [], "no": legacy.get("no") or []}
+
+    fp = raw.get("orderbook_fp")
+    if isinstance(fp, dict):
+        def _levels(rows):
+            out = []
+            for lv in rows or []:
+                if not isinstance(lv, (list, tuple)) or len(lv) < 2:
+                    continue
+                cents = round(parse_dollars(lv[0]) * 100)
+                qty = parse_fp(lv[1])
+                if qty > 0:
+                    out.append([cents, qty])
+            return out
+        return {"yes": _levels(fp.get("yes_dollars")), "no": _levels(fp.get("no_dollars"))}
+
+    # Some responses nest the book at the top level under the version-specific key
+    return {"yes": raw.get("yes") or [], "no": raw.get("no") or []}
 
 
 class KalshiClient:
@@ -220,12 +324,17 @@ class KalshiClient:
         if status:
             params.append(f"status={status}")
         result = await self._req_safe("GET", f"/markets?{'&'.join(params)}")
-        return result.get("markets", [])
+        return [normalize_market(m) for m in result.get("markets", [])]
 
     async def get_orderbook(self, ticker: str, depth: int = ORDERBOOK_DEPTH) -> dict:
-        """Get orderbook for a market."""
+        """Get orderbook in the legacy {"yes": [[cents, qty]], "no": [...]} shape.
+
+        Post-2026-03-12 the API returns ``orderbook_fp`` (dollar-string prices,
+        fixed-point sizes); normalize_orderbook handles both shapes so callers
+        see a populated book instead of an empty one.
+        """
         result = await self._req_safe("GET", f"/markets/{ticker}/orderbook?depth={depth}")
-        return result.get("orderbook", {})
+        return normalize_orderbook(result)
 
     # =========================================================================
     # Authenticated API Methods
