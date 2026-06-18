@@ -40,7 +40,7 @@ def _mock_broker(markets: list, balance: float = 1000.0):
 
 def _mock_adapter(bundle_by_ticker: dict):
     """Adapter that returns the given DocBundle for each ticker or None."""
-    from markets.policy.sources.congress_gov import DocBundle, CongressGovAdapter
+    from markets.policy.sources.congress_gov import CongressGovAdapter
 
     class StubAdapter(CongressGovAdapter):
         def __init__(self):
@@ -60,7 +60,7 @@ def _mock_adapter(bundle_by_ticker: dict):
 
 class TestPrefilter:
     def test_rejects_non_policy_series(self):
-        from markets.policy.scanner import scan, ScanStats
+        from markets.policy.scanner import scan
 
         async def go():
             broker = _mock_broker(markets=[_market("KXHIGHNY-26FEB11", "weather thing")])

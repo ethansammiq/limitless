@@ -4,7 +4,6 @@ Tests for Kalshi API client.
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 from kalshi_client import KalshiClient, KalshiAPIError, KalshiRateLimitError
 

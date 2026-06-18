@@ -162,7 +162,7 @@ async def collect_bias_data(target_date_str: Optional[str] = None):
     actuals = _load_actual_highs(target_str)
     if not actuals:
         print(f"  ✗ No actual settlement data for {target_str}")
-        print(f"    Run backtest_collector.py first, then re-run this script.")
+        print("    Run backtest_collector.py first, then re-run this script.")
         return
 
     print(f"  Actual highs: {', '.join(f'{c}={t:.1f}°F' for c, t in actuals.items())}")
@@ -222,7 +222,7 @@ async def collect_bias_data(target_date_str: Optional[str] = None):
 
         print(f"\n  Saved {len(records)} bias records to {BIAS_DATA_FILE.name}")
     else:
-        print(f"  ✗ No predictions fetched from Previous Runs API")
+        print("  ✗ No predictions fetched from Previous Runs API")
 
     # Recompute corrections
     _recompute_corrections()
@@ -286,7 +286,7 @@ def _recompute_corrections():
     """
     records = _load_bias_records()
     if not records:
-        print(f"  No bias records — corrections file not updated")
+        print("  No bias records — corrections file not updated")
         return
 
     # Group by (model, city), sorted by date
@@ -331,7 +331,7 @@ def print_report():
     records = _load_bias_records()
     if not records:
         print("\n  No bias data collected yet.")
-        print(f"  Run: python3 bias_collector.py")
+        print("  Run: python3 bias_collector.py")
         return
 
     dates = sorted(set(r["date"] for r in records))
@@ -339,7 +339,7 @@ def print_report():
     models = sorted(set(r["model"] for r in records))
 
     print(f"\n  {'=' * 70}")
-    print(f"  BIAS COLLECTOR REPORT")
+    print("  BIAS COLLECTOR REPORT")
     print(f"  {'=' * 70}")
     print(f"  Records: {len(records)} ({len(dates)} days, {len(cities)} cities, {len(models)} models)")
     print(f"  Date range: {dates[0]} → {dates[-1]}")

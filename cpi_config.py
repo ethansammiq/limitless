@@ -9,7 +9,7 @@ Architecture mirrors weather config.py: single source of truth for
 all CPI scanner modules.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional
 

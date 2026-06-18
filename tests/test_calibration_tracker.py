@@ -254,7 +254,7 @@ class TestLoadCalibrationRecords:
         """Save multiple records for testing load/filter."""
         from calibration_tracker import save_calibration_record
         import calibration_tracker
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         for city, date_str in cities_dates:
             scan = _make_scan_result()

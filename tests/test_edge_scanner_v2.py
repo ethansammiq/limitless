@@ -6,9 +6,6 @@ Run: python3 -m pytest tests/ -v
 """
 
 import json
-import math
-import tempfile
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -443,7 +440,7 @@ class TestComputeConfidenceScore:
 class TestPositionStore:
     def test_load_empty(self, tmp_path):
         """Load from nonexistent file → empty list."""
-        from position_store import load_positions, POSITIONS_FILE, LOCK_FILE
+        from position_store import load_positions
         import position_store
 
         orig_pos = position_store.POSITIONS_FILE

@@ -2,8 +2,6 @@
 """Tests for market_timeseries.py — snapshot loading, price analysis, bot detection, entry windows."""
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 

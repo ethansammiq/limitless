@@ -2,14 +2,11 @@
 """Tests for outcome_tracker.py — prediction logging for calibration."""
 
 import json
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
-from outcome_tracker import log_trade_prediction, PREDICTIONS_FILE
+from outcome_tracker import log_trade_prediction
 
 
 def _make_opp(**overrides):

@@ -2,10 +2,8 @@
 """Tests for position_store.py — file locking, atomic writes, registration."""
 
 import json
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -49,7 +47,7 @@ class TestLoadSave:
 
     def test_save_is_atomic(self):
         """Verify save uses temp file + rename (no partial writes)."""
-        from position_store import save_positions, load_positions
+        from position_store import save_positions
         positions = [
             {"ticker": "T1", "side": "yes", "avg_price": 20, "contracts": 5, "status": "open"},
             {"ticker": "T2", "side": "no", "avg_price": 30, "contracts": 3, "status": "open"},
@@ -62,7 +60,7 @@ class TestLoadSave:
 
     def test_load_filters_invalid_entries(self):
         """Invalid entries (missing required keys) are silently filtered."""
-        from position_store import load_positions, save_positions
+        from position_store import load_positions
         _test_positions.write_text(json.dumps([
             {"ticker": "VALID", "side": "yes", "avg_price": 20, "contracts": 5, "status": "open"},
             {"ticker": "INVALID"},  # Missing keys

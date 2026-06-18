@@ -21,7 +21,7 @@ import fcntl
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 from zoneinfo import ZoneInfo

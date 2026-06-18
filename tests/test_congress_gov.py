@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
 
-import pytest
 
 
 class TestMatching:

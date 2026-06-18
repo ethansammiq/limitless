@@ -41,10 +41,10 @@ import math
 import os
 import tempfile
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from log_setup import get_logger
 
@@ -436,7 +436,7 @@ def signal_accuracy_report(
     cities = sorted(set(s["city"] for s in signals))
 
     print(f"\n  {'=' * 72}")
-    print(f"  SIGNAL TRACKER — CALIBRATION REPORT")
+    print("  SIGNAL TRACKER — CALIBRATION REPORT")
     print(f"  {'=' * 72}")
     print(f"  Enriched signals: {total} ({len(dates)} days, {len(cities)} cities)")
     print(f"  Unenriched:       {total_unenriched}")
@@ -453,7 +453,7 @@ def signal_accuracy_report(
         bin_label = _bin_probability(kde_p, 0.10)
         kde_bins[bin_label].append(s)
 
-    print(f"  ┌─ KDE PROBABILITY CALIBRATION ──────────────────────────────┐")
+    print("  ┌─ KDE PROBABILITY CALIBRATION ──────────────────────────────┐")
     print(f"  │ {'KDE Bin':<12s} {'Signals':>8s} {'Hits':>6s} {'Hit Rate':>9s} {'Expected':>9s} {'Gap':>8s} │")
     print(f"  │ {'─'*12} {'─'*8} {'─'*6} {'─'*9} {'─'*9} {'─'*8} │")
 
@@ -485,7 +485,7 @@ def signal_accuracy_report(
         "<60 (PASS)":     [s for s in signals if s.get("confidence_score", 0) < 60],
     }
 
-    print(f"  ┌─ CONFIDENCE SCORE CALIBRATION ────────────────────────────┐")
+    print("  ┌─ CONFIDENCE SCORE CALIBRATION ────────────────────────────┐")
     print(f"  │ {'Conf Band':<18s} {'Signals':>8s} {'Hits':>6s} {'Hit Rate':>9s} {'Avg Edge':>9s} │")
     print(f"  │ {'─'*18} {'─'*8} {'─'*6} {'─'*9} {'─'*9} │")
 
@@ -513,7 +513,7 @@ def signal_accuracy_report(
         "<0.30":          [s for s in signals if s.get("trade_score", 0) < 0.30],
     }
 
-    print(f"  ┌─ TRADE SCORE CALIBRATION ─────────────────────────────────┐")
+    print("  ┌─ TRADE SCORE CALIBRATION ─────────────────────────────────┐")
     print(f"  │ {'Score Band':<18s} {'Signals':>8s} {'Hits':>6s} {'Hit Rate':>9s} {'Avg P&L':>9s} │")
     print(f"  │ {'─'*18} {'─'*8} {'─'*6} {'─'*9} {'─'*9} │")
 
@@ -543,7 +543,7 @@ def signal_accuracy_report(
     win_rate_all = sum(1 for p in all_pnl if p > 0) / len(all_pnl) if all_pnl else 0
     win_rate_tradeable = sum(1 for p in tradeable_pnl if p > 0) / len(tradeable_pnl) if tradeable_pnl else 0
 
-    print(f"  ┌─ HYPOTHETICAL P&L (per contract, cents) ──────────────────┐")
+    print("  ┌─ HYPOTHETICAL P&L (per contract, cents) ──────────────────┐")
     print(f"  │ All signals:       {len(all_pnl):>5d} trades  {total_pnl_all:>+8.0f}¢  "
           f"(win rate: {win_rate_all:.1%}){' ' * 3}│")
     print(f"  │ Tradeable only:    {len(tradeable_pnl):>5d} trades  {total_pnl_tradeable:>+8.0f}¢  "
@@ -565,7 +565,7 @@ def signal_accuracy_report(
             city_data[city]["hits"] += 1
         city_data[city]["pnl"] += s.get("pnl_if_traded", 0)
 
-    print(f"  ┌─ PER-CITY BREAKDOWN ──────────────────────────────────────┐")
+    print("  ┌─ PER-CITY BREAKDOWN ──────────────────────────────────────┐")
     print(f"  │ {'City':<6s} {'Signals':>8s} {'Hits':>6s} {'Hit Rate':>9s} {'Total P&L':>10s} │")
     print(f"  │ {'─'*6} {'─'*8} {'─'*6} {'─'*9} {'─'*10} │")
     for city in sorted(city_data.keys()):
@@ -674,7 +674,7 @@ if __name__ == "__main__":
     elif args.calibration_curve:
         curve = calibration_curve_data()
         if curve:
-            print(f"\n  CALIBRATION CURVE DATA (predicted vs actual)")
+            print("\n  CALIBRATION CURVE DATA (predicted vs actual)")
             print(f"  {'Predicted':>10s} {'Actual':>8s} {'N':>6s} {'StdErr':>8s}")
             print(f"  {'─'*10} {'─'*8} {'─'*6} {'─'*8}")
             for pt in curve:
@@ -686,14 +686,14 @@ if __name__ == "__main__":
             total_n = sum(pt["n_samples"] for pt in curve)
             avg_gap = total_gap / total_n if total_n > 0 else 0
             print(f"  Weighted avg calibration gap: {avg_gap:.3f}")
-            print(f"  (0.000 = perfect, <0.05 = well-calibrated, >0.10 = needs adjustment)")
+            print("  (0.000 = perfect, <0.05 = well-calibrated, >0.10 = needs adjustment)")
         else:
             print("\n  No enriched signal data available for calibration curve.")
     elif args.stats:
         all_signals = _load_all_signals()
         enriched = [s for s in all_signals if s.get("actual_high") is not None]
         dates = sorted(set(s.get("date", "") for s in all_signals))
-        print(f"\n  Signal Tracker Stats:")
+        print("\n  Signal Tracker Stats:")
         print(f"  Total signals:     {len(all_signals)}")
         print(f"  Enriched:          {len(enriched)}")
         print(f"  Unenriched:        {len(all_signals) - len(enriched)}")

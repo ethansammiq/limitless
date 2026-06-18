@@ -88,7 +88,7 @@ def preflight_check(fatal: bool = True) -> tuple:
     if not os.access(positions_dir, os.W_OK):
         issues.append(f"Cannot write to positions directory: {positions_dir}")
     elif positions_file.exists() and not os.access(positions_file, os.W_OK):
-        issues.append(f"positions.json exists but is not writable")
+        issues.append("positions.json exists but is not writable")
 
     # ── Report ──
     if warnings:

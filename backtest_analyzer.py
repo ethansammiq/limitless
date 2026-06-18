@@ -147,7 +147,7 @@ def analyze(city_filter: str = None, min_days: int = 3):
         return
 
     print(f"\n{'='*60}")
-    print(f"  BACKTEST ANALYSIS REPORT")
+    print("  BACKTEST ANALYSIS REPORT")
     print(f"{'='*60}")
     print(f"  Period: {dates[0]} to {dates[-1]} ({len(dates)} days, {len(cities)} cities)")
     print(f"  Records: {len(records)}")
@@ -192,7 +192,7 @@ def analyze(city_filter: str = None, min_days: int = 3):
             if value_in_bracket(nws_high, winner["ticker"], winner.get("title", "")):
                 nws_hits += 1
 
-    print(f"\n  FORECAST ACCURACY")
+    print("\n  FORECAST ACCURACY")
     if ensemble_errors:
         ens_mae = sum(ensemble_errors) / len(ensemble_errors)
         print(f"  Ensemble MAE:    {ens_mae:.1f}°F  (n={len(ensemble_errors)})")
@@ -206,7 +206,7 @@ def analyze(city_filter: str = None, min_days: int = 3):
             print(f"  NWS beats ensemble by {ens_mae - nws_mae:.1f}°F")
 
     if total_with_forecasts > 0:
-        print(f"\n  BRACKET HIT RATE")
+        print("\n  BRACKET HIT RATE")
         print(f"  Ensemble mean in winning bracket: {ensemble_hits}/{total_with_forecasts} ({ensemble_hits/total_with_forecasts*100:.0f}%)")
         if nws_errors:
             print(f"  NWS forecast in winning bracket:  {nws_hits}/{len(nws_errors)} ({nws_hits/len(nws_errors)*100:.0f}%)")
@@ -224,7 +224,7 @@ def analyze(city_filter: str = None, min_days: int = 3):
                 model_errors[model].append(abs(mean - actual))
 
     if model_errors:
-        print(f"\n  MODEL RANKING (by MAE, lower = better)")
+        print("\n  MODEL RANKING (by MAE, lower = better)")
         ranked = sorted(model_errors.items(), key=lambda x: sum(x[1]) / len(x[1]))
         for i, (model, errors) in enumerate(ranked, 1):
             mae = sum(errors) / len(errors)
@@ -261,7 +261,7 @@ def analyze(city_filter: str = None, min_days: int = 3):
             kde_bins[bucket]["actual"].append(hit)
 
     if kde_bins:
-        print(f"\n  KDE CALIBRATION (predicted prob vs actual hit rate)")
+        print("\n  KDE CALIBRATION (predicted prob vs actual hit rate)")
         print(f"  {'Bin':<10s} {'Predicted':>10s} {'Actual':>10s} {'Count':>8s}  {'Status'}")
         print(f"  {'─'*50}")
         for bucket in sorted(kde_bins.keys()):
@@ -318,15 +318,15 @@ def analyze(city_filter: str = None, min_days: int = 3):
                 total_edge_realized -= entry
 
     if total_trades > 0:
-        print(f"\n  SIMULATED P&L (conf >= 90 trades only)")
+        print("\n  SIMULATED P&L (conf >= 90 trades only)")
         print(f"  Trades: {total_trades}")
         print(f"  Winners: {winners} ({winners/total_trades*100:.0f}%)")
         print(f"  Net edge: {total_edge_realized:+.0f}c")
         print(f"  Avg per trade: {total_edge_realized/total_trades:+.1f}c")
     else:
-        print(f"\n  SIMULATED P&L")
-        print(f"  No 90+ confidence trades in historical data yet.")
-        print(f"  (This is expected — need more data collection days)")
+        print("\n  SIMULATED P&L")
+        print("  No 90+ confidence trades in historical data yet.")
+        print("  (This is expected — need more data collection days)")
 
     print(f"\n{'='*60}\n")
 

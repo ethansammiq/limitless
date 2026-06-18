@@ -6,7 +6,6 @@ Run: python3 -m pytest tests/test_cpi_scanner.py -v
 """
 
 import numpy as np
-import pytest
 
 from edge_scanner_v2 import kde_probability, silverman_bandwidth
 from cpi_scanner import (
