@@ -159,15 +159,6 @@ class StateDB:
                 WHERE client_order_id = ?
             """, (now, client_order_id))
 
-    def close_order(self, client_order_id: str) -> None:
-        now = _now()
-        with self._conn() as conn:
-            conn.execute("""
-                UPDATE order_registry
-                SET status = 'closed', updated_at = ?
-                WHERE client_order_id = ?
-            """, (now, client_order_id))
-
     # ── Audit log ─────────────────────────────────────────────────────────────
 
     def write_audit(
@@ -205,25 +196,6 @@ class StateDB:
         if deleted:
             logger.info("Pruned %d audit records older than %d days", deleted, retain_days)
         return deleted
-
-    def recent_audit(self, ticker: str = "", limit: int = 50) -> list[dict]:
-        """Fetch recent audit records, optionally filtered by ticker."""
-        with self._conn() as conn:
-            if ticker:
-                rows = conn.execute(
-                    "SELECT ts,event,ticker,payload FROM audit_log "
-                    "WHERE ticker = ? ORDER BY id DESC LIMIT ?",
-                    (ticker, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT ts,event,ticker,payload FROM audit_log "
-                    "ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-        return [
-            {**dict(r), "payload": json.loads(r["payload"])} for r in rows
-        ]
 
 
 def _now() -> str:

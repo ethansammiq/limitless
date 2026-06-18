@@ -101,10 +101,6 @@ class CongressGovAdapter:
 
     # ── Low-level endpoints ──
 
-    async def fetch_bill(self, congress: int, bill_type: str, bill_number: int) -> dict:
-        result = await self._get(f"/bill/{congress}/{bill_type.lower()}/{bill_number}")
-        return result.get("bill", {})
-
     async def fetch_bill_text(
         self, congress: int, bill_type: str, bill_number: int,
     ) -> str:
@@ -128,10 +124,6 @@ class CongressGovAdapter:
                 except Exception as e:
                     logger.warning("bill text fetch failed: %s", e)
         return ""
-
-    async def fetch_nomination(self, congress: int, nomination_number: int) -> dict:
-        result = await self._get(f"/nomination/{congress}/{nomination_number}")
-        return result.get("nomination", {})
 
     async def fetch_recent_bills(
         self, congress: int = CURRENT_CONGRESS, limit: int = 50,
