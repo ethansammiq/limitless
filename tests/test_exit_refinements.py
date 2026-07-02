@@ -55,6 +55,20 @@ class TestExtractSellPrices:
         assert ask == 45
         assert spread == 5
 
+    def test_yes_ask_uses_best_no_bid(self):
+        """Regression: yes_ask must derive from the HIGHEST NO bid.
+
+        The old code used min(no_bids), inflating the ask and pushing
+        non-urgent ask-peg sells above the true best offer.
+        """
+        ob = {
+            "yes": [[40, 5]],
+            "no": [[55, 3], [58, 2]],  # best NO bid=58 → yes_ask = 42
+        }
+        bid, ask, spread = _extract_sell_prices(ob, "yes")
+        assert ask == 42
+        assert spread == 2
+
     def test_no_side_bid_and_ask(self):
         """NO side: bid from no bids, ask derived from yes bids."""
         ob = {

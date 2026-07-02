@@ -19,11 +19,10 @@ just by running their normal loop.
 
 from __future__ import annotations
 
-import asyncio
 import json
+import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -77,7 +76,7 @@ class BrokerInterface(ABC):
     @abstractmethod
     async def place_order(
         self, ticker: str, side: str, action: str, count: int, price: int,
-        order_type: str = "limit",
+        order_type: str = "limit", client_order_id: Optional[str] = None,
     ) -> dict: ...
 
     @abstractmethod
@@ -85,6 +84,19 @@ class BrokerInterface(ABC):
 
     @abstractmethod
     async def cancel_order(self, order_id: str) -> dict: ...
+
+    # ── settlement helpers (concrete defaults; only PaperBroker overrides) ──
+    # Live mode is unaffected: KalshiBroker inherits these no-ops. Kalshi
+    # credits the real account on settlement and the existing "not in API"
+    # path closes the position record.
+
+    async def get_market_result(self, ticker: str) -> tuple[Optional[str], Optional[str]]:
+        """Return (status, result) for a market, lowercased; (None, None) if unknown."""
+        return (None, None)
+
+    async def sync_balance(self, value: float) -> None:
+        """Paper-only: overwrite cash with an authoritative recomputed value."""
+        return None
 
 
 class KalshiBroker(BrokerInterface):
@@ -243,23 +255,26 @@ class PaperBroker(BrokerInterface):
         for p in positions:
             qty = p.get("contracts", 0)
             signed = qty if p.get("side") == "yes" else -qty
+            # Mirror Kalshi's post-2026-03-12 fixed-point shape: contracts as a
+            # 2-decimal string (position_fp) and money as dollar strings
+            # (*_dollars). avg_price/pnl_realized are cents/dollars respectively.
             out.append({
                 "ticker": p.get("ticker"),
-                "position": signed,
-                "market_exposure": int(round(p.get("avg_price", 0) * qty)),
-                "realized_pnl": int(round(p.get("pnl_realized", 0) * 100)),
+                "position_fp": f"{signed:.2f}",
+                "market_exposure_dollars": f"{p.get('avg_price', 0) * qty / 100:.2f}",
+                "realized_pnl_dollars": f"{p.get('pnl_realized', 0):.2f}",
                 "resting_orders_count": sum(
                     1 for o in self._orders
                     if o.get("ticker") == p.get("ticker") and o.get("status") == "RESTING"
                 ),
-                "fees_paid": 0,
+                "fees_paid_dollars": "0.00",
                 "last_updated_ts": p.get("entry_time", ""),
             })
         return out
 
     async def place_order(
         self, ticker: str, side: str, action: str, count: int, price: int,
-        order_type: str = "limit",
+        order_type: str = "limit", client_order_id: Optional[str] = None,
     ) -> dict:
         order_id = f"paper_{self._next_order_id}"
         self._next_order_id += 1
@@ -270,6 +285,9 @@ class PaperBroker(BrokerInterface):
 
         order = {
             "order_id": order_id,
+            # Generated when absent, mirroring KalshiClient's idempotency key,
+            # so the order dict shape matches the live API response.
+            "client_order_id": client_order_id or str(uuid.uuid4()),
             "ticker": ticker,
             "side": side,
             "action": action,
@@ -329,6 +347,34 @@ class PaperBroker(BrokerInterface):
         return {}
 
     # ── paper-only helpers ──
+
+    async def get_market_result(self, ticker: str) -> tuple[Optional[str], Optional[str]]:
+        """Fetch a market's settlement state from Kalshi (public endpoint).
+
+        Returns (status, result) lowercased, e.g. ("settled", "yes"). Returns
+        (None, None) on any error or if Kalshi no longer serves the market —
+        the caller then leaves the position open for the periodic reconcile.
+        """
+        try:
+            resp = await self._quote_client._req_safe("GET", f"/markets/{ticker}")
+        except Exception as e:  # noqa: BLE001 — network/expiry, degrade gracefully
+            logger.debug("[PAPER] market result fetch failed for %s: %s", ticker, e)
+            return (None, None)
+        mkt = (resp or {}).get("market") or {}
+        status = (mkt.get("status") or "").lower() or None
+        result = (mkt.get("result") or "").lower() or None
+        return (status, result)
+
+    async def sync_balance(self, value: float) -> None:
+        """Overwrite cash with a value recomputed from the position ledger.
+
+        position_monitor calls this each cycle so the balance is self-healing:
+        it can only equal initial + Σrealized − Σopen_cost, so concurrent-write
+        drift is corrected rather than accumulated.
+        """
+        self._balance = round(float(value), 2)
+        self._save_state()
+        logger.info("[PAPER] balance synced to $%.2f (recomputed from positions)", self._balance)
 
     async def _sweep_fills_for_ticker(self, ticker: str, book: dict) -> None:
         """Check resting orders for one ticker against the fresh book."""

@@ -1,7 +1,297 @@
 #!/usr/bin/env python3
 """Tests for position_monitor.py — exit logic, pricing helpers, trailing stops."""
 
+import asyncio
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
+
 import pytest
+
+ET = ZoneInfo("America/New_York")
+
+
+# ═══════════════════════════════════════════════════════════════
+# DERIVED ASK (yes_ask = 100 - best NO bid)
+# ═══════════════════════════════════════════════════════════════
+
+class TestBestDerivedAsk:
+    """_best_derived_ask: ask implied by the opposite side's bids.
+
+    Regression for the min-vs-max drift: the ask must come from the
+    BEST (highest) opposite bid, matching core.broker._bid_ask_for_side
+    and edge_scanner_v2 — not the lowest, which inflates the ask.
+    """
+
+    def test_uses_highest_opposite_bid(self):
+        from position_monitor import _best_derived_ask
+        # Best NO bid is 58, not 55 → yes_ask = 42, not 45
+        assert _best_derived_ask([[55, 8], [58, 3]]) == 42
+
+    def test_single_level(self):
+        from position_monitor import _best_derived_ask
+        assert _best_derived_ask([[55, 3]]) == 45
+
+    def test_empty_levels(self):
+        from position_monitor import _best_derived_ask
+        assert _best_derived_ask([]) == 0
+
+    def test_zero_qty_levels_filtered(self):
+        from position_monitor import _best_derived_ask
+        # 58 has qty=0 → best live bid is 55 → ask = 45
+        assert _best_derived_ask([[58, 0], [55, 2]]) == 45
+
+    def test_matches_paper_broker_derivation(self):
+        """Must agree with the fill simulator's bid/ask math."""
+        from position_monitor import _best_derived_ask
+        from core.broker import _bid_ask_for_side
+        book = {"yes": [[40, 10], [38, 5]], "no": [[55, 8], [58, 3]]}
+        _, yes_ask = _bid_ask_for_side(book, "yes")
+        assert _best_derived_ask(book["no"]) == yes_ask
+
+    def test_extract_sell_prices_yes_ask_consistent(self):
+        from position_monitor import _best_derived_ask, _extract_sell_prices
+        ob = {"yes": [[40, 10]], "no": [[55, 8], [58, 3]]}
+        _, ask, _ = _extract_sell_prices(ob, "yes")
+        assert ask == _best_derived_ask(ob["no"]) == 42
+
+    def test_extract_sell_prices_no_ask_consistent(self):
+        from position_monitor import _best_derived_ask, _extract_sell_prices
+        ob = {"yes": [[40, 10], [42, 5]], "no": [[55, 8]]}
+        _, ask, _ = _extract_sell_prices(ob, "no")
+        assert ask == _best_derived_ask(ob["yes"]) == 58
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXIT SELL PLACEMENT HELPER
+# ═══════════════════════════════════════════════════════════════
+
+class TestPlaceExitSell:
+    """_place_exit_sell: shared place-sell + pending_sell bookkeeping."""
+
+    def _make_open_pos(self, contracts=10, avg_price=40):
+        return {
+            "ticker": "KXHIGHNY-26FEB16-B36.5",
+            "side": "yes",
+            "avg_price": avg_price,
+            "contracts": contracts,
+            "status": "open",
+            "pnl_realized": 0.0,
+            "notes": [],
+        }
+
+    def _place(self, client, pos, **overrides):
+        from position_monitor import _place_exit_sell
+        from trade_events import TradeEvent
+        actions = overrides.pop("actions_taken", [])
+        kwargs = dict(
+            qty=5, price=48, remaining_qty=5,
+            event=TradeEvent.EXIT_FREEROLL,
+            note="FREEROLL sell 5x @ 48c placed (order: {order_id})",
+            action="FREEROLL: Sell 5x placed",
+            actions_taken=actions,
+            log_payload={"ticker": pos["ticker"], "price": 48},
+            alert_title="FREEROLL — SELL PLACED",
+            alert_body="body",
+            alert_color=0x00FF00,
+        )
+        kwargs.update(overrides)
+        now = datetime.now(ET)
+        with patch("position_monitor.send_discord_alert", new_callable=AsyncMock) as alert, \
+             patch("position_monitor.log_event") as log:
+            ok = asyncio.run(_place_exit_sell(client, pos, now, **kwargs))
+        return ok, actions, alert, log
+
+    def test_marks_pending_sell_fields(self):
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value={"order": {"order_id": "ord-42"}})
+        pos = self._make_open_pos()
+        ok, actions, _, _ = self._place(client, pos)
+        assert ok is True
+        assert pos["status"] == "pending_sell"
+        assert pos["sell_order_id"] == "ord-42"
+        assert pos["_pending_remaining_qty"] == 5
+        assert pos["_pre_sell_qty"] == 10
+        assert pos["_sell_price_placed"] == 48
+        assert pos["sell_placed_at"]
+        assert actions == ["FREEROLL: Sell 5x placed"]
+        client.place_order.assert_awaited_once_with(
+            ticker=pos["ticker"], side="yes", action="sell",
+            count=5, price=48, order_type="limit",
+        )
+
+    def test_does_not_book_pnl_at_placement(self):
+        """Regression: realized P&L must NOT be booked when the sell is
+        merely placed — only on confirmed fill in _check_pending_sells."""
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value={"order": {"order_id": "o1"}})
+        pos = self._make_open_pos()
+        ok, _, _, _ = self._place(client, pos)
+        assert ok is True
+        assert pos["pnl_realized"] == 0.0
+
+    def test_note_order_id_substitution(self):
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value={"order": {"order_id": "ord-7"}})
+        pos = self._make_open_pos()
+        self._place(client, pos)
+        assert len(pos["notes"]) == 1
+        assert "(order: ord-7)" in pos["notes"][0]
+
+    def test_extra_fields_applied_on_success(self):
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value={"order": {"order_id": "o1"}})
+        pos = self._make_open_pos()
+        self._place(client, pos, extra_fields={"freerolled": True, "peak_price": 48})
+        assert pos["freerolled"] is True
+        assert pos["peak_price"] == 48
+
+    def test_failed_order_leaves_position_untouched(self):
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value=None)
+        pos = self._make_open_pos()
+        ok, actions, alert, log = self._place(client, pos, extra_fields={"freerolled": True})
+        assert ok is False
+        assert pos["status"] == "open"
+        assert "sell_order_id" not in pos
+        assert "freerolled" not in pos
+        assert pos["notes"] == []
+        assert actions == []
+        alert.assert_not_awaited()
+        log.assert_not_called()
+
+    def test_log_event_and_alert_emitted(self):
+        client = AsyncMock()
+        client.place_order = AsyncMock(return_value={"order": {"order_id": "o9"}})
+        pos = self._make_open_pos()
+        _, _, alert, log = self._place(client, pos)
+        alert.assert_awaited_once()
+        assert alert.call_args[0][0] == "FREEROLL — SELL PLACED"
+        assert alert.call_args.kwargs.get("color") == 0x00FF00
+        log.assert_called_once()
+        payload = log.call_args[0][2]
+        assert payload["order_id"] == "o9"
+        assert payload["price"] == 48
+
+
+# ═══════════════════════════════════════════════════════════════
+# PENDING SELL — REALIZED P&L BOOKING (fill-time, not placement)
+# ═══════════════════════════════════════════════════════════════
+
+class TestPendingSellPnlBooking:
+    """_check_pending_sells: P&L is booked on confirmed fill and never
+    survives an expired/cancelled sell (regression for the phantom-profit
+    bug that corrupted circuit-breaker/drawdown inputs)."""
+
+    TICKER = "KXHIGHNY-26FEB16-B36.5"
+
+    def _make_pending_pos(self, *, contracts=10, remaining=0, price_placed=80,
+                          avg_price=40, minutes_ago=5, pnl_realized=0.0):
+        placed = (datetime.now(ET) - timedelta(minutes=minutes_ago)).isoformat()
+        return {
+            "ticker": self.TICKER,
+            "side": "yes",
+            "avg_price": avg_price,
+            "contracts": contracts,
+            "status": "pending_sell",
+            "sell_order_id": "ord-1",
+            "sell_placed_at": placed,
+            "_pending_remaining_qty": remaining,
+            "_pre_sell_qty": contracts,
+            "_sell_price_placed": price_placed,
+            "pnl_realized": pnl_realized,
+            "notes": [],
+        }
+
+    def _run(self, positions, client):
+        from position_monitor import _check_pending_sells
+        now = datetime.now(ET)
+        with patch("position_monitor.send_discord_alert", new_callable=AsyncMock), \
+             patch("position_monitor.log_event"):
+            return asyncio.run(_check_pending_sells(positions, client, now))
+
+    def _make_client(self, *, api_qty=None, fills=None):
+        client = AsyncMock()
+        api_positions = []
+        if api_qty is not None:
+            # Kalshi fixed-point shape: contracts as a 2-decimal string.
+            api_positions = [{"ticker": self.TICKER, "position_fp": f"{api_qty:.2f}"}]
+        client.get_positions = AsyncMock(return_value=api_positions)
+        client.get_fills = AsyncMock(return_value=fills or [])
+        client.get_orderbook = AsyncMock(return_value={})
+        client.cancel_order = AsyncMock(return_value={})
+        return client
+
+    def test_full_fill_books_pnl_and_closes(self):
+        pos = self._make_pending_pos()  # sell 10 @ 80c, entry 40c
+        client = self._make_client(api_qty=None)  # gone from API → filled
+        actions = self._run([pos], client)
+        assert pos["status"] == "closed"
+        assert pos["pnl_realized"] == pytest.approx(4.0)  # (80-40)/100*10
+        assert any("CONFIRMED FILL" in a for a in actions)
+        client.get_fills.assert_not_awaited()  # qty check already confirmed
+        # Sell-cycle bookkeeping cleared
+        for key in ("_pending_remaining_qty", "_pre_sell_qty", "_sell_price_placed"):
+            assert key not in pos
+
+    def test_partial_fill_books_sold_portion_only(self):
+        pos = self._make_pending_pos(contracts=10, remaining=4)  # sold 6 @ 80c
+        client = self._make_client(api_qty=4)
+        actions = self._run([pos], client)
+        assert pos["status"] == "open"
+        assert pos["contracts"] == 4
+        assert pos["pnl_realized"] == pytest.approx(2.4)  # (80-40)/100*6
+        assert any("PARTIAL FILL" in a for a in actions)
+
+    def test_fill_confirmed_via_fills_when_positions_stale(self):
+        """PaperBroker positions mirror the local store, so fills are the
+        only signal — booking must still happen."""
+        pos = self._make_pending_pos()
+        client = self._make_client(
+            api_qty=10,  # store mirror: still shows pre-sell quantity
+            fills=[{"order_id": "ord-1", "count_fp": "10.00", "action": "sell"}],
+        )
+        self._run([pos], client)
+        assert pos["status"] == "closed"
+        assert pos["pnl_realized"] == pytest.approx(4.0)
+
+    def test_expired_sell_reverts_without_phantom_pnl(self):
+        """THE regression: an unfilled sell that expires must leave
+        pnl_realized untouched after reverting to open."""
+        pos = self._make_pending_pos(minutes_ago=45)  # > 30 min expiry
+        client = self._make_client(api_qty=10)  # never filled
+        actions = self._run([pos], client)
+        assert pos["status"] == "open"
+        assert pos["contracts"] == 10
+        assert pos["pnl_realized"] == 0.0
+        assert any("STALE ORDER" in a for a in actions)
+        client.cancel_order.assert_awaited_once_with("ord-1")
+        for key in ("sell_order_id", "_pre_sell_qty", "_sell_price_placed"):
+            assert key not in pos
+
+    def test_fill_accumulates_onto_prior_realized(self):
+        """A second exit adds to pnl_realized from an earlier partial."""
+        pos = self._make_pending_pos(pnl_realized=1.0)
+        client = self._make_client(api_qty=None)
+        self._run([pos], client)
+        assert pos["pnl_realized"] == pytest.approx(5.0)  # 1.0 + 4.0
+
+    def test_no_booking_without_placed_price(self):
+        """Corrupted/zero _sell_price_placed → close without booking."""
+        pos = self._make_pending_pos(price_placed=0)
+        client = self._make_client(api_qty=None)
+        self._run([pos], client)
+        assert pos["status"] == "closed"
+        assert pos["pnl_realized"] == 0.0
+
+    def test_unfilled_fresh_sell_left_pending(self):
+        """Recent unfilled sell: stays pending, nothing booked."""
+        pos = self._make_pending_pos(minutes_ago=2)
+        client = self._make_client(api_qty=10)
+        actions = self._run([pos], client)
+        assert pos["status"] == "pending_sell"
+        assert pos["pnl_realized"] == 0.0
+        assert actions == []
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -79,12 +369,12 @@ class TestExtractSellPrices:
         from position_monitor import _extract_sell_prices
         ob = {
             "yes": [[40, 10], [38, 5]],  # bid=40
-            "no":  [[55, 8], [58, 3]],   # no_bids: min=55 → yes_ask=100-55=45
+            "no":  [[55, 8], [58, 3]],   # best NO bid=58 → yes_ask=100-58=42
         }
         bid, ask, spread = _extract_sell_prices(ob, "yes")
         assert bid == 40
-        assert ask == 45
-        assert spread == 5
+        assert ask == 42
+        assert spread == 2
 
     def test_yes_side_no_ask(self):
         """When no NO-side data, ask falls back to bid."""

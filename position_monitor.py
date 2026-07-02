@@ -21,8 +21,6 @@ Or run manually:
 
 import argparse
 import asyncio
-import os
-import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -31,8 +29,14 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from kalshi_client import KalshiClient
-from position_store import load_positions, save_positions, position_transaction
+from kalshi_client import KalshiClient, parse_fp
+from position_store import load_positions, position_transaction
+from paper_accounting import settle_position_record, rebuild_balance, balance_drift
+
+# Paper cash may legitimately lead the ledger by up to one unbooked sell's
+# proceeds within a cycle; only alert when drift exceeds this (the corruption
+# we saw was $2,000+). The per-cycle sync auto-corrects regardless.
+BALANCE_DRIFT_ALERT_USD = 1.00
 from notifications import send_discord_alert
 from preflight import preflight_check
 from log_setup import get_logger
@@ -265,6 +269,24 @@ def _thesis_deterioration_action(
     return "hold"  # Already trimmed or only 1 contract
 
 
+def _best_derived_ask(opposite_levels: list) -> int:
+    """Best ask for one side, implied by the opposite side's bids.
+
+    Kalshi orderbooks contain only bids: orderbook["yes"] holds YES-bid
+    levels and orderbook["no"] holds NO-bid levels as [price, qty] pairs.
+    The best ask for a side is implied by the BEST (highest) bid on the
+    opposite side:
+        yes_ask = 100 - max(NO-bid prices)
+        no_ask  = 100 - max(YES-bid prices)
+    Matches core.broker._bid_ask_for_side and edge_scanner_v2. Using the
+    lowest opposite bid instead would inflate the ask and place non-urgent
+    sells above the true best offer. Returns 0 when the opposite side is
+    empty.
+    """
+    prices = [lvl[0] for lvl in opposite_levels if lvl[1] > 0]
+    return 100 - max(prices) if prices else 0
+
+
 def _extract_sell_prices(orderbook: dict, side: str) -> tuple:
     """Extract bid, ask, and spread for the sell side of a position.
 
@@ -281,10 +303,7 @@ def _extract_sell_prices(orderbook: dict, side: str) -> tuple:
         bids = [lvl for lvl in yes_levels if lvl[1] > 0]
         if bids:
             bid = max(b[0] for b in bids)
-        no_levels = orderbook.get("no") or []
-        no_bids = [lvl for lvl in no_levels if lvl[1] > 0]
-        if no_bids:
-            ask = 100 - min(b[0] for b in no_bids)
+        ask = _best_derived_ask(orderbook.get("no") or [])
         if ask == 0 and bid > 0:
             ask = bid  # fallback: treat bid as ask when no ask available
     else:
@@ -299,11 +318,8 @@ def _extract_sell_prices(orderbook: dict, side: str) -> tuple:
             asks = [lvl for lvl in yes_levels if lvl[1] > 0]
             if asks:
                 bid = 100 - min(a[0] for a in asks)
-        # NO ask derived from YES bid
-        yes_levels = orderbook.get("yes") or []
-        yes_bids = [lvl for lvl in yes_levels if lvl[1] > 0]
-        if yes_bids:
-            ask = 100 - max(b[0] for b in yes_bids)
+        # NO ask derived from best YES bid
+        ask = _best_derived_ask(orderbook.get("yes") or [])
         if ask == 0 and bid > 0:
             ask = bid
 
@@ -326,6 +342,67 @@ def _smart_sell_price(bid: int, ask: int, spread: int, urgent: bool) -> int:
         return max(bid, ask - 1)
     # Tight spread (≤2¢): just hit the bid, not worth the fill risk
     return bid
+
+
+async def _place_exit_sell(
+    client: KalshiClient,
+    pos: dict,
+    now: datetime,
+    *,
+    qty: int,
+    price: int,
+    remaining_qty: int,
+    event: TradeEvent,
+    note: str,
+    action: str,
+    actions_taken: list,
+    log_payload: dict,
+    alert_title: str,
+    alert_body: str,
+    alert_color: int,
+    extra_fields: dict | None = None,
+) -> bool:
+    """Place a limit exit sell and mark the position pending_sell.
+
+    Single home for the pending_sell bookkeeping contract that
+    _check_pending_sells (fill confirmation, repricing, expiry revert)
+    depends on. Realized P&L is deliberately NOT booked here — it is
+    booked in _check_pending_sells once the fill is confirmed, so an
+    expired/cancelled sell never leaves phantom profit in pnl_realized
+    (the circuit-breaker and drawdown guards read it).
+
+    `note` may contain a literal `{order_id}` placeholder, substituted
+    after the order is placed. `extra_fields` are per-rule flags
+    (e.g. freerolled, quick_profit_taken) applied only on success.
+    Returns True when the order was placed.
+    """
+    result = await client.place_order(
+        ticker=pos["ticker"],
+        side=pos["side"],
+        action="sell",
+        count=qty,
+        price=price,
+        order_type="limit",
+    )
+    if not result:
+        return False
+
+    order_id = result.get("order", {}).get("order_id", "")
+    pos["status"] = "pending_sell"
+    pos["sell_order_id"] = order_id
+    pos["sell_placed_at"] = now.isoformat()
+    pos["_pending_remaining_qty"] = remaining_qty
+    pos["_pre_sell_qty"] = pos["contracts"]
+    pos["_sell_price_placed"] = price
+    for key, value in (extra_fields or {}).items():
+        pos[key] = value
+    pos.setdefault("notes", []).append(
+        f"{now.isoformat()}: {note.replace('{order_id}', order_id)}"
+    )
+    actions_taken.append(action)
+    log_event(event, "position_monitor", {**log_payload, "order_id": order_id})
+    await send_discord_alert(alert_title, alert_body, color=alert_color)
+    return True
 
 
 async def _pull_orders_before_bot_windows(
@@ -453,13 +530,38 @@ async def _check_pending_sells(positions: list, client: KalshiClient, now: datet
         api_qty = 0
         for ap in api_positions:
             if ap.get("ticker") == ticker:
-                api_qty = abs(ap.get("position", 0))
+                # Kalshi now reports contracts as the fixed-point string
+                # position_fp; fall back to legacy `position` for resilience.
+                api_qty = abs(parse_fp(ap.get("position_fp", ap.get("position"))))
                 break
 
         expected_remaining = pos.get("_pending_remaining_qty", 0)
+        intended_sell_qty = max(0, pos.get("_pre_sell_qty", pos["contracts"]) - expected_remaining)
 
-        if api_qty <= expected_remaining:
-            # Sell filled — mark closed or update quantity
+        sell_filled = api_qty <= expected_remaining
+        if not sell_filled and sell_order_id and intended_sell_qty > 0:
+            # Secondary check via fills: PaperBroker positions mirror the
+            # local store, so the quantity test above can never observe a
+            # paper fill. Fills are authoritative on both brokers.
+            try:
+                fills = await client.get_fills(ticker=ticker)
+            except Exception as e:
+                logger.warning("  %s: get_fills failed: %s", ticker, e)
+                fills = []
+            filled_for_order = sum(
+                parse_fp(f.get("count_fp", f.get("count")))
+                for f in fills if f.get("order_id") == sell_order_id
+            )
+            sell_filled = filled_for_order >= intended_sell_qty
+
+        if sell_filled:
+            # Book realized P&L now that the fill is confirmed — NOT at
+            # placement — so an expired/cancelled sell never leaves phantom
+            # profit in pnl_realized (circuit-breaker/drawdown guards read it).
+            sell_price_placed = pos.get("_sell_price_placed", 0)
+            if intended_sell_qty > 0 and sell_price_placed > 0:
+                realized = (sell_price_placed - pos.get("avg_price", 0)) / 100 * intended_sell_qty
+                pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
             if expected_remaining == 0:
                 pos["status"] = "closed"
                 pos["notes"].append(f"{now.isoformat()}: Sell order filled — position closed")
@@ -469,9 +571,12 @@ async def _check_pending_sells(positions: list, client: KalshiClient, now: datet
                 pos["contracts"] = expected_remaining
                 pos.pop("sell_order_id", None)
                 pos.pop("sell_placed_at", None)
-                pos.pop("_pending_remaining_qty", None)
                 pos["notes"].append(f"{now.isoformat()}: Partial sell filled — {expected_remaining} contracts remain")
                 actions.append(f"PARTIAL FILL: {ticker} — {expected_remaining} contracts remain open")
+            # Clear sell-cycle bookkeeping so the next sell starts fresh
+            for key in ("_pending_remaining_qty", "_pre_sell_qty", "_sell_price_placed",
+                        "_sell_cycle_count", "_sell_reprice_count"):
+                pos.pop(key, None)
         else:
             # Sell hasn't filled — check if stale
             if sell_placed_at:
@@ -534,7 +639,8 @@ async def _check_pending_sells(positions: list, client: KalshiClient, now: datet
                             logger.warning("  %s: Repricing failed: %s", ticker, e)
 
                 if elapsed_min > PENDING_SELL_EXPIRY_MINUTES:
-                    # Cancel stale order and revert to open
+                    # Cancel stale order and revert to open. No P&L to back
+                    # out: pnl_realized is only booked on confirmed fills.
                     if sell_order_id:
                         await client.cancel_order(sell_order_id)
                     pos["status"] = "open"
@@ -559,6 +665,66 @@ async def _check_pending_sells(positions: list, client: KalshiClient, now: datet
                     )
                 else:
                     logger.debug("  %s: pending_sell — order placed %.0fmin ago, waiting...", ticker, elapsed_min)
+    return actions
+
+
+async def _check_balance_invariant(positions: list, loaded_balance: float) -> None:
+    """Paper-only: alert when persisted cash has drifted from the position
+    ledger (the corruption/race class). The per-cycle balance sync corrects it;
+    this makes the drift LOUD instead of silently healed, so a recurring writer
+    bug surfaces instead of hiding."""
+    drift, ledger = balance_drift(loaded_balance, positions)
+    if abs(drift) <= BALANCE_DRIFT_ALERT_USD:
+        if drift:
+            logger.debug("[PAPER] balance invariant ok (drift $%.2f)", drift)
+        return
+    logger.warning(
+        "[PAPER] BALANCE DRIFT $%+.2f — persisted $%.2f vs ledger $%.2f (auto-correcting this cycle)",
+        drift, loaded_balance, ledger,
+    )
+    try:
+        await send_discord_alert(
+            title="⚠ Paper balance drift detected",
+            description=(
+                f"Persisted balance **${loaded_balance:.2f}** vs ledger **${ledger:.2f}** "
+                f"(drift **${drift:+.2f}**).\nAuto-corrected this cycle. Recurring drift means "
+                f"an out-of-band balance writer or a concurrent-write race — investigate."
+            ),
+            color=0xFF6600,
+            context="balance_invariant",
+        )
+    except Exception:  # noqa: BLE001 — alerting must never break the monitor
+        pass
+
+
+async def _settle_paper_positions(positions: list, client, now: datetime) -> list[str]:
+    """Paper-only: settle positions whose Kalshi market has resolved.
+
+    For each open/pending position, query the market's settlement result and, if
+    resolved, mark it settled and book settlement P&L on held contracts (winner
+    pays $1/contract). The cash balance is recomputed separately from the full
+    ledger after persistence, so this only updates the position records. Live
+    mode never calls this (gated by client.mode == "paper").
+    """
+    actions: list[str] = []
+    for pos in positions:
+        if pos.get("status") not in ("open", "pending_sell"):
+            continue
+        ticker = pos["ticker"]
+        status, result = await client.get_market_result(ticker)
+        if status not in ("settled", "finalized") or result not in ("yes", "no"):
+            continue
+        won = result == str(pos.get("side", "yes")).lower()
+        spnl = settle_position_record(pos, won, now)
+        msg = f"SETTLED {'WON' if won else 'LOST'}: {ticker} ({pos.get('contracts')}x) pnl ${spnl:+.2f}"
+        actions.append(msg)
+        logger.info("[PAPER] %s", msg)
+        try:
+            log_event(TradeEvent.EXIT_SETTLED, "position_monitor", {
+                "ticker": ticker, "result": result, "won": won, "settle_pnl": spnl,
+            })
+        except Exception:  # noqa: BLE001 — telemetry must never break settlement
+            pass
     return actions
 
 
@@ -593,12 +759,20 @@ async def check_and_manage_positions():
         api_pos_map = {}
         for ap in api_positions:
             ticker = ap.get("ticker", "")
-            qty = ap.get("position", 0)  # Net position (positive = yes, negative = no)
+            # Net position (positive = yes, negative = no), from fixed-point field.
+            qty = parse_fp(ap.get("position_fp", ap.get("position")))
             if qty != 0:
                 api_pos_map[ticker] = ap
 
         balance = await client.get_balance()
         now = datetime.now(ET)
+
+        # Paper-only: settle positions whose Kalshi market has resolved, so the
+        # books self-reconcile each cycle (live mode credits/closes natively).
+        settle_actions: list[str] = []
+        if getattr(client, "mode", "") == "paper":
+            await _check_balance_invariant(positions, balance)  # detect drift before we heal it
+            settle_actions = await _settle_paper_positions(positions, client, now)
 
         # Promote resting -> open when order fills on Kalshi
         resting_positions = [p for p in positions if p.get("status") == "resting"]
@@ -610,7 +784,7 @@ async def check_and_manage_positions():
                 still_resting = any(o.get("order_id") == order_id for o in resting_orders)
                 if not still_resting:
                     if ticker in api_pos_map:
-                        api_qty = abs(api_pos_map[ticker].get("position", 0))
+                        api_qty = abs(parse_fp(api_pos_map[ticker].get("position_fp", api_pos_map[ticker].get("position"))))
                         pos["status"] = "open"
                         pos["contracts"] = api_qty
                         pos["original_contracts"] = api_qty
@@ -636,7 +810,7 @@ async def check_and_manage_positions():
         logger.info("POSITION MONITOR — %s", now.strftime("%I:%M %p ET"))
         logger.info("Balance: $%.2f | Open: %d | Pending sells: %d", balance, len(open_positions), len(pending_sells))
 
-        actions_taken = []
+        actions_taken = list(settle_actions)
 
         # ── THESIS GUARD: cancel resting orders if confidence collapsed ──
         # auto_trader writes last_confidence on resting positions each scan.
@@ -825,39 +999,26 @@ async def check_and_manage_positions():
                     logger.info("  %s: EFFICIENCY EXIT — %dc >= %dc, selling %dx @ %dc (bid=%d ask=%d spread=%d)",
                                 ticker, sell_price, EFFICIENCY_EXIT_CENTS, contracts, eff_price, ob_bid, ob_ask, ob_spread)
 
-                    result = await client.place_order(
-                        ticker=ticker,
-                        side=side,
-                        action="sell",
-                        count=contracts,
-                        price=eff_price,
-                        order_type="limit",
-                    )
-
-                    if result:
-                        order_id = result.get("order", {}).get("order_id", "")
-                        pos["status"] = "pending_sell"
-                        pos["sell_order_id"] = order_id
-                        pos["sell_placed_at"] = now.isoformat()
-                        pos["_pending_remaining_qty"] = 0  # Expect full close
-                        pos["_pre_sell_qty"] = contracts
-                        pos["_sell_price_placed"] = eff_price
-                        pos["pnl_realized"] = pos.get("pnl_realized", 0) + (eff_price - entry_price) / 100 * contracts
-                        pos["notes"].append(f"{now.isoformat()}: EFFICIENCY EXIT sell placed at {eff_price}c (order: {order_id})")
-                        actions_taken.append(f"EFFICIENCY EXIT: Sell {contracts}x {ticker} @ {eff_price}c placed (pending fill)")
-                        log_event(TradeEvent.EXIT_EFFICIENCY, "position_monitor", {
+                    await _place_exit_sell(
+                        client, pos, now,
+                        qty=contracts, price=eff_price, remaining_qty=0,
+                        event=TradeEvent.EXIT_EFFICIENCY,
+                        note=f"EFFICIENCY EXIT sell placed at {eff_price}c (order: {{order_id}})",
+                        action=f"EFFICIENCY EXIT: Sell {contracts}x {ticker} @ {eff_price}c placed (pending fill)",
+                        actions_taken=actions_taken,
+                        log_payload={
                             "ticker": ticker, "side": side, "price": eff_price,
                             "qty": contracts, "entry": entry_price, "pnl": round(total_pnl, 2),
-                            "roi_pct": round(roi, 1), "order_id": order_id,
-                        })
-
-                        await send_discord_alert(
-                            "💰 EFFICIENCY EXIT — SELL PLACED",
+                            "roi_pct": round(roi, 1),
+                        },
+                        alert_title="💰 EFFICIENCY EXIT — SELL PLACED",
+                        alert_body=(
                             f"**Sell {contracts}x {ticker} @ {eff_price}c** (limit, ask-peg)\n"
                             f"Entry: {entry_price}c | Expected P&L: ${total_pnl:.2f} ({roi:+.0f}% ROI)\n"
-                            f"Status: PENDING FILL — will confirm on next cycle.",
-                            color=0x00FF00,
-                        )
+                            f"Status: PENDING FILL — will confirm on next cycle."
+                        ),
+                        alert_color=0x00FF00,
+                    )
                 continue
 
             # ═══════════════════════════════════════════════════
@@ -874,45 +1035,34 @@ async def check_and_manage_positions():
                 logger.info("  %s: FREEROLL — %dc >= %.0fc (2x entry), selling %d of %d @ %dc",
                             ticker, sell_price, freeroll_price, sell_qty, contracts, fr_price)
 
-                result = await client.place_order(
-                    ticker=ticker,
-                    side=side,
-                    action="sell",
-                    count=sell_qty,
-                    price=fr_price,
-                    order_type="limit",
-                )
-
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (fr_price - entry_price) / 100 * sell_qty
-                    remaining = contracts - sell_qty
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = remaining
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = fr_price
-                    pos["freerolled"] = True
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["peak_price"] = sell_price
-                    trailing_offset = _trailing_offset_for_price(sell_price)
-                    pos["trailing_floor"] = max(entry_price, sell_price - trailing_offset)
-                    pos["notes"].append(f"{now.isoformat()}: FREEROLL sell {sell_qty}x @ {fr_price}c placed (order: {order_id})")
-                    actions_taken.append(f"FREEROLL: Sell {sell_qty}x {ticker} @ {fr_price}c placed (pending fill)")
-                    log_event(TradeEvent.EXIT_FREEROLL, "position_monitor", {
+                expected_pnl = (fr_price - entry_price) / 100 * sell_qty
+                remaining = contracts - sell_qty
+                trailing_offset = _trailing_offset_for_price(sell_price)
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=sell_qty, price=fr_price, remaining_qty=remaining,
+                    event=TradeEvent.EXIT_FREEROLL,
+                    note=f"FREEROLL sell {sell_qty}x @ {fr_price}c placed (order: {{order_id}})",
+                    action=f"FREEROLL: Sell {sell_qty}x {ticker} @ {fr_price}c placed (pending fill)",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": fr_price,
                         "sell_qty": sell_qty, "remaining": remaining, "entry": entry_price,
-                        "pnl": round(realized, 2), "order_id": order_id,
-                    })
-
-                    await send_discord_alert(
-                        "🎰 FREEROLL — SELL PLACED",
+                        "pnl": round(expected_pnl, 2),
+                    },
+                    alert_title="🎰 FREEROLL — SELL PLACED",
+                    alert_body=(
                         f"**Sell {sell_qty} of {contracts} {ticker} @ {fr_price}c** (ask-peg)\n"
-                        f"Entry: {entry_price}c | Expected: +${realized:.2f}\n"
-                        f"Status: PENDING FILL — will confirm on next cycle.",
-                        color=0x00FF00,
-                    )
+                        f"Entry: {entry_price}c | Expected: +${expected_pnl:.2f}\n"
+                        f"Status: PENDING FILL — will confirm on next cycle."
+                    ),
+                    alert_color=0x00FF00,
+                    extra_fields={
+                        "freerolled": True,
+                        "peak_price": sell_price,
+                        "trailing_floor": max(entry_price, sell_price - trailing_offset),
+                    },
+                )
                 continue
 
             # ═══════════════════════════════════════════════════
@@ -934,43 +1084,30 @@ async def check_and_manage_positions():
                 logger.info("  %s: QUICK PROFIT — ROI %.0f%% >= %d%%, selling %d of %d @ %dc",
                             ticker, roi, QUICK_PROFIT_ROI_PCT, sell_qty, contracts, qp_price)
 
-                result = await client.place_order(
-                    ticker=ticker, side=side, action="sell",
-                    count=sell_qty, price=qp_price, order_type="limit",
-                )
-
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (qp_price - entry_price) / 100 * sell_qty
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = remaining_after
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = qp_price
-                    pos["quick_profit_taken"] = True
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["notes"].append(
-                        f"{now.isoformat()}: QUICK PROFIT sell {sell_qty}x @ {qp_price}c (ROI={roi:.0f}%, order: {order_id})"
-                    )
-                    actions_taken.append(
-                        f"QUICK PROFIT: Sell {sell_qty}x {ticker} @ {qp_price}c (ROI={roi:.0f}%)"
-                    )
-                    log_event(TradeEvent.EXIT_QUICK_PROFIT, "position_monitor", {
+                expected_pnl = (qp_price - entry_price) / 100 * sell_qty
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=sell_qty, price=qp_price, remaining_qty=remaining_after,
+                    event=TradeEvent.EXIT_QUICK_PROFIT,
+                    note=f"QUICK PROFIT sell {sell_qty}x @ {qp_price}c (ROI={roi:.0f}%, order: {{order_id}})",
+                    action=f"QUICK PROFIT: Sell {sell_qty}x {ticker} @ {qp_price}c (ROI={roi:.0f}%)",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": qp_price,
                         "sell_qty": sell_qty, "remaining": remaining_after,
                         "entry": entry_price, "roi_pct": round(roi, 1),
-                        "pnl": round(realized, 2), "order_id": order_id,
-                    })
-
-                    await send_discord_alert(
-                        "💵 QUICK PROFIT — PARTIAL EXIT",
+                        "pnl": round(expected_pnl, 2),
+                    },
+                    alert_title="💵 QUICK PROFIT — PARTIAL EXIT",
+                    alert_body=(
                         f"**Sell {sell_qty} of {contracts} {ticker} @ {qp_price}c** (ask-peg)\n"
                         f"Entry: {entry_price}c | ROI: {roi:+.0f}%\n"
                         f"{remaining_after} contracts still riding toward freeroll.\n"
-                        f"Expected: +${realized:.2f}",
-                        color=0x2ECC71,
-                    )
+                        f"Expected: +${expected_pnl:.2f}"
+                    ),
+                    alert_color=0x2ECC71,
+                    extra_fields={"quick_profit_taken": True},
+                )
                 continue
 
             # ═══════════════════════════════════════════════════
@@ -988,42 +1125,29 @@ async def check_and_manage_positions():
                 logger.info("  %s: MID-PROFIT — %dc >= %dc, selling %d of %d @ %dc (keeping %d runner)",
                             ticker, sell_price, MID_PROFIT_THRESHOLD_CENTS, sell_qty, contracts, mp_price, remaining_after)
 
-                result = await client.place_order(
-                    ticker=ticker, side=side, action="sell",
-                    count=sell_qty, price=mp_price, order_type="limit",
-                )
-
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (mp_price - entry_price) / 100 * sell_qty
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = remaining_after
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = mp_price
-                    pos["mid_profit_taken"] = True
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["notes"].append(
-                        f"{now.isoformat()}: MID-PROFIT sell {sell_qty}x @ {mp_price}c (order: {order_id})"
-                    )
-                    actions_taken.append(
-                        f"MID-PROFIT: Sell {sell_qty}x {ticker} @ {mp_price}c placed (pending fill)"
-                    )
-                    log_event(TradeEvent.EXIT_MID_PROFIT, "position_monitor", {
+                expected_pnl = (mp_price - entry_price) / 100 * sell_qty
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=sell_qty, price=mp_price, remaining_qty=remaining_after,
+                    event=TradeEvent.EXIT_MID_PROFIT,
+                    note=f"MID-PROFIT sell {sell_qty}x @ {mp_price}c (order: {{order_id}})",
+                    action=f"MID-PROFIT: Sell {sell_qty}x {ticker} @ {mp_price}c placed (pending fill)",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": mp_price,
                         "sell_qty": sell_qty, "remaining": remaining_after, "entry": entry_price,
-                        "pnl": round(realized, 2), "order_id": order_id,
-                    })
-
-                    await send_discord_alert(
-                        "📊 MID-RANGE PROFIT — SELL PLACED",
+                        "pnl": round(expected_pnl, 2),
+                    },
+                    alert_title="📊 MID-RANGE PROFIT — SELL PLACED",
+                    alert_body=(
                         f"**Sell {sell_qty} of {contracts} {ticker} @ {mp_price}c** (Tier 2, ask-peg)\n"
                         f"Entry: {entry_price}c | {remaining_after} contracts riding to 90¢+\n"
-                        f"Expected: +${realized:.2f}\n"
-                        f"Status: PENDING FILL — will confirm on next cycle.",
-                        color=0x2ECC71,
-                    )
+                        f"Expected: +${expected_pnl:.2f}\n"
+                        f"Status: PENDING FILL — will confirm on next cycle."
+                    ),
+                    alert_color=0x2ECC71,
+                    extra_fields={"mid_profit_taken": True},
+                )
                 continue
 
             # ═══════════════════════════════════════════════════
@@ -1061,41 +1185,28 @@ async def check_and_manage_positions():
                     logger.info("  %s: TRAILING STOP — %dc <= floor %dc (peak %dc), selling %dx",
                                 ticker, sell_price, floor, peak, contracts)
 
-                    result = await client.place_order(
-                        ticker=ticker,
-                        side=side,
-                        action="sell",
-                        count=contracts,
-                        price=sell_price,
-                        order_type="limit",
-                    )
-
-                    if result:
-                        order_id = result.get("order", {}).get("order_id", "")
-                        realized = (sell_price - entry_price) / 100 * contracts
-                        pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                        pos["status"] = "pending_sell"
-                        pos["sell_order_id"] = order_id
-                        pos["sell_placed_at"] = now.isoformat()
-                        pos["_pending_remaining_qty"] = 0
-                        pos["_pre_sell_qty"] = contracts
-                        pos["_sell_price_placed"] = sell_price
-                        pos["notes"].append(f"{now.isoformat()}: TRAILING STOP sell placed at {sell_price}c (order: {order_id})")
-                        actions_taken.append(f"TRAILING STOP: Sell {contracts}x {ticker} @ {sell_price}c placed (pending fill)")
-                        log_event(TradeEvent.EXIT_TRAILING_STOP, "position_monitor", {
+                    expected_pnl = (sell_price - entry_price) / 100 * contracts
+                    await _place_exit_sell(
+                        client, pos, now,
+                        qty=contracts, price=sell_price, remaining_qty=0,
+                        event=TradeEvent.EXIT_TRAILING_STOP,
+                        note=f"TRAILING STOP sell placed at {sell_price}c (order: {{order_id}})",
+                        action=f"TRAILING STOP: Sell {contracts}x {ticker} @ {sell_price}c placed (pending fill)",
+                        actions_taken=actions_taken,
+                        log_payload={
                             "ticker": ticker, "side": side, "price": sell_price,
                             "qty": contracts, "entry": entry_price, "peak": peak, "floor": floor,
-                            "pnl": round(realized, 2), "order_id": order_id,
-                        })
-
-                        await send_discord_alert(
-                            "📉 TRAILING STOP — SELL PLACED",
+                            "pnl": round(expected_pnl, 2),
+                        },
+                        alert_title="📉 TRAILING STOP — SELL PLACED",
+                        alert_body=(
                             f"**Sell {contracts}x {ticker} @ {sell_price}c** (limit order)\n"
                             f"Entry: {entry_price}c | Peak: {peak}c | Floor: {floor}c\n"
-                            f"Expected: +${realized:.2f}\n"
-                            f"Status: PENDING FILL — will confirm on next cycle.",
-                            color=0xFF6600,
-                        )
+                            f"Expected: +${expected_pnl:.2f}\n"
+                            f"Status: PENDING FILL — will confirm on next cycle."
+                        ),
+                        alert_color=0xFF6600,
+                    )
                     continue
                 elif thin_book and sell_price <= floor:
                     logger.info("  %s: Trailing stop SKIPPED — thin book (bid_vol=%d, price=%dc)", ticker, bid_volume, sell_price)
@@ -1136,38 +1247,28 @@ async def check_and_manage_positions():
                 if not is_drop and mfloor > 0 and sell_price < mfloor and sell_price > STOP_LOSS_FLOOR_CENTS and not thin_book:
                     logger.info("  %s: MOMENTUM FLOOR BREACHED — %dc < floor %dc, selling %dx",
                                 ticker, sell_price, mfloor, contracts)
-                    result = await client.place_order(
-                        ticker=ticker, side=side, action="sell",
-                        count=contracts, price=sell_price, order_type="limit",
-                    )
-                    if result:
-                        order_id = result.get("order", {}).get("order_id", "")
-                        realized = (sell_price - entry_price) / 100 * contracts
-                        pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                        pos["status"] = "pending_sell"
-                        pos["sell_order_id"] = order_id
-                        pos["sell_placed_at"] = now.isoformat()
-                        pos["_pending_remaining_qty"] = 0
-                        pos["_pre_sell_qty"] = contracts
-                        pos["_sell_price_placed"] = sell_price
-                        pos["notes"].append(
-                            f"{now.isoformat()}: MOMENTUM EXIT — floor {mfloor}c breached at {sell_price}c"
-                        )
-                        actions_taken.append(f"MOMENTUM EXIT: Sell {contracts}x {ticker} @ {sell_price}c")
-                        log_event(TradeEvent.EXIT_MOMENTUM_ALERT, "position_monitor", {
+                    expected_pnl = (sell_price - entry_price) / 100 * contracts
+                    await _place_exit_sell(
+                        client, pos, now,
+                        qty=contracts, price=sell_price, remaining_qty=0,
+                        event=TradeEvent.EXIT_MOMENTUM_ALERT,
+                        note=f"MOMENTUM EXIT — floor {mfloor}c breached at {sell_price}c",
+                        action=f"MOMENTUM EXIT: Sell {contracts}x {ticker} @ {sell_price}c",
+                        actions_taken=actions_taken,
+                        log_payload={
                             "ticker": ticker, "side": side, "price": sell_price,
                             "qty": contracts, "entry": entry_price,
-                            "momentum_floor": mfloor, "pnl": round(realized, 2),
-                            "order_id": order_id,
-                        })
-                        await send_discord_alert(
-                            "⚡ MOMENTUM EXIT — SELL PLACED",
+                            "momentum_floor": mfloor, "pnl": round(expected_pnl, 2),
+                        },
+                        alert_title="⚡ MOMENTUM EXIT — SELL PLACED",
+                        alert_body=(
                             f"**Sell {contracts}x {ticker} @ {sell_price}c** (limit order)\n"
                             f"Entry: {entry_price}c | Momentum floor: {mfloor}c\n"
-                            f"Expected P&L: ${realized:.2f}\n"
-                            f"Status: PENDING FILL — will confirm on next cycle.",
-                            color=0xFF0000,
-                        )
+                            f"Expected P&L: ${expected_pnl:.2f}\n"
+                            f"Status: PENDING FILL — will confirm on next cycle."
+                        ),
+                        alert_color=0xFF0000,
+                    )
                     continue
             elif not pos.get("freerolled"):
                 # Still update prev cycle price even when momentum disabled
@@ -1207,39 +1308,30 @@ async def check_and_manage_positions():
                 logger.info("  %s: THESIS TRIM — confidence %s (40-%d zone), selling %d of %d @ %dc",
                             ticker, last_conf, THESIS_TRIM_CONFIDENCE_HIGH, trim_qty, contracts, sell_price)
 
-                result = await client.place_order(
-                    ticker=ticker, side=side, action="sell",
-                    count=trim_qty, price=sell_price, order_type="limit",
-                )
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (sell_price - entry_price) / 100 * trim_qty
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = remaining_after
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = sell_price
-                    pos["thesis_trimmed"] = True
-                    pos["notes"].append(
-                        f"{now.isoformat()}: THESIS TRIM — sold {trim_qty}x @ {sell_price}c (conf={last_conf})"
-                    )
-                    actions_taken.append(f"THESIS TRIM: Sell {trim_qty}x {ticker} @ {sell_price}c (conf={last_conf})")
-                    log_event(TradeEvent.EXIT_THESIS_TRIM, "position_monitor", {
+                expected_pnl = (sell_price - entry_price) / 100 * trim_qty
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=trim_qty, price=sell_price, remaining_qty=remaining_after,
+                    event=TradeEvent.EXIT_THESIS_TRIM,
+                    note=f"THESIS TRIM — sold {trim_qty}x @ {sell_price}c (conf={last_conf})",
+                    action=f"THESIS TRIM: Sell {trim_qty}x {ticker} @ {sell_price}c (conf={last_conf})",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": sell_price,
                         "trim_qty": trim_qty, "remaining": remaining_after,
                         "entry": entry_price, "confidence": last_conf,
-                        "pnl": round(realized, 2), "order_id": order_id,
-                    })
-                    await send_discord_alert(
-                        "✂️ THESIS TRIM — PARTIAL EXIT",
+                        "pnl": round(expected_pnl, 2),
+                    },
+                    alert_title="✂️ THESIS TRIM — PARTIAL EXIT",
+                    alert_body=(
                         f"**Sell {trim_qty} of {contracts} {ticker} @ {sell_price}c**\n"
                         f"Entry: {entry_price}c | Confidence: {last_conf}/100\n"
                         f"Zone: {THESIS_BREAK_CONFIDENCE}-{THESIS_TRIM_CONFIDENCE_HIGH} (trim, not full exit)\n"
-                        f"{remaining_after} contracts remain. Expected: +${realized:.2f}",
-                        color=0xFFA500,
-                    )
+                        f"{remaining_after} contracts remain. Expected: +${expected_pnl:.2f}"
+                    ),
+                    alert_color=0xFFA500,
+                    extra_fields={"thesis_trimmed": True},
+                )
                 continue
 
             elif thesis_action == "exit" and sell_price > STOP_LOSS_FLOOR_CENTS and not thin_book:
@@ -1247,38 +1339,29 @@ async def check_and_manage_positions():
                 logger.info("  %s: THESIS BREAK — confidence %s/100 < %d threshold, selling %dx @ %dc",
                             ticker, last_conf, THESIS_BREAK_CONFIDENCE, contracts, sell_price)
 
-                result = await client.place_order(
-                    ticker=ticker, side=side, action="sell",
-                    count=contracts, price=sell_price, order_type="limit",
-                )
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (sell_price - entry_price) / 100 * contracts
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = 0
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = sell_price
-                    pos["notes"].append(
-                        f"{now.isoformat()}: THESIS BREAK sell at {sell_price}c (conf={last_conf})"
-                    )
-                    actions_taken.append(f"THESIS BREAK: Sell {contracts}x {ticker} @ {sell_price}c (conf={last_conf})")
-                    log_event(TradeEvent.EXIT_THESIS_BREAK, "position_monitor", {
+                expected_pnl = (sell_price - entry_price) / 100 * contracts
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=contracts, price=sell_price, remaining_qty=0,
+                    event=TradeEvent.EXIT_THESIS_BREAK,
+                    note=f"THESIS BREAK sell at {sell_price}c (conf={last_conf})",
+                    action=f"THESIS BREAK: Sell {contracts}x {ticker} @ {sell_price}c (conf={last_conf})",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": sell_price,
                         "qty": contracts, "entry": entry_price, "confidence": last_conf,
-                        "threshold": THESIS_BREAK_CONFIDENCE, "pnl": round(realized, 2),
-                        "roi_pct": round(roi, 1), "order_id": order_id,
-                    })
-                    await send_discord_alert(
-                        "🧠 THESIS BREAK — EXIT",
+                        "threshold": THESIS_BREAK_CONFIDENCE, "pnl": round(expected_pnl, 2),
+                        "roi_pct": round(roi, 1),
+                    },
+                    alert_title="🧠 THESIS BREAK — EXIT",
+                    alert_body=(
                         f"**Sell {contracts}x {ticker} @ {sell_price}c** (limit order)\n"
                         f"Entry: {entry_price}c | ROI: {roi:+.0f}%\n"
-                        f"Expected P&L: ${realized:.2f}\n"
-                        f"Reason: Confidence dropped to {last_conf}/100 (threshold: {THESIS_BREAK_CONFIDENCE})",
-                        color=0xFF0000,
-                    )
+                        f"Expected P&L: ${expected_pnl:.2f}\n"
+                        f"Reason: Confidence dropped to {last_conf}/100 (threshold: {THESIS_BREAK_CONFIDENCE})"
+                    ),
+                    alert_color=0xFF0000,
+                )
                 continue
 
             # ═══════════════════════════════════════════════════
@@ -1294,37 +1377,28 @@ async def check_and_manage_positions():
                 logger.info("  %s: ROI BACKSTOP — ROI %.0f%% breached %d%% threshold, selling %dx @ %dc",
                             ticker, roi, STOP_LOSS_ROI_PCT, contracts, sell_price)
 
-                result = await client.place_order(
-                    ticker=ticker, side=side, action="sell",
-                    count=contracts, price=sell_price, order_type="limit",
-                )
-                if result:
-                    order_id = result.get("order", {}).get("order_id", "")
-                    realized = (sell_price - entry_price) / 100 * contracts
-                    pos["pnl_realized"] = pos.get("pnl_realized", 0) + realized
-                    pos["status"] = "pending_sell"
-                    pos["sell_order_id"] = order_id
-                    pos["sell_placed_at"] = now.isoformat()
-                    pos["_pending_remaining_qty"] = 0
-                    pos["_pre_sell_qty"] = contracts
-                    pos["_sell_price_placed"] = sell_price
-                    pos["notes"].append(
-                        f"{now.isoformat()}: ROI BACKSTOP sell at {sell_price}c ({roi:.0f}% ROI)"
-                    )
-                    actions_taken.append(f"ROI BACKSTOP: Sell {contracts}x {ticker} @ {sell_price}c")
-                    log_event(TradeEvent.EXIT_ROI_BACKSTOP, "position_monitor", {
+                expected_pnl = (sell_price - entry_price) / 100 * contracts
+                await _place_exit_sell(
+                    client, pos, now,
+                    qty=contracts, price=sell_price, remaining_qty=0,
+                    event=TradeEvent.EXIT_ROI_BACKSTOP,
+                    note=f"ROI BACKSTOP sell at {sell_price}c ({roi:.0f}% ROI)",
+                    action=f"ROI BACKSTOP: Sell {contracts}x {ticker} @ {sell_price}c",
+                    actions_taken=actions_taken,
+                    log_payload={
                         "ticker": ticker, "side": side, "price": sell_price,
                         "qty": contracts, "entry": entry_price,
-                        "roi_pct": round(roi, 1), "pnl": round(realized, 2), "order_id": order_id,
-                    })
-                    await send_discord_alert(
-                        "🛑 ROI BACKSTOP — EXIT",
+                        "roi_pct": round(roi, 1), "pnl": round(expected_pnl, 2),
+                    },
+                    alert_title="🛑 ROI BACKSTOP — EXIT",
+                    alert_body=(
                         f"**Sell {contracts}x {ticker} @ {sell_price}c** (limit order)\n"
                         f"Entry: {entry_price}c | ROI: {roi:+.0f}%\n"
-                        f"Expected loss: ${realized:.2f}\n"
-                        f"Reason: ROI breached {STOP_LOSS_ROI_PCT}% threshold (thesis not re-scanned)",
-                        color=0xFF0000,
-                    )
+                        f"Expected loss: ${expected_pnl:.2f}\n"
+                        f"Reason: ROI breached {STOP_LOSS_ROI_PCT}% threshold (thesis not re-scanned)"
+                    ),
+                    alert_color=0xFF0000,
+                )
                 continue
 
             else:
@@ -1344,6 +1418,13 @@ async def check_and_manage_positions():
             # (shouldn't happen, but defensive)
             for leftover in modified_by_ticker.values():
                 current_positions.append(leftover)
+            # Recompute paper cash from the authoritative merged ledger while we
+            # still hold the lock; self-healing against concurrent-write drift.
+            _, _, paper_balance, _ = rebuild_balance(current_positions)
+
+        # Paper-only: pin the balance to the recomputed value (stop() persists it).
+        if getattr(client, "mode", "") == "paper":
+            await client.sync_balance(paper_balance)
 
         # Record successful completion for watchdog
         from heartbeat import write_heartbeat

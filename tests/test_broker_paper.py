@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -229,6 +229,90 @@ class TestCancelAndGetOrders:
             await broker.stop()
 
         asyncio.run(go())
+
+
+class TestPlaceOrderSignatureParity:
+    """PaperBroker.place_order must accept the exact kwargs production passes.
+
+    Regression: execute_trade.py / proxy_arb_engine.py pass client_order_id;
+    PaperBroker used to raise TypeError, swallowed upstream as a failed trade.
+    """
+
+    # Exact kwargs from execute_trade.py:206 / :361 and proxy_arb_engine.py:1104
+    PRODUCTION_KWARGS = dict(
+        ticker="X", side="yes", action="buy", count=10, price=46,
+        order_type="limit", client_order_id="11111111-2222-3333-4444-555555555555",
+    )
+
+    def test_accepts_production_kwargs_and_records_client_order_id(self):
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="instant",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            resp = await broker.place_order(**self.PRODUCTION_KWARGS)
+            order = resp["order"]
+            assert order["status"] == "EXECUTED"
+            assert order["client_order_id"] == self.PRODUCTION_KWARGS["client_order_id"]
+            await broker.stop()
+
+        asyncio.run(go())
+
+    def test_resting_order_persists_client_order_id(self):
+        """Persisted, so StateDB reconciliation can match it after restart."""
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="resting",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            # bid+1 entry as production places it: 41c rests below the 45c ask
+            kwargs = {**self.PRODUCTION_KWARGS, "price": 41}
+            resp = await broker.place_order(**kwargs)
+            assert resp["order"]["status"] == "RESTING"
+            saved = json.loads(_test_orders.read_text())
+            assert saved[0]["client_order_id"] == self.PRODUCTION_KWARGS["client_order_id"]
+            await broker.stop()
+
+        asyncio.run(go())
+
+    def test_generates_client_order_id_when_omitted(self):
+        """Parity with KalshiClient, which always sends an idempotency key."""
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="resting",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            # position_monitor.py-style call: no client_order_id
+            resp = await broker.place_order(
+                ticker="X", side="yes", action="sell",
+                count=5, price=60, order_type="limit",
+            )
+            assert resp["order"]["client_order_id"]
+            await broker.stop()
+
+        asyncio.run(go())
+
+    def test_signature_matches_kalshi_client(self):
+        """Guard against future drift: both brokers must bind production kwargs."""
+        import inspect
+        from core.broker import PaperBroker
+        from kalshi_client import KalshiClient
+
+        for cls in (PaperBroker, KalshiClient):
+            sig = inspect.signature(cls.place_order)
+            sig.bind(None, **self.PRODUCTION_KWARGS)  # raises TypeError on mismatch
 
 
 class TestBidAskExtraction:
