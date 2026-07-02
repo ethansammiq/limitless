@@ -1,8 +1,6 @@
 """Tests for stale_price_detector.py — Ensemble shift tracking."""
 
-import json
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -114,93 +112,176 @@ class TestBuildSnapshot:
 # ─── Test: detect_stale_prices ─────────────────────────
 
 
+@pytest.fixture
+def stale_config(monkeypatch):
+    """Pin detection thresholds to production defaults for determinism."""
+    monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
+    monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.5)
+    monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 8)
+
+
 class TestDetectStalePrices:
-    """Core stale price detection logic."""
+    """Core stale price detection logic.
+
+    Expected repricing is the model-implied probability change of each
+    bracket between the two normal-approximated ensembles (mean/std), so
+    the numbers in comments come from NormalDist CDFs.
+    """
 
     def test_no_previous_returns_empty(self):
         current = _snap()
         alerts = detect_stale_prices("NYC", current, None)
         assert alerts == []
 
-    def test_small_shift_returns_empty(self):
-        """Shift of 1.0°F < 1.5°F threshold → no alerts."""
+    def test_small_shift_returns_empty(self, stale_config):
+        """Shift of 1.0°F < 1.5°F threshold → no alerts, even for flat bids."""
         prev = _snap(mean=73.0)
-        curr = _snap(mean=74.0)
+        curr = _snap(mean=74.0)  # identical default bids → all flat
         alerts = detect_stale_prices("NYC", curr, prev)
         assert alerts == []
 
-    def test_exactly_at_threshold(self):
-        """Shift of exactly 1.5°F → triggers detection (>= threshold)."""
-        prev = _snap(mean=73.0, bids={
+    def test_stale_unmoved_bid_at_min_shift_warmer(self, stale_config):
+        """Canonical stale case: +1.5°F shift, above-mean bid did not move → alert."""
+        prev = _snap(mean=73.0, std=1.5, bids={
             "T-74-75": {"bid": 30, "title": "74° to 75°F"},
         })
-        curr = _snap(mean=74.5, bids={
+        curr = _snap(mean=74.5, std=1.5, bids={
             "T-74-75": {"bid": 30, "title": "74° to 75°F"},  # bid didn't move!
         })
         alerts = detect_stale_prices("NYC", curr, prev)
-        # expected_change = int(1.5 * 2) = 3
-        # bid_change = 0
-        # check: 0 < 3 - 8 = -5 → 0 < -5 is False → no alert
-        # With MIN_GAP=8, the gap check is lenient for small shifts
-        assert alerts == []
-
-    def test_large_warmer_shift_stale_bid(self, monkeypatch):
-        """Ensemble warms by 3°F but bracket bid barely moved → alert."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.5)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
-        prev = _snap(mean=70.0, bids={
-            "T-72-73": {"bid": 40, "title": "72° to 73°F"},
-        })
-        curr = _snap(mean=73.0, bids={
-            "T-72-73": {"bid": 41, "title": "72° to 73°F"},  # only +1¢
-        })
-        alerts = detect_stale_prices("NYC", curr, prev)
-        # mean_shift = +3.0°F, expected_change = 6¢
-        # bid_change = +1¢
-        # check: 1 < 6 - 2 = 4 → True → alert!
+        # P(74-76) goes 0.230 → 0.472 → expected_change = +24¢
+        # bid_change = 0 <= 24 - 8 = 16 → stale
         assert len(alerts) == 1
         assert alerts[0].direction == "warmer"
-        assert alerts[0].mean_shift_f == 3.0
-        assert alerts[0].prev_bid == 40
-        assert alerts[0].actual_bid == 41
+        assert alerts[0].mean_shift_f == 1.5
+        assert alerts[0].ticker == "T-74-75"
+        assert alerts[0].expected_bid_change == 24
+        assert alerts[0].prev_bid == 30
+        assert alerts[0].actual_bid == 30
 
-    def test_large_cooler_shift_stale_bid(self, monkeypatch):
-        """Ensemble cools by 3°F but bracket bid barely moved → alert."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.5)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
-        prev = _snap(mean=75.0, bids={
-            "T-72-73": {"bid": 45, "title": "72° to 73°F"},
+    def test_stale_unmoved_bid_cooler(self, stale_config):
+        """Cooler shift: above-mean bracket should have collapsed but sat still → alert."""
+        prev = _snap(mean=75.0, std=1.5, bids={
+            "T-75-76": {"bid": 40, "title": "75° to 76°F"},
         })
-        curr = _snap(mean=72.0, bids={
-            "T-72-73": {"bid": 44, "title": "72° to 73°F"},  # only -1¢
+        curr = _snap(mean=73.5, std=1.5, bids={
+            "T-75-76": {"bid": 40, "title": "75° to 76°F"},  # bid didn't move!
         })
         alerts = detect_stale_prices("NYC", curr, prev)
-        # mean_shift = -3.0°F (cooler), expected_change = 6¢
-        # bid_change = -1¢
-        # check: -1 > -(6 - 2) = -4 → -1 > -4 → True → alert!
+        # P(75-77) goes 0.409 → 0.149 → expected_change = -26¢
+        # bid_change = 0 >= -26 + 8 = -18 → stale
         assert len(alerts) == 1
         assert alerts[0].direction == "cooler"
-        assert alerts[0].mean_shift_f == -3.0
+        assert alerts[0].mean_shift_f == -1.5
+        assert alerts[0].expected_bid_change == -26
 
-    def test_bid_moved_appropriately_no_alert(self, monkeypatch):
-        """Bid repriced correctly → no alert."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.5)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
-        prev = _snap(mean=70.0, bids={
-            "T-72-73": {"bid": 40, "title": "72° to 73°F"},
+    def test_correctly_repriced_no_alert(self, stale_config):
+        """Bid moved commensurately with the warranted change → no alert."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-74-75": {"bid": 30, "title": "74° to 75°F"},
         })
-        curr = _snap(mean=73.0, bids={
-            "T-72-73": {"bid": 50, "title": "72° to 73°F"},  # +10¢
+        curr = _snap(mean=74.5, std=1.5, bids={
+            "T-74-75": {"bid": 52, "title": "74° to 75°F"},  # +22¢ vs +24¢ warranted
         })
         alerts = detect_stale_prices("NYC", curr, prev)
-        # bid_change = +10, expected = 6, 10 >= 6-2 = 4 → no alert
+        # bid_change = 22 > 24 - 8 = 16 → healthy
         assert alerts == []
+
+    def test_correctly_repriced_cooler_no_alert(self, stale_config):
+        """Cooler shift, bid collapsed as warranted → no alert."""
+        prev = _snap(mean=75.0, std=1.5, bids={
+            "T-75-76": {"bid": 40, "title": "75° to 76°F"},
+        })
+        curr = _snap(mean=73.5, std=1.5, bids={
+            "T-75-76": {"bid": 16, "title": "75° to 76°F"},  # -24¢ vs -26¢ warranted
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        # bid_change = -24 < -26 + 8 = -18 → healthy
+        assert alerts == []
+
+    def test_below_mean_bracket_collapsing_on_warm_shift_not_flagged(self, stale_config):
+        """Regression for inverted logic: a below-mean bracket that correctly
+        collapsed on a warmer shift must NOT be flagged, while an above-mean
+        bracket that sat still MUST be."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-70-71": {"bid": 38, "title": "70° to 71°F"},  # below mean
+            "T-77-78": {"bid": 20, "title": "77° to 78°F"},  # above new mean
+        })
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-70-71": {"bid": 16, "title": "70° to 71°F"},  # collapsed -22¢ (correct)
+            "T-77-78": {"bid": 20, "title": "77° to 78°F"},  # sat still (stale)
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        # T-70-71: expected -23¢, moved -22¢ → healthy
+        # T-77-78: expected +23¢, moved 0¢ → stale
+        assert len(alerts) == 1
+        assert alerts[0].ticker == "T-77-78"
+        assert alerts[0].expected_bid_change == 23
+
+    def test_below_mean_bracket_flat_on_warm_shift_is_stale(self, stale_config):
+        """Position-aware direction: a below-mean bracket that should have
+        collapsed on a warmer shift but didn't move is stale (NO-side edge)."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-70-71": {"bid": 38, "title": "70° to 71°F"},
+        })
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-70-71": {"bid": 38, "title": "70° to 71°F"},  # should have collapsed
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        # expected_change = -23¢, bid_change = 0 >= -23 + 8 = -15 → stale
+        assert len(alerts) == 1
+        assert alerts[0].ticker == "T-70-71"
+        assert alerts[0].expected_bid_change == -23
+        assert alerts[0].direction == "warmer"
+
+    def test_far_bracket_small_warranted_change_skipped(self, stale_config):
+        """Bracket far from both means: shift passes the threshold but the
+        warranted repricing is < MIN_GAP → an unmoved bid is not stale."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-60-61": {"bid": 20, "title": "60° to 61°F"},
+        })
+        curr = _snap(mean=74.5, std=1.5, bids={
+            "T-60-61": {"bid": 20, "title": "60° to 61°F"},
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        assert alerts == []
+
+    def test_tail_bracket_uses_open_ended_bounds(self, stale_config):
+        """'X or above' tail brackets get a position-aware expectation too."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-78UP": {"bid": 15, "title": "78° or above"},
+        })
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-78UP": {"bid": 15, "title": "78° or above"},  # should have risen
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        # P(>=78) goes 0.0004 → 0.091 → expected_change = +9¢; flat bid → stale
+        assert len(alerts) == 1
+        assert alerts[0].expected_bid_change == 9
+
+    def test_unparseable_title_skipped(self, stale_config):
+        """Brackets whose title can't be parsed into a range are skipped."""
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-???": {"bid": 30, "title": "???"},
+        })
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-???": {"bid": 30, "title": "???"},
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        assert alerts == []
+
+    def test_zero_std_falls_back_to_default(self, stale_config):
+        """Legacy state with std=0 must not crash NormalDist; fallback σ used."""
+        prev = _snap(mean=73.0, std=0, bids={
+            "T-74-75": {"bid": 30, "title": "74° to 75°F"},
+        })
+        curr = _snap(mean=76.0, std=0, bids={
+            "T-74-75": {"bid": 30, "title": "74° to 75°F"},
+        })
+        alerts = detect_stale_prices("NYC", curr, prev)
+        # With fallback σ=2.0: P(74-76) goes 0.242 → 0.341 → expected +10¢
+        assert len(alerts) == 1
+        assert alerts[0].expected_bid_change == 10
 
     def test_disabled_returns_empty(self, monkeypatch):
         """Feature flag off → no alerts."""
@@ -222,12 +303,8 @@ class TestDetectStalePrices:
         alerts2 = detect_stale_prices("NYC", curr2, prev2)
         assert alerts2 == []
 
-    def test_new_ticker_not_in_previous(self, monkeypatch):
+    def test_new_ticker_not_in_previous(self, stale_config):
         """Bracket in current but not in previous → skipped, no crash."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.0)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
         prev = _snap(mean=70.0, bids={
             "T-70-71": {"bid": 40, "title": "70° to 71°F"},
         })
@@ -237,12 +314,8 @@ class TestDetectStalePrices:
         alerts = detect_stale_prices("NYC", curr, prev)
         assert alerts == []  # skipped because T-72-73 not in previous
 
-    def test_zero_bid_skipped(self, monkeypatch):
+    def test_zero_bid_skipped(self, stale_config):
         """Brackets with zero bid are skipped."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.0)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
         prev = _snap(mean=70.0, bids={
             "T-72-73": {"bid": 0, "title": "72° to 73°F"},
         })
@@ -252,42 +325,34 @@ class TestDetectStalePrices:
         alerts = detect_stale_prices("NYC", curr, prev)
         assert alerts == []
 
-    def test_bid_outside_tradeable_range_skipped(self, monkeypatch):
+    def test_bid_outside_tradeable_range_skipped(self, stale_config):
         """Bids below 15¢ or above 85¢ are skipped (not tradeable)."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.0)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 0)
-
-        prev = _snap(mean=70.0, bids={
-            "T-low": {"bid": 5, "title": "Low bracket"},
-            "T-high": {"bid": 90, "title": "High bracket"},
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-76-77": {"bid": 5, "title": "76° to 77°F"},
+            "T-77-78": {"bid": 90, "title": "77° to 78°F"},
         })
-        curr = _snap(mean=73.0, bids={
-            "T-low": {"bid": 5, "title": "Low bracket"},
-            "T-high": {"bid": 90, "title": "High bracket"},
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-76-77": {"bid": 5, "title": "76° to 77°F"},   # stale but < 15¢
+            "T-77-78": {"bid": 90, "title": "77° to 78°F"},  # stale but > 85¢
         })
         alerts = detect_stale_prices("NYC", curr, prev)
         assert alerts == []
 
-    def test_multiple_stale_brackets(self, monkeypatch):
+    def test_multiple_stale_brackets(self, stale_config):
         """Multiple brackets stale in same shift → multiple alerts."""
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_ENABLED", True)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_SHIFT_F", 1.5)
-        monkeypatch.setattr("stale_price_detector.STALE_PRICE_MIN_GAP_CENTS", 2)
-
-        prev = _snap(mean=70.0, bids={
-            "T-72-73": {"bid": 40, "title": "72° to 73°F"},
-            "T-74-75": {"bid": 30, "title": "74° to 75°F"},
+        prev = _snap(mean=73.0, std=1.5, bids={
+            "T-76-77": {"bid": 20, "title": "76° to 77°F"},
+            "T-77-78": {"bid": 20, "title": "77° to 78°F"},
         })
-        curr = _snap(mean=73.0, bids={
-            "T-72-73": {"bid": 40, "title": "72° to 73°F"},  # didn't move
-            "T-74-75": {"bid": 30, "title": "74° to 75°F"},  # didn't move
+        curr = _snap(mean=76.0, std=1.5, bids={
+            "T-76-77": {"bid": 20, "title": "76° to 77°F"},  # didn't move
+            "T-77-78": {"bid": 20, "title": "77° to 78°F"},  # didn't move
         })
         alerts = detect_stale_prices("NYC", curr, prev)
         assert len(alerts) == 2
         tickers = {a.ticker for a in alerts}
-        assert "T-72-73" in tickers
-        assert "T-74-75" in tickers
+        assert "T-76-77" in tickers
+        assert "T-77-78" in tickers
 
 
 # ─── Test: state persistence ──────────────────────────

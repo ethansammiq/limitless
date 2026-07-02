@@ -2,9 +2,13 @@
 STALE PRICE DETECTOR — Ensemble shift tracking between scans.
 
 Compares the current scan's ensemble mean per city against the previous
-scan.  If the ensemble has shifted by ≥ STALE_PRICE_MIN_SHIFT_F but
-the market bid on the affected bracket hasn't repriced by at least
-STALE_PRICE_MIN_GAP_CENTS, that's a stale-price opportunity.
+scan.  If the ensemble has shifted by ≥ STALE_PRICE_MIN_SHIFT_F, each
+bracket's warranted repricing is estimated from the normal-approximated
+ensemble (mean/std of both scans).  A bracket whose bid fell short of that
+warranted move by ≥ STALE_PRICE_MIN_GAP_CENTS in the expected direction is
+a stale-price opportunity.  Direction is per bracket: on a warmer shift,
+brackets above the moving mean should get more expensive and brackets
+below it cheaper (and vice versa for cooler shifts).
 
 State persistence:
   Saves {city: {mean, bracket_bids}} after each scan to a JSON file.
@@ -21,6 +25,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from statistics import NormalDist
 from zoneinfo import ZoneInfo
 
 from config import (
@@ -37,6 +42,10 @@ ET = ZoneInfo("America/New_York")
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATE_PATH = PROJECT_ROOT / STALE_PRICE_STATE_FILE
 
+# Used when a snapshot carries no usable ensemble spread (e.g. legacy state
+# files where std defaulted to 0) — a typical daily-high ensemble σ.
+_FALLBACK_STD_F = 2.0
+
 
 @dataclass
 class StaleAlert:
@@ -48,7 +57,7 @@ class StaleAlert:
     curr_mean: float
     bracket_title: str          # The bracket that should have repriced
     ticker: str
-    expected_bid_change: int    # How much the bid should have moved (approx)
+    expected_bid_change: int    # Signed model-implied bid change (¢); negative = should have gotten cheaper
     actual_bid: int             # Current market bid
     prev_bid: int               # Previous scan's bid
 
@@ -131,6 +140,36 @@ def build_snapshot(
     )
 
 
+def _bracket_probability(low: float, high: float, mean: float, std: float) -> float:
+    """P(daily high lands in the bracket) under a normal ensemble approximation.
+
+    parse_bracket_range encodes tails with ±999 sentinels; the CDF saturates
+    to 0/1 there, so no special-casing is needed.
+    """
+    dist = NormalDist(mean, std)
+    return max(0.0, dist.cdf(high) - dist.cdf(low))
+
+
+def _expected_repricing_cents(
+    low: float,
+    high: float,
+    previous: ScanSnapshot,
+    current: ScanSnapshot,
+) -> int:
+    """Signed model-implied bid change (¢) for one bracket between two scans.
+
+    Positive → the bracket should have gotten more expensive, negative →
+    cheaper.  The sign falls out of the bracket's position relative to the
+    moving ensemble mean, so a below-mean bracket on a warmer shift correctly
+    expects a drop.
+    """
+    prev_std = previous.std if previous.std > 0 else _FALLBACK_STD_F
+    curr_std = current.std if current.std > 0 else _FALLBACK_STD_F
+    p_prev = _bracket_probability(low, high, previous.mean, prev_std)
+    p_curr = _bracket_probability(low, high, current.mean, curr_std)
+    return round((p_curr - p_prev) * 100)
+
+
 def detect_stale_prices(
     city_key: str,
     current: ScanSnapshot,
@@ -140,7 +179,10 @@ def detect_stale_prices(
 
     Returns list of StaleAlert for brackets where:
     1. Ensemble mean shifted by >= STALE_PRICE_MIN_SHIFT_F
-    2. Market bid barely moved (< expected repricing)
+    2. The shift warranted a repricing of this bracket by
+       >= STALE_PRICE_MIN_GAP_CENTS (model-implied, position-aware)
+    3. The bid fell short of that warranted move by
+       >= STALE_PRICE_MIN_GAP_CENTS in the expected direction
     """
     if not STALE_PRICE_ENABLED:
         return []
@@ -154,6 +196,10 @@ def detect_stale_prices(
 
     if abs_shift < STALE_PRICE_MIN_SHIFT_F:
         return []
+
+    # Deferred import: edge_scanner_v2 is heavy (numpy, calibration init) and
+    # this module is otherwise a light leaf; auto_scan already has it loaded.
+    from edge_scanner_v2 import parse_bracket_range
 
     direction = "warmer" if mean_shift > 0 else "cooler"
     alerts = []
@@ -169,52 +215,48 @@ def detect_stale_prices(
 
         if curr_bid == 0 or prev_bid == 0:
             continue
+        # Only flag brackets priced mid-range (15-85¢) where there's actual
+        # trading opportunity
+        if not (15 <= curr_bid <= 85):
+            continue
+
+        title = curr_data.get("title") or prev_data.get("title") or ""
+        low, high, kind = parse_bracket_range(title)
+        if kind == "unknown":
+            continue
+
+        expected_change = _expected_repricing_cents(low, high, previous, current)
+        if abs(expected_change) < STALE_PRICE_MIN_GAP_CENTS:
+            # The shift didn't warrant a meaningful repricing of THIS bracket
+            # (it sits far from both means) — an unmoved bid is not stale.
+            continue
 
         bid_change = curr_bid - prev_bid
 
-        # If ensemble shifted warmer (higher mean), brackets above the old mean
-        # should have gotten more expensive (higher bid). If they didn't move,
-        # that's stale pricing. Similarly for cooler shifts.
-        #
-        # Expected repricing: rough estimate is ~1¢ per 0.5°F shift for
-        # brackets near the mean. We flag if bid barely moved vs expected.
-        expected_change = int(abs_shift * 2)  # ~2¢ per °F shift (conservative)
+        # Stale = bid fell short of the warranted move by >= MIN_GAP in the
+        # expected direction.  A bracket that repriced commensurately (or
+        # overshot, e.g. a below-mean bracket collapsing on a warmer shift)
+        # is healthy regardless of shift size.
+        if expected_change > 0:
+            is_stale = bid_change <= expected_change - STALE_PRICE_MIN_GAP_CENTS
+        else:
+            is_stale = bid_change >= expected_change + STALE_PRICE_MIN_GAP_CENTS
 
-        # Check for stale brackets:
-        # If warmer → brackets that should have gotten more expensive but didn't
-        # If cooler → brackets that should have gotten cheaper but didn't
-        if direction == "warmer" and bid_change < expected_change - STALE_PRICE_MIN_GAP_CENTS:
-            # Bracket didn't get more expensive enough — stale if it should have
-            # Only flag brackets currently priced mid-range (15-85¢) where
-            # there's actual trading opportunity
-            if 15 <= curr_bid <= 85:
-                alerts.append(StaleAlert(
-                    city=city_key,
-                    direction=direction,
-                    mean_shift_f=round(mean_shift, 1),
-                    prev_mean=round(previous.mean, 1),
-                    curr_mean=round(current.mean, 1),
-                    bracket_title=curr_data.get("title", ticker),
-                    ticker=ticker,
-                    expected_bid_change=expected_change,
-                    actual_bid=curr_bid,
-                    prev_bid=prev_bid,
-                ))
-        elif direction == "cooler" and bid_change > -(expected_change - STALE_PRICE_MIN_GAP_CENTS):
-            # Bracket didn't get cheaper enough — stale
-            if 15 <= curr_bid <= 85:
-                alerts.append(StaleAlert(
-                    city=city_key,
-                    direction=direction,
-                    mean_shift_f=round(mean_shift, 1),
-                    prev_mean=round(previous.mean, 1),
-                    curr_mean=round(current.mean, 1),
-                    bracket_title=curr_data.get("title", ticker),
-                    ticker=ticker,
-                    expected_bid_change=expected_change,
-                    actual_bid=curr_bid,
-                    prev_bid=prev_bid,
-                ))
+        if not is_stale:
+            continue
+
+        alerts.append(StaleAlert(
+            city=city_key,
+            direction=direction,
+            mean_shift_f=round(mean_shift, 1),
+            prev_mean=round(previous.mean, 1),
+            curr_mean=round(current.mean, 1),
+            bracket_title=title or ticker,
+            ticker=ticker,
+            expected_bid_change=expected_change,
+            actual_bid=curr_bid,
+            prev_bid=prev_bid,
+        ))
 
     return alerts
 
@@ -223,10 +265,10 @@ def format_stale_alerts(alerts: list[StaleAlert]) -> str:
     """Format stale alerts into a human-readable Discord message."""
     if not alerts:
         return ""
+    from edge_scanner_v2 import shorten_bracket_title  # deferred: heavy module
     lines = [f"**📊 STALE PRICE ALERT — {len(alerts)} bracket(s)**\n"]
     for a in alerts[:5]:  # Cap at 5 per message
         shift_icon = "🔴" if a.direction == "warmer" else "🔵"
-        from edge_scanner_v2 import shorten_bracket_title
         short = shorten_bracket_title(a.bracket_title)
         lines.append(
             f"{shift_icon} **{a.city}** {short}: ensemble shifted {a.mean_shift_f:+.1f}°F "
