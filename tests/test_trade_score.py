@@ -1,12 +1,10 @@
 """Tests for hybrid trade score engine."""
 
-import math
 from types import SimpleNamespace
 
 import pytest
 
 from trade_score import (
-    TradeScore,
     _compute_weights,
     _confidence_signal,
     _edge_signal,

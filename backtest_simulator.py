@@ -34,7 +34,6 @@ from backtest_analyzer import load_records
 # ── Import pure exit helpers from position_monitor ──
 from position_monitor import (
     _trailing_offset_for_price,
-    _time_decay_factor,
     _scaled_trailing_offset,
     _scaled_freeroll_multiplier,
     _scaled_mid_profit_threshold,

@@ -4,7 +4,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,7 +23,6 @@ from edge_scanner_v2 import (
     fetch_kalshi_brackets,
     analyze_opportunities_v2,
     get_entry_timing,
-    compute_confidence_score,
 )
 
 

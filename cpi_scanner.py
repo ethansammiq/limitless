@@ -29,11 +29,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-import math
 import os
 import re
-import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -52,15 +49,13 @@ from edge_scanner_v2 import kde_probability, silverman_bandwidth
 
 # Import CPI config
 from cpi_config import (
-    CPI_SOURCES, CPI_MARKETS, FRED_SERIES, BLS_SERIES,
+    CPI_SOURCES, CPI_MARKETS, BLS_SERIES,
     CPI_RELEASE_DATES_2026, get_next_cpi_release,
-    CPI_MAX_POSITION_PCT, CPI_MAX_DAILY_EXPOSURE,
-    CPI_MIN_EDGE_THRESHOLD, CPI_MIN_KDE_PROBABILITY,
+    CPI_MAX_POSITION_PCT, CPI_MIN_EDGE_THRESHOLD, CPI_MIN_KDE_PROBABILITY,
     CPI_MIN_CONFIDENCE_TO_TRADE, CPI_MAX_ENTRY_PRICE_CENTS,
     NOWCAST_DIVERGENCE_THRESHOLD_MOM, ENERGY_SURPRISE_THRESHOLD_PCT,
     ENERGY_LARGE_SURPRISE_PCT, CPI_SCAN_WINDOW_DAYS,
     SEASONAL_ANOMALY_MONTHS, CLEVELAND_FED_MONTHLY_MAE,
-    CPISourceConfig,
 )
 
 logger = get_logger(__name__)
@@ -895,7 +890,7 @@ def compute_cpi_confidence(ensemble: CPIEnsemble, consensus: ConsensusData,
 
         if data_month in SEASONAL_ANOMALY_MONTHS:
             score -= 3
-            reasons.append(f"Seasonal adjustment anomaly month ⚠")
+            reasons.append("Seasonal adjustment anomaly month ⚠")
 
     # ── Factor 4: Lead Time ── max +10
     if days_to_release <= 1:
@@ -1168,7 +1163,7 @@ def print_cpi_report(ensemble: CPIEnsemble, consensus: ConsensusData,
     print(f"  └─ KDE bandwidth: {ensemble.kde_bandwidth:.4f}% (Silverman)")
 
     # Source breakdown
-    print(f"\n  SOURCE BREAKDOWN")
+    print("\n  SOURCE BREAKDOWN")
     print(f"  {'Source':<28} {'Estimate':>9} {'Std':>7} {'Wt':>6} {'Members':>8}")
     print(f"  {'─' * 28} {'─' * 9} {'─' * 7} {'─' * 6} {'─' * 8}")
     for src in ensemble.sources:
@@ -1179,14 +1174,14 @@ def print_cpi_report(ensemble: CPIEnsemble, consensus: ConsensusData,
 
     # Consensus
     if consensus.data_available:
-        print(f"\n  CONSENSUS FORECAST")
+        print("\n  CONSENSUS FORECAST")
         print(f"  ├─ Consensus MoM: {consensus.consensus_mom:.2f}%")
         if consensus.consensus_yoy > 0:
             print(f"  ├─ Consensus YoY: {consensus.consensus_yoy:.1f}%")
         print(f"  └─ vs Ensemble: {consensus.consensus_mom - ensemble.mean:+.3f}%")
 
     # Energy
-    print(f"\n  ENERGY INDICATORS")
+    print("\n  ENERGY INDICATORS")
     print(f"  ├─ Gasoline: ${energy.get('gas_current', 0):.2f}/gal "
           f"(Δ{energy.get('gas_change_pct', 0):+.1f}% vs prior month)")
     print(f"  ├─ Brent Oil: ${energy.get('oil_current', 0):.2f}/bbl "
@@ -1194,7 +1189,7 @@ def print_cpi_report(ensemble: CPIEnsemble, consensus: ConsensusData,
     print(f"  └─ Signal: {energy.get('energy_signal', 'unknown').upper()}")
 
     # Confidence
-    print(f"\n  CONFIDENCE FACTORS")
+    print("\n  CONFIDENCE FACTORS")
     for r in conf_reasons:
         print(f"  ├─ {r}")
     gate_status = "✓ ABOVE GATE" if conf_score >= CPI_MIN_CONFIDENCE_TO_TRADE else "✗ Below gate — OBSERVE ONLY"
@@ -1220,7 +1215,7 @@ def print_cpi_report(ensemble: CPIEnsemble, consensus: ConsensusData,
                 print(f"      Strategies: {', '.join(opp.strategies)}")
             print(f"      Sources:    {opp.rationale}")
     else:
-        print(f"\n  No opportunities found above minimum thresholds.")
+        print("\n  No opportunities found above minimum thresholds.")
 
 
 def print_cpi_summary(all_opps: list[CPIOpportunity], balance: float,
@@ -1254,7 +1249,7 @@ def print_cpi_summary(all_opps: list[CPIOpportunity], balance: float,
     if not tradeable:
         print(f"\n  No opportunities meet the {CPI_MIN_CONFIDENCE_TO_TRADE}+ confidence gate.")
         if days_to_release > 3:
-            print(f"  Check again at T-1 or T-2 for maximum confidence boost.")
+            print("  Check again at T-1 or T-2 for maximum confidence boost.")
     print()
 
 
@@ -1271,8 +1266,8 @@ def prompt_manual_inputs(skip: bool = False) -> tuple[float, float, float, float
 
     print("\n  ─── Manual Data Input ───")
     print("  (Press Enter to skip any field — FRED-only mode)")
-    print(f"  Cleveland Fed: https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting")
-    print(f"  Consensus:     https://www.investing.com/economic-calendar/cpi-733\n")
+    print("  Cleveland Fed: https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting")
+    print("  Consensus:     https://www.investing.com/economic-calendar/cpi-733\n")
 
     def read_float(prompt: str) -> float:
         try:
@@ -1309,19 +1304,19 @@ async def scan(series_filter: str = None, no_prompt: bool = False):
     release_date, days_to_release, data_month_str = get_next_cpi_release(today)
 
     print("#" * 72)
-    print(f"  CPI EDGE v1.0 — Inflation Prediction Market Scanner")
+    print("  CPI EDGE v1.0 — Inflation Prediction Market Scanner")
     print(f"  {now.strftime('%Y-%m-%d %H:%M:%S')} ET")
     print(f"  Next CPI Release: {release_date.isoformat()} ({data_month_str} data)")
     print(f"  Days to Release: T-{days_to_release}")
-    print(f"  Sources: Cleveland Fed + TIPS + UMich + Energy + BLS")
-    print(f"  Method: Synthetic Ensemble → Gaussian KDE → Bracket Probabilities")
+    print("  Sources: Cleveland Fed + TIPS + UMich + Energy + BLS")
+    print("  Method: Synthetic Ensemble → Gaussian KDE → Bracket Probabilities")
     print("#" * 72)
 
     # Gate: only scan within window
     if days_to_release > CPI_SCAN_WINDOW_DAYS:
         print(f"\n  ⏳ Outside scan window (T-{days_to_release} > T-{CPI_SCAN_WINDOW_DAYS}).")
         print(f"  Next scan window opens: {(release_date - timedelta(days=CPI_SCAN_WINDOW_DAYS)).isoformat()}")
-        print(f"  Run with --force to override.\n")
+        print("  Run with --force to override.\n")
         return
 
     # Get FRED API key
