@@ -2,11 +2,9 @@
 
 import asyncio
 
-import pytest
-from types import SimpleNamespace
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
-from peak_trader import compute_peak_trade, _hours_until_settlement
+from peak_trader import compute_peak_trade
 
 
 # ─── Helpers ───────────────────────────────────────────
@@ -187,34 +185,44 @@ class TestEdgeCases:
         assert "settle" in result["reason"]
 
 
+def _mock_broker(balance=100.0):
+    """Broker double matching the BrokerInterface surface used by peak_trader."""
+    broker = MagicMock()
+    broker.get_balance = AsyncMock(return_value=balance)
+    broker.stop = AsyncMock()
+    return broker
+
+
+def _patch_pipeline(monkeypatch, broker=None, positions=None):
+    """Patch the call-time imports inside execute_peak_trade.
+
+    Returns (get_broker_mock, discord_mock).
+    """
+    monkeypatch.setattr("peak_trader.PEAK_TRADE_ENABLED", True)
+    monkeypatch.setattr("peak_trader._hours_until_settlement", lambda: 5.0)
+    monkeypatch.setattr("trading_guards.check_kill_switch",
+                        MagicMock(return_value=(True, "OK")), raising=False)
+
+    get_broker_mock = AsyncMock(return_value=broker)
+    monkeypatch.setattr("core.broker_factory.get_broker", get_broker_mock, raising=False)
+
+    discord_mock = AsyncMock()
+    monkeypatch.setattr("notifications.send_discord_alert", discord_mock, raising=False)
+
+    monkeypatch.setattr("position_store.load_positions",
+                        MagicMock(return_value=positions or []), raising=False)
+    return get_broker_mock, discord_mock
+
+
 class TestExecutePeakTrade:
     """Test the full async execution pipeline (mocked)."""
 
     def test_dry_run_no_real_execution(self, monkeypatch):
         """Dry run sends Discord alert but doesn't call execute_auto."""
-        monkeypatch.setattr("peak_trader.PEAK_TRADE_ENABLED", True)
-        monkeypatch.setattr("peak_trader._hours_until_settlement", lambda: 5.0)
-
-        # Mock balance fetch — execute_peak_trade does `from kalshi_client import
-        # fetch_balance_quick` at call time, so the mock must target the source
-        # module (kalshi_client), not peak_trader's namespace.
-        mock_balance = AsyncMock(return_value=100.0)
-        monkeypatch.setattr("kalshi_client.fetch_balance_quick", mock_balance, raising=False)
-
-        # Import at module level causes issues, so we mock the full import chain
-        import peak_trader
-        monkeypatch.setattr(peak_trader, "check_kill_switch",
-                            lambda: (True, "OK"), raising=False)
-
-        # Mock imports inside execute_peak_trade
-        mock_kill = MagicMock(return_value=(True, "OK"))
-        monkeypatch.setattr("trading_guards.check_kill_switch", mock_kill, raising=False)
-
-        mock_discord = AsyncMock()
-        monkeypatch.setattr("notifications.send_discord_alert", mock_discord, raising=False)
-
-        mock_positions = MagicMock(return_value=[])
-        monkeypatch.setattr("position_store.load_positions", mock_positions, raising=False)
+        broker = _mock_broker()
+        _patch_pipeline(monkeypatch, broker=broker)
+        execute_auto_mock = AsyncMock()
+        monkeypatch.setattr("execute_trade.execute_auto", execute_auto_mock, raising=False)
 
         from peak_trader import execute_peak_trade
         result = asyncio.run(execute_peak_trade(
@@ -225,13 +233,18 @@ class TestExecutePeakTrade:
         ))
         assert result["success"] is True
         assert "DRY RUN" in result["reason"]
+        execute_auto_mock.assert_not_awaited()
+        broker.get_balance.assert_awaited_once()
+        broker.stop.assert_awaited_once()  # broker released even in dry run
 
     def test_kill_switch_blocks(self, monkeypatch):
-        """Kill switch active → trade blocked."""
+        """Kill switch active → trade blocked (deterministic, no broker created)."""
         from peak_trader import execute_peak_trade
 
         monkeypatch.setattr("trading_guards.check_kill_switch",
                             lambda: (False, "Kill switch active"), raising=False)
+        get_broker_mock = AsyncMock()
+        monkeypatch.setattr("core.broker_factory.get_broker", get_broker_mock, raising=False)
 
         result = asyncio.run(execute_peak_trade(
             city_key="NYC",
@@ -240,3 +253,134 @@ class TestExecutePeakTrade:
         ))
         assert result["success"] is False
         assert "Kill switch" in result["reason"]
+        assert result["transient"] is False
+        get_broker_mock.assert_not_awaited()
+
+    def test_routes_through_broker_factory(self, monkeypatch):
+        """Live execution uses get_broker() (honors PAPER_TRADING_MODE), not a direct KalshiClient."""
+        broker = _mock_broker(balance=100.0)
+        get_broker_mock, _ = _patch_pipeline(monkeypatch, broker=broker)
+
+        execute_auto_mock = AsyncMock(return_value={
+            "success": True, "order_id": "ord-123", "status": "executed",
+            "cost": 7.1, "error": "",
+        })
+        monkeypatch.setattr("execute_trade.execute_auto", execute_auto_mock, raising=False)
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC",
+            peak_temp=73.5,
+            bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is True
+        assert result["order_id"] == "ord-123"
+        get_broker_mock.assert_awaited_once()
+        # The broker from the factory is handed to execute_auto and not closed by it
+        kwargs = execute_auto_mock.await_args.kwargs
+        assert kwargs["client"] is broker
+        assert kwargs["close_client"] is False
+        broker.stop.assert_awaited_once()
+
+    def test_broker_init_runtime_error_not_transient(self, monkeypatch):
+        """Missing credentials (RuntimeError) is misconfiguration — no retry."""
+        get_broker_mock, _ = _patch_pipeline(monkeypatch)
+        get_broker_mock.side_effect = RuntimeError("Live broker requires credentials")
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert "Broker init failed" in result["reason"]
+        assert result["transient"] is False
+
+    def test_broker_init_network_error_transient(self, monkeypatch):
+        """Non-RuntimeError broker init failure is transient → retryable."""
+        get_broker_mock, _ = _patch_pipeline(monkeypatch)
+        get_broker_mock.side_effect = ConnectionError("connection reset")
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert result["transient"] is True
+
+    def test_balance_fetch_failure_transient(self, monkeypatch):
+        """Balance fetch exception is transient and still releases the broker."""
+        broker = _mock_broker()
+        broker.get_balance = AsyncMock(side_effect=TimeoutError("timeout"))
+        _patch_pipeline(monkeypatch, broker=broker)
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert "Balance fetch failed" in result["reason"]
+        assert result["transient"] is True
+        broker.stop.assert_awaited_once()
+
+    def test_deterministic_gate_not_transient(self, monkeypatch):
+        """Edge below threshold is a deterministic rejection — no retry."""
+        broker = _mock_broker()
+        _patch_pipeline(monkeypatch, broker=broker)
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=88),
+        ))
+        assert result["success"] is False
+        assert result["transient"] is False
+        broker.stop.assert_awaited_once()
+
+    def test_existing_position_not_transient(self, monkeypatch):
+        """Duplicate-position skip is deterministic — no retry."""
+        broker = _mock_broker()
+        ticker = _bracket()["ticker"]
+        _patch_pipeline(monkeypatch, broker=broker,
+                        positions=[{"ticker": ticker, "status": "open"}])
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert "Already have position" in result["reason"]
+        assert result["transient"] is False
+
+    def test_execution_failure_transient(self, monkeypatch):
+        """execute_auto reporting failure is treated as retryable."""
+        broker = _mock_broker()
+        _patch_pipeline(monkeypatch, broker=broker)
+        execute_auto_mock = AsyncMock(return_value={
+            "success": False, "order_id": "", "status": "", "cost": 0,
+            "error": "API 503",
+        })
+        monkeypatch.setattr("execute_trade.execute_auto", execute_auto_mock, raising=False)
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert "Execution failed" in result["reason"]
+        assert result["transient"] is True
+        broker.stop.assert_awaited_once()
+
+    def test_execution_exception_transient(self, monkeypatch):
+        """Exception during execution is transient and still releases the broker."""
+        broker = _mock_broker()
+        _patch_pipeline(monkeypatch, broker=broker)
+        execute_auto_mock = AsyncMock(side_effect=ConnectionError("boom"))
+        monkeypatch.setattr("execute_trade.execute_auto", execute_auto_mock, raising=False)
+
+        from peak_trader import execute_peak_trade
+        result = asyncio.run(execute_peak_trade(
+            city_key="NYC", peak_temp=73.5, bracket_info=_bracket(bid=70),
+        ))
+        assert result["success"] is False
+        assert "Exception" in result["reason"]
+        assert result["transient"] is True
+        broker.stop.assert_awaited_once()

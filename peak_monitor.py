@@ -35,9 +35,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -48,7 +47,6 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from config import (
     STATIONS,
-    SETTLEMENT_HOUR_ET,
     PEAK_MIN_DECLINE_OBS,
     PEAK_MIN_DROP_F,
     PEAK_MIN_DECLINE_MINUTES,
@@ -57,7 +55,7 @@ from config import (
     PEAK_POLL_INTERVAL_SEC,
     PEAK_TRADE_ENABLED,
 )
-from notifications import send_discord_alert, send_discord_embeds
+from notifications import send_discord_embeds
 from heartbeat import write_heartbeat
 from log_setup import get_logger
 
@@ -71,6 +69,28 @@ IEM_BASE_URL = "https://mesonet.agron.iastate.edu"
 # State file for tracking across cron invocations
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATE_FILE = PROJECT_ROOT / "peak_state.json"
+
+ET_TZ = ZoneInfo("America/New_York")
+
+# Max Strategy G execution attempts per city per day. Failed attempts can send
+# a Discord failure alert, so this bounds alert spam while still retrying
+# transient API errors on later polls.
+PEAK_TRADE_MAX_ATTEMPTS = 3
+
+# Max bracket-price fetch attempts after a peak is confirmed before we give up
+# and alert with "market may be closed" (the fetch can't distinguish an API
+# blip from a genuinely closed market, so we retry a few polls first).
+PEAK_BRACKET_FETCH_MAX_ATTEMPTS = 3
+
+# Mirror of the crontab schedule (`*/10 13-22 * * *`, ET host clock). Used
+# only to detect the day's FINAL cron tick so the process can linger past it
+# for cities whose local-time monitoring window outlives the ET-based cron
+# (LAX: 12:00-22:00 PT runs until 01:00 ET, ~2h past the last tick).
+# If the crontab is ever extended to cover that window (e.g.
+# `*/10 0,13-23 * * *`), update or remove this so two processes never poll
+# concurrently.
+CRON_TICK_INTERVAL_MIN = 10
+CRON_LAST_HOUR_ET = 22
 
 
 # ─── Data Structures ──────────────────────────────────
@@ -98,7 +118,10 @@ class CityPeakState:
     peak_confirmed: bool = False
     peak_temp: float = 0.0
     peak_bracket: str = ""                 # e.g. "73-74"
-    alerted: bool = False                  # Already sent Discord alert
+    alerted: bool = False                  # Day complete: alert sent AND trade handoff resolved
+    alert_sent: bool = False               # Discord alert dispatched (guards re-alert on retries)
+    trade_attempts: int = 0                # Strategy G execution attempts today
+    bracket_fetch_failures: int = 0        # Failed bracket-price fetches post-confirmation
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +133,9 @@ class CityPeakState:
             "peak_temp": self.peak_temp,
             "peak_bracket": self.peak_bracket,
             "alerted": self.alerted,
+            "alert_sent": self.alert_sent,
+            "trade_attempts": self.trade_attempts,
+            "bracket_fetch_failures": self.bracket_fetch_failures,
         }
 
     @classmethod
@@ -122,6 +148,9 @@ class CityPeakState:
             peak_temp=d.get("peak_temp", 0.0),
             peak_bracket=d.get("peak_bracket", ""),
             alerted=d.get("alerted", False),
+            alert_sent=d.get("alert_sent", False),
+            trade_attempts=d.get("trade_attempts", 0),
+            bracket_fetch_failures=d.get("bracket_fetch_failures", 0),
         )
         if d.get("max_time"):
             state.max_time = datetime.fromisoformat(d["max_time"])
@@ -299,7 +328,11 @@ def detect_peak(
     if not observations:
         return state
 
-    now_local = datetime.now(local_tz)
+    # Anchor "now" to the latest observation, not the wall clock, so the
+    # earliest-hour gate is a pure function of the data: deterministic in tests
+    # regardless of run time, and correct in production (a peak whose data ends
+    # before noon is the morning-warming case the gate exists to reject).
+    now_local = max(o.timestamp for o in observations).astimezone(local_tz)
 
     # Update running max from all observations
     for obs in observations:
@@ -374,14 +407,20 @@ def detect_peak(
 async def fetch_bracket_prices(
     session: aiohttp.ClientSession,
     city_key: str,
-) -> list[dict]:
-    """Fetch current Kalshi bracket prices for a city."""
+) -> list[dict] | None:
+    """Fetch current Kalshi bracket prices for a city.
+
+    Returns None when no market data came back (exception OR empty list —
+    fetch_kalshi_brackets swallows HTTP/network errors into [], so an empty
+    result is indistinguishable from an API blip and the caller should retry).
+    """
     from edge_scanner_v2 import fetch_kalshi_brackets
     try:
-        return await fetch_kalshi_brackets(session, city_key)
+        brackets = await fetch_kalshi_brackets(session, city_key)
     except Exception as e:
         logger.error("Kalshi fetch failed for %s: %s", city_key, e)
-        return []
+        return None
+    return brackets if brackets else None
 
 
 def find_bracket_price(brackets: list[dict], peak_temp: float) -> dict | None:
@@ -515,18 +554,43 @@ async def poll_once(
             detect_peak(observations, state, tz)
 
             if state.peak_confirmed and not state.alerted:
-                # Fetch bracket prices to find the matching market
+                # Fetch bracket prices to find the matching market. None means
+                # no market data came back (API blip or closed market) — retry
+                # on the next poll a few times before giving up, so a transient
+                # failure at the confirmation moment doesn't forfeit the day.
                 brackets = await fetch_bracket_prices(session, city_key)
+                if brackets is None:
+                    state.bracket_fetch_failures += 1
+                    if state.bracket_fetch_failures < PEAK_BRACKET_FETCH_MAX_ATTEMPTS:
+                        logger.warning(
+                            "%s: no bracket data after peak confirmation (attempt %d/%d) — retrying next poll",
+                            city_key, state.bracket_fetch_failures, PEAK_BRACKET_FETCH_MAX_ATTEMPTS,
+                        )
+                        if not quiet:
+                            print(f"  {city_key}: bracket fetch failed — retrying next poll")
+                        continue
+                    # Persistent — proceed without bracket info: alert
+                    # "market may be closed" below and finish the day.
+                    brackets = []
+
                 bracket_info = find_bracket_price(brackets, state.peak_temp)
 
                 print(f"  🔒 {city_key}: PEAK CONFIRMED at {state.peak_temp:.1f}°F → {state.peak_bracket}")
                 if bracket_info:
                     print(f"     Market: {bracket_info['yes_bid']}¢/{bracket_info['yes_ask']}¢ ({bracket_info['ticker']})")
 
-                await send_peak_alert(state, bracket_info, tz, dry_run=dry_run)
+                if not state.alert_sent:
+                    await send_peak_alert(state, bracket_info, tz, dry_run=dry_run)
+                    state.alert_sent = True
 
                 # ── Strategy G: Auto-execute peak trade ──
+                # Only mark the day complete (alerted=True) on a definitive
+                # outcome (executed, or rejected by a deterministic gate).
+                # Transient failures retry on the next 10-min poll, capped at
+                # PEAK_TRADE_MAX_ATTEMPTS.
+                handoff_complete = True
                 if PEAK_TRADE_ENABLED and bracket_info:
+                    state.trade_attempts += 1
                     try:
                         from peak_trader import execute_peak_trade
                         trade_result = await execute_peak_trade(
@@ -537,13 +601,21 @@ async def poll_once(
                         )
                         if trade_result["success"]:
                             print(f"  🔒⚡ {city_key}: PEAK TRADE {'[DRY RUN] ' if dry_run else ''}EXECUTED")
+                        elif trade_result.get("transient") and state.trade_attempts < PEAK_TRADE_MAX_ATTEMPTS:
+                            handoff_complete = False
+                            print(
+                                f"  🔒   {city_key}: Peak trade transient failure — {trade_result['reason']} "
+                                f"(attempt {state.trade_attempts}/{PEAK_TRADE_MAX_ATTEMPTS}, retrying next poll)"
+                            )
                         else:
                             print(f"  🔒   {city_key}: Peak trade skipped — {trade_result['reason']}")
                     except Exception as e:
                         logger.error("Peak trade failed for %s: %s", city_key, e)
                         print(f"  🔒❌ {city_key}: Peak trade error — {e}")
+                        if state.trade_attempts < PEAK_TRADE_MAX_ATTEMPTS:
+                            handoff_complete = False
 
-                state.alerted = True
+                state.alerted = handoff_complete
             else:
                 latest = observations[-1]
                 decline_count = sum(
@@ -561,6 +633,72 @@ async def poll_once(
 
     save_state(states)
     write_heartbeat("peak_monitor")
+    return states
+
+
+def _is_last_cron_tick(now_et: datetime) -> bool:
+    """True when the ET-based cron schedule has no further tick today.
+
+    The crontab fires every CRON_TICK_INTERVAL_MIN minutes through
+    CRON_LAST_HOUR_ET (ET). On the tick whose successor would fall outside
+    that window (i.e. the 22:50 ET run), this process is the day's last
+    chance to poll — so it lingers for cities whose local window is open.
+    """
+    next_tick = now_et + timedelta(minutes=CRON_TICK_INTERVAL_MIN)
+    return now_et.hour >= CRON_LAST_HOUR_ET and (
+        next_tick.hour > CRON_LAST_HOUR_ET or next_tick.date() != now_et.date()
+    )
+
+
+def _cities_awaiting_peak(states: dict[str, CityPeakState]) -> list[str]:
+    """Cities whose local monitoring window is still open and whose peak
+    handoff hasn't completed today."""
+    pending = []
+    for city_key, station_cfg in STATIONS.items():
+        tz = ZoneInfo(station_cfg.timezone)
+        now_local = datetime.now(tz)
+        if not (PEAK_EARLIEST_HOUR <= now_local.hour < PEAK_LATEST_HOUR):
+            continue
+        state = states.get(city_key)
+        if (
+            state is not None
+            and state.date == now_local.strftime("%Y-%m-%d")
+            and state.alerted
+        ):
+            continue
+        pending.append(city_key)
+    return pending
+
+
+async def run_single_poll(
+    city_filter: str | None = None,
+    quiet: bool = False,
+    dry_run: bool = False,
+) -> dict[str, CityPeakState]:
+    """One cron-driven poll; on the day's final cron tick, keep polling
+    in-process while any city's LOCAL monitoring window is still open.
+
+    The cron schedule is ET-based (*/10 13-22) but the per-city window is
+    local time: LAX's 12:00-22:00 PT window runs until 01:00 ET, ~2h past
+    the last cron tick, so without lingering its late peaks are never seen.
+    """
+    states = await poll_once(city_filter, quiet, dry_run)
+
+    # Manual --city runs shouldn't hang a terminal for hours.
+    if city_filter is not None or not _is_last_cron_tick(datetime.now(ET_TZ)):
+        return states
+
+    while True:
+        pending = _cities_awaiting_peak(states)
+        if not pending:
+            break
+        if not quiet:
+            print(f"── Final cron tick: lingering for {', '.join(pending)} (local window still open) ──")
+        await asyncio.sleep(PEAK_POLL_INTERVAL_SEC)
+        try:
+            states = await poll_once(city_filter, quiet, dry_run)
+        except Exception as e:
+            logger.error("Linger poll failed: %s", e)
     return states
 
 
@@ -602,4 +740,4 @@ if __name__ == "__main__":
     if args.watch:
         asyncio.run(watch(args.city, args.quiet, args.dry_run))
     else:
-        asyncio.run(poll_once(args.city, args.quiet, args.dry_run))
+        asyncio.run(run_single_poll(args.city, args.quiet, args.dry_run))

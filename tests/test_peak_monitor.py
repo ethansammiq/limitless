@@ -1,20 +1,25 @@
 """Tests for peak_monitor.py — Strategy F: Post-Peak Lock-In."""
 
-import json
+import asyncio
 from datetime import datetime, timedelta
-from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from peak_monitor import (
     CityPeakState,
     Observation,
     detect_peak,
+    fetch_bracket_prices,
     find_bracket_price,
     load_state,
+    run_single_poll,
     save_state,
-    STATE_FILE,
+    poll_once,
+    PEAK_BRACKET_FETCH_MAX_ATTEMPTS,
+    PEAK_TRADE_MAX_ATTEMPTS,
+    _cities_awaiting_peak,
+    _is_last_cron_tick,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -346,6 +351,27 @@ class TestCityPeakState:
         assert state.max_time is None
         assert state.running_max == -999.0
 
+    def test_from_dict_pre_retry_format(self):
+        """State files written before the retry fields existed still load."""
+        d = {"city_key": "NYC", "date": "2026-02-13", "alerted": True}
+        state = CityPeakState.from_dict(d)
+        assert state.alert_sent is False
+        assert state.trade_attempts == 0
+        assert state.bracket_fetch_failures == 0
+
+    def test_retry_fields_round_trip(self):
+        state = CityPeakState(
+            city_key="NYC",
+            date="2026-02-13",
+            alert_sent=True,
+            trade_attempts=2,
+            bracket_fetch_failures=1,
+        )
+        restored = CityPeakState.from_dict(state.to_dict())
+        assert restored.alert_sent is True
+        assert restored.trade_attempts == 2
+        assert restored.bracket_fetch_failures == 1
+
     def test_observation_repr(self):
         obs = Observation(
             temp_f=73.5,
@@ -426,3 +452,288 @@ class TestEdgeCases:
         # IS the peak — we want to detect it.
         assert result.peak_confirmed
         assert result.peak_temp == 45.0
+
+
+# ─── Test: fetch_bracket_prices transient detection ────
+
+class TestFetchBracketPrices:
+    """None = no market data (retry); list = real data."""
+
+    def test_exception_returns_none(self, monkeypatch):
+        monkeypatch.setattr("edge_scanner_v2.fetch_kalshi_brackets",
+                            AsyncMock(side_effect=ConnectionError("boom")), raising=False)
+        assert asyncio.run(fetch_bracket_prices(None, "NYC")) is None
+
+    def test_empty_list_returns_none(self, monkeypatch):
+        """fetch_kalshi_brackets swallows HTTP errors into [] — treat as no-data."""
+        monkeypatch.setattr("edge_scanner_v2.fetch_kalshi_brackets",
+                            AsyncMock(return_value=[]), raising=False)
+        assert asyncio.run(fetch_bracket_prices(None, "NYC")) is None
+
+    def test_brackets_passed_through(self, monkeypatch):
+        brackets = [{"ticker": "T-72-73", "title": "72° to 73°F"}]
+        monkeypatch.setattr("edge_scanner_v2.fetch_kalshi_brackets",
+                            AsyncMock(return_value=brackets), raising=False)
+        assert asyncio.run(fetch_bracket_prices(None, "NYC")) == brackets
+
+
+# ─── Test: poll_once retry semantics ───────────────────
+
+NYC_BRACKETS = [
+    {"ticker": "T-72-73", "title": "72° to 73°F", "yes_bid": 45, "yes_ask": 55, "volume": 500},
+]
+
+
+def _confirmed_state(**overrides) -> CityPeakState:
+    """NYC state with today's peak already confirmed but not yet alerted."""
+    now = datetime.now(ET)
+    state = CityPeakState(
+        city_key="NYC",
+        date=now.strftime("%Y-%m-%d"),
+        running_max=73.0,
+        max_time=now - timedelta(hours=3),
+        peak_confirmed=True,
+        peak_temp=73.0,
+        peak_bracket="72-73",
+    )
+    for key, value in overrides.items():
+        setattr(state, key, value)
+    return state
+
+
+class TestPollOnceRetry:
+    """A transient failure at the confirmation moment must not forfeit the day."""
+
+    def _setup(self, monkeypatch, tmp_path, state, brackets,
+               trade_result=None, trade_side_effect=None):
+        """Patch poll_once collaborators; returns (alert_mock, trade_mock)."""
+        monkeypatch.setattr("peak_monitor.STATE_FILE", tmp_path / "peak_state.json")
+        monkeypatch.setattr("peak_monitor.write_heartbeat", lambda name: None)
+        monkeypatch.setattr("peak_monitor.PEAK_EARLIEST_HOUR", 0)
+        monkeypatch.setattr("peak_monitor.PEAK_LATEST_HOUR", 24)
+        monkeypatch.setattr("peak_monitor.PEAK_TRADE_ENABLED", True)
+
+        obs = [Observation(temp_f=70.0, timestamp=datetime.now(ET), station="KNYC")]
+        monkeypatch.setattr("peak_monitor.fetch_iem_observations",
+                            AsyncMock(return_value=obs))
+        monkeypatch.setattr("peak_monitor.fetch_bracket_prices",
+                            AsyncMock(return_value=brackets))
+
+        alert_mock = AsyncMock()
+        monkeypatch.setattr("peak_monitor.send_peak_alert", alert_mock)
+
+        trade_mock = AsyncMock(return_value=trade_result, side_effect=trade_side_effect)
+        monkeypatch.setattr("peak_trader.execute_peak_trade", trade_mock, raising=False)
+
+        save_state({"NYC": state})
+        return alert_mock, trade_mock
+
+    def test_bracket_fetch_failure_retries(self, monkeypatch, tmp_path):
+        """No bracket data → no alert, no trade, alerted stays False."""
+        alert_mock, trade_mock = self._setup(
+            monkeypatch, tmp_path, _confirmed_state(), brackets=None,
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is False
+        assert state.alert_sent is False
+        assert state.bracket_fetch_failures == 1
+        alert_mock.assert_not_awaited()
+        trade_mock.assert_not_awaited()
+
+    def test_bracket_fetch_gives_up_after_max(self, monkeypatch, tmp_path):
+        """Persistent no-data: alert 'market may be closed' and finish the day."""
+        seeded = _confirmed_state(
+            bracket_fetch_failures=PEAK_BRACKET_FETCH_MAX_ATTEMPTS - 1,
+        )
+        alert_mock, trade_mock = self._setup(
+            monkeypatch, tmp_path, seeded, brackets=None,
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is True
+        assert state.alert_sent is True
+        alert_mock.assert_awaited_once()
+        assert alert_mock.await_args.args[1] is None  # bracket_info=None
+        trade_mock.assert_not_awaited()
+
+    def test_successful_trade_marks_alerted(self, monkeypatch, tmp_path):
+        alert_mock, trade_mock = self._setup(
+            monkeypatch, tmp_path, _confirmed_state(), brackets=NYC_BRACKETS,
+            trade_result={"success": True, "order_id": "ord-1", "reason": "EXECUTED"},
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is True
+        assert state.alert_sent is True
+        assert state.trade_attempts == 1
+        alert_mock.assert_awaited_once()
+        trade_mock.assert_awaited_once()
+
+    def test_transient_trade_failure_retries_without_realert(self, monkeypatch, tmp_path):
+        """Transient trade failure → retry next poll, but alert only sent once."""
+        alert_mock, trade_mock = self._setup(
+            monkeypatch, tmp_path, _confirmed_state(), brackets=NYC_BRACKETS,
+            trade_result={"success": False, "transient": True,
+                          "reason": "Balance fetch failed: timeout"},
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is False
+        assert state.alert_sent is True
+        assert state.trade_attempts == 1
+
+        # Next 10-min tick: retries the trade, does NOT re-send the alert
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+        state = load_state()["NYC"]
+        assert state.alerted is False
+        assert state.trade_attempts == 2
+        alert_mock.assert_awaited_once()
+        assert trade_mock.await_count == 2
+
+    def test_transient_failure_caps_at_max_attempts(self, monkeypatch, tmp_path):
+        seeded = _confirmed_state(
+            alert_sent=True, trade_attempts=PEAK_TRADE_MAX_ATTEMPTS - 1,
+        )
+        _, trade_mock = self._setup(
+            monkeypatch, tmp_path, seeded, brackets=NYC_BRACKETS,
+            trade_result={"success": False, "transient": True, "reason": "API 503"},
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.trade_attempts == PEAK_TRADE_MAX_ATTEMPTS
+        assert state.alerted is True  # gave up — day complete
+        trade_mock.assert_awaited_once()
+
+    def test_deterministic_trade_failure_marks_alerted(self, monkeypatch, tmp_path):
+        """Gate rejections (edge/price) are final — no retry."""
+        _, trade_mock = self._setup(
+            monkeypatch, tmp_path, _confirmed_state(), brackets=NYC_BRACKETS,
+            trade_result={"success": False, "transient": False,
+                          "reason": "Edge 5¢ < min 10¢"},
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is True
+        assert state.trade_attempts == 1
+        trade_mock.assert_awaited_once()
+
+    def test_trade_exception_retries(self, monkeypatch, tmp_path):
+        """An exception from execute_peak_trade is transient → retry next poll."""
+        alert_mock, _ = self._setup(
+            monkeypatch, tmp_path, _confirmed_state(), brackets=NYC_BRACKETS,
+            trade_side_effect=ConnectionError("boom"),
+        )
+        asyncio.run(poll_once(city_filter="NYC", quiet=True))
+
+        state = load_state()["NYC"]
+        assert state.alerted is False
+        assert state.alert_sent is True
+        assert state.trade_attempts == 1
+        alert_mock.assert_awaited_once()
+
+
+# ─── Test: late LAX window (ET cron vs local config) ───
+
+class TestLastCronTick:
+    """_is_last_cron_tick detects the 22:50 ET run (no successor tick today)."""
+
+    def _at(self, hour, minute):
+        return datetime(2026, 6, 12, hour, minute, tzinfo=ET)
+
+    def test_final_tick(self):
+        assert _is_last_cron_tick(self._at(22, 50)) is True
+
+    def test_earlier_ticks_in_last_hour(self):
+        assert _is_last_cron_tick(self._at(22, 0)) is False
+        assert _is_last_cron_tick(self._at(22, 40)) is False
+
+    def test_midday_ticks(self):
+        assert _is_last_cron_tick(self._at(13, 0)) is False
+        assert _is_last_cron_tick(self._at(21, 50)) is False
+
+    def test_after_cron_window(self):
+        """A run started after the window (manual/lingering) counts as final."""
+        assert _is_last_cron_tick(self._at(23, 30)) is True
+
+
+class TestCitiesAwaitingPeak:
+    def test_open_windows_pending(self, monkeypatch):
+        """All windows open + no state → every city pending (incl. LAX)."""
+        monkeypatch.setattr("peak_monitor.PEAK_EARLIEST_HOUR", 0)
+        monkeypatch.setattr("peak_monitor.PEAK_LATEST_HOUR", 24)
+        pending = _cities_awaiting_peak({})
+        assert "LAX" in pending
+        assert len(pending) == 5
+
+    def test_alerted_cities_excluded(self, monkeypatch):
+        from config import STATIONS
+        monkeypatch.setattr("peak_monitor.PEAK_EARLIEST_HOUR", 0)
+        monkeypatch.setattr("peak_monitor.PEAK_LATEST_HOUR", 24)
+        states = {}
+        for city_key, cfg in STATIONS.items():
+            today = datetime.now(ZoneInfo(cfg.timezone)).strftime("%Y-%m-%d")
+            states[city_key] = CityPeakState(city_key=city_key, date=today, alerted=True)
+        assert _cities_awaiting_peak(states) == []
+
+    def test_closed_windows_excluded(self, monkeypatch):
+        monkeypatch.setattr("peak_monitor.PEAK_EARLIEST_HOUR", 0)
+        monkeypatch.setattr("peak_monitor.PEAK_LATEST_HOUR", 0)
+        assert _cities_awaiting_peak({}) == []
+
+    def test_stale_alerted_state_still_pending(self, monkeypatch):
+        """Yesterday's alerted=True doesn't suppress today's monitoring."""
+        monkeypatch.setattr("peak_monitor.PEAK_EARLIEST_HOUR", 0)
+        monkeypatch.setattr("peak_monitor.PEAK_LATEST_HOUR", 24)
+        states = {"LAX": CityPeakState(city_key="LAX", date="2026-06-11", alerted=True)}
+        assert "LAX" in _cities_awaiting_peak(states)
+
+
+class TestRunSinglePoll:
+    """Cron entrypoint lingers on the final ET tick while LAX's window is open."""
+
+    def test_normal_tick_polls_once(self, monkeypatch):
+        poll_mock = AsyncMock(return_value={})
+        monkeypatch.setattr("peak_monitor.poll_once", poll_mock)
+        monkeypatch.setattr("peak_monitor._is_last_cron_tick", lambda now: False)
+
+        asyncio.run(run_single_poll(quiet=True))
+        poll_mock.assert_awaited_once()
+
+    def test_final_tick_lingers_until_windows_close(self, monkeypatch):
+        poll_mock = AsyncMock(return_value={})
+        monkeypatch.setattr("peak_monitor.poll_once", poll_mock)
+        monkeypatch.setattr("peak_monitor._is_last_cron_tick", lambda now: True)
+        monkeypatch.setattr("peak_monitor.PEAK_POLL_INTERVAL_SEC", 0)
+        monkeypatch.setattr("peak_monitor._cities_awaiting_peak",
+                            MagicMock(side_effect=[["LAX"], ["LAX"], []]))
+
+        asyncio.run(run_single_poll(quiet=True))
+        assert poll_mock.await_count == 3  # initial + 2 linger polls
+
+    def test_final_tick_no_pending_exits(self, monkeypatch):
+        poll_mock = AsyncMock(return_value={})
+        monkeypatch.setattr("peak_monitor.poll_once", poll_mock)
+        monkeypatch.setattr("peak_monitor._is_last_cron_tick", lambda now: True)
+        monkeypatch.setattr("peak_monitor._cities_awaiting_peak",
+                            MagicMock(return_value=[]))
+
+        asyncio.run(run_single_poll(quiet=True))
+        poll_mock.assert_awaited_once()
+
+    def test_city_filter_never_lingers(self, monkeypatch):
+        """Manual --city runs must not hang a terminal past the cron window."""
+        poll_mock = AsyncMock(return_value={})
+        monkeypatch.setattr("peak_monitor.poll_once", poll_mock)
+        monkeypatch.setattr("peak_monitor._is_last_cron_tick", lambda now: True)
+        monkeypatch.setattr("peak_monitor._cities_awaiting_peak",
+                            MagicMock(return_value=["LAX"]))
+
+        asyncio.run(run_single_poll(city_filter="LAX", quiet=True))
+        poll_mock.assert_awaited_once()
