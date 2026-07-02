@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Tests for trading_guards.py — pure function tests, no mocking needed."""
 
-from datetime import datetime, date
-from pathlib import Path
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from trading_guards import (
     KILL_SWITCH_FILE,
@@ -16,6 +14,7 @@ from trading_guards import (
     check_intraday_drawdown,
     check_correlated_exposure,
     check_bot_window,
+    check_upwind_shield,
     run_all_pre_trade_checks,
 )
 
@@ -273,6 +272,144 @@ def test_bot_window_returns_tuple():
     assert isinstance(reason, str)
 
 
+# ── Upwind shield ──
+
+class _FakeVector:
+    """Minimal stand-in for proxy_arb_engine.PropagationVector."""
+
+    def __init__(
+        self,
+        proxy_temp_f: float | None,
+        thermal_impact_f: float | None = None,
+        eta_minutes: float = 120.0,
+        is_converging: bool = True,
+        name: str = "PHL",
+    ):
+        self.proxy_temp_f = proxy_temp_f
+        self.thermal_impact_f = thermal_impact_f
+        self.eta_minutes = eta_minutes
+        self.is_converging = is_converging
+        self.proxy = type("Proxy", (), {"name": name})()
+
+
+MORNING_ET = datetime(2026, 6, 12, 8, 0, tzinfo=ET)   # 8 AM NYC — diurnal minimum
+PEAK_ET = datetime(2026, 6, 12, 15, 0, tzinfo=ET)     # 3 PM NYC — diurnal peak
+
+
+def test_shield_no_vectors():
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, [], "yes", now=MORNING_ET)
+    assert ok
+    assert "no upwind vectors" in reason
+
+
+def test_shield_morning_cold_proxy_passes():
+    """Core fix: 8 AM proxy at 48°F is below a 70-72 daily-HIGH bracket because it's
+    morning, not because a cold front is inbound. Small decayed impact → no veto."""
+    vectors = [_FakeVector(proxy_temp_f=48.0, thermal_impact_f=-0.5)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert ok
+    assert "clear" in reason
+
+
+def test_shield_morning_strong_cold_front_blocked():
+    """A genuinely contradicting cold front (large decayed impact) still vetoes at 8 AM."""
+    vectors = [_FakeVector(proxy_temp_f=40.0, thermal_impact_f=-6.0)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert not ok
+    assert "Cold front" in reason
+
+
+def test_shield_warm_proxy_above_ceiling_blocked_any_hour():
+    """Converging air already at/above the ceiling breaks a YES thesis even at 8 AM —
+    temps only rise off the morning minimum."""
+    vectors = [_FakeVector(proxy_temp_f=74.0, thermal_impact_f=0.2)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert not ok
+    assert "ceiling" in reason
+
+
+def test_shield_warm_impact_blocked():
+    """Proxy below the ceiling but decayed warm impact would push high above it."""
+    vectors = [_FakeVector(proxy_temp_f=60.0, thermal_impact_f=3.0)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert not ok
+    assert "Warm front" in reason
+
+
+def test_shield_near_peak_cold_proxy_blocked():
+    """Near the diurnal peak, instantaneous proxy temps approximate the daily high —
+    sub-floor air converging at 3 PM vetoes even with small decayed impact."""
+    vectors = [_FakeVector(proxy_temp_f=65.0, thermal_impact_f=-0.4)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=PEAK_ET)
+    assert not ok
+    assert "Cold front" in reason
+
+
+def test_shield_impact_threshold_boundary():
+    """Threshold = half bracket width (clamped >= 1.0). Bracket 70-72 → 1.0°F."""
+    at_threshold = [_FakeVector(proxy_temp_f=55.0, thermal_impact_f=-1.0)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, at_threshold, "yes", now=MORNING_ET)
+    assert not ok
+
+    under_threshold = [_FakeVector(proxy_temp_f=55.0, thermal_impact_f=-0.9)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, under_threshold, "yes", now=MORNING_ET)
+    assert ok
+
+
+def test_shield_non_converging_ignored():
+    vectors = [_FakeVector(proxy_temp_f=40.0, thermal_impact_f=-6.0, is_converging=False)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=PEAK_ET)
+    assert ok
+
+
+def test_shield_long_eta_ignored():
+    vectors = [_FakeVector(proxy_temp_f=40.0, thermal_impact_f=-6.0, eta_minutes=999.0)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=PEAK_ET)
+    assert ok
+
+
+def test_shield_placeholder_impact_ignored():
+    """When target ASOS is unavailable the engine leaves thermal_impact_f == raw proxy
+    temp. That must not be read as a +48°F warm impact."""
+    vectors = [_FakeVector(proxy_temp_f=48.0, thermal_impact_f=48.0)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert ok
+
+
+def test_shield_missing_impact_attribute():
+    """Vectors without a usable impact fall back to peak-gated instantaneous checks only."""
+    vectors = [_FakeVector(proxy_temp_f=48.0, thermal_impact_f=None)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert ok
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "yes", now=PEAK_ET)
+    assert not ok
+
+
+def test_shield_no_side_inside_bracket_near_peak_blocked():
+    vectors = [_FakeVector(proxy_temp_f=71.0, thermal_impact_f=0.3)]
+    ok, reason = check_upwind_shield("NYC", 70.0, 72.0, vectors, "no", now=PEAK_ET)
+    assert not ok
+    assert "inside bracket" in reason
+
+
+def test_shield_no_side_inside_bracket_morning_passes():
+    """A morning reading inside the daily-high bracket says nothing about where the
+    HIGH lands — NO trades aren't vetoed on instantaneous temps outside the peak window."""
+    vectors = [_FakeVector(proxy_temp_f=71.0, thermal_impact_f=0.3)]
+    ok, _ = check_upwind_shield("NYC", 70.0, 72.0, vectors, "no", now=MORNING_ET)
+    assert ok
+
+
+def test_shield_uses_city_local_time():
+    """3 PM ET is 1 PM in Denver — still inside Denver's peak window; 8 AM ET (6 AM MT)
+    is not."""
+    vectors = [_FakeVector(proxy_temp_f=65.0, thermal_impact_f=-0.4, name="COS")]
+    ok, _ = check_upwind_shield("DEN", 70.0, 72.0, vectors, "yes", now=PEAK_ET)
+    assert not ok
+    ok, _ = check_upwind_shield("DEN", 70.0, 72.0, vectors, "yes", now=MORNING_ET)
+    assert ok
+
+
 # ── run_all_pre_trade_checks ──
 
 def test_dry_run_bypasses_checks():
@@ -293,6 +430,19 @@ def test_all_checks_pass():
     # May or may not pass depending on current time vs bot window
     assert isinstance(ok, bool)
     assert len(reasons) == 7  # 7 checks total
+
+
+def test_run_all_includes_upwind_shield():
+    ok, reasons = run_all_pre_trade_checks(
+        positions=[], balance=100.0, city_key="NYC", new_cost=1.0,
+        dsm_times_z=["03:00"], six_hour_z=["09:00"],
+        series_to_city={"KXHIGHNY": "NYC"},
+        proxy_vectors=[_FakeVector(proxy_temp_f=48.0, thermal_impact_f=-0.5)],
+        bracket_bounds=(70.0, 72.0),
+        trade_side="yes",
+    )
+    assert isinstance(ok, bool)
+    assert len(reasons) == 8  # 7 standard checks + upwind shield
 
 
 # ── Type hint consistency ──

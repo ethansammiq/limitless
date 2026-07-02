@@ -23,12 +23,20 @@ from config import (
     AUTO_CIRCUIT_BREAKER_LOSSES,
     AUTO_INTRADAY_DRAWDOWN_PCT,
     BOT_WINDOW_BUFFER_MIN,
+    STATIONS,
 )
 
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 PROJECT_ROOT = Path(__file__).resolve().parent
 KILL_SWITCH_FILE = PROJECT_ROOT / "PAUSE_TRADING"
+
+# ── Upwind shield tuning ──
+SHIELD_MAX_ETA_MIN = 240         # only fronts arriving within 4 h matter
+SHIELD_PEAK_HOUR_LOCAL = 15      # typical diurnal max (~3 PM local)
+SHIELD_PEAK_WINDOW_HOURS = 4     # instantaneous temps ≈ daily high within ±4 h of peak
+SHIELD_IMPACT_FLOOR_F = 1.0      # min decayed ΔT (°F) that can veto on its own
+SHIELD_IMPACT_CAP_F = 4.0        # cap so wide tail brackets still get shielded
 
 
 def check_kill_switch() -> tuple[bool, str]:
@@ -185,27 +193,67 @@ def check_bot_window(
     return True, "OK"
 
 
+def _shield_impact_threshold_f(bracket_low: float, bracket_high: float) -> float:
+    """Decayed thermal impact (°F) needed to displace a mid-bracket high past a bound.
+
+    Half the bracket width, clamped to [SHIELD_IMPACT_FLOOR_F, SHIELD_IMPACT_CAP_F]
+    so noise can't veto narrow brackets and tail brackets aren't unshieldable.
+    """
+    half_width = (bracket_high - bracket_low) / 2.0
+    return min(max(half_width, SHIELD_IMPACT_FLOOR_F), SHIELD_IMPACT_CAP_F)
+
+
+def _near_diurnal_peak(city_key: str, now: datetime | None = None) -> bool:
+    """True when target-local time is within SHIELD_PEAK_WINDOW_HOURS of the typical daily max."""
+    try:
+        tz = ZoneInfo(STATIONS[city_key].timezone)
+    except KeyError:  # unknown city or tz lookup failure — fall back to ET
+        tz = ET
+    local = (now or datetime.now(UTC)).astimezone(tz)
+    return abs(local.hour - SHIELD_PEAK_HOUR_LOCAL) <= SHIELD_PEAK_WINDOW_HOURS
+
+
 def check_upwind_shield(
     city_key: str,
     bracket_low: float,
     bracket_high: float,
     vectors: list,
     trade_side: str = "yes",
+    *,
+    now: datetime | None = None,
 ) -> tuple[bool, str]:
-    """Block trades when an incoming upwind front is on track to breach the bracket.
+    """Block trades when an incoming upwind front genuinely contradicts the daily-high thesis.
 
-    Iterates PropagationVector objects from proxy_arb_engine. A converging proxy
-    with ETA <= 240 min whose temperature falls outside the bracket boundary triggers
-    the shield.  Non-converging vectors and those without temperature data are skipped.
+    Iterates PropagationVector objects from proxy_arb_engine (converging, ETA <=
+    SHIELD_MAX_ETA_MIN, with temperature data). Two veto channels:
+
+    1. Decayed thermal impact (any hour): thermal_impact_f is the proxy-target
+       delta after exponential distance decay, resolved by the engine against the
+       target's CURRENT temperature — hour-of-day neutral. A signal strong enough
+       to displace a mid-bracket high past a bound vetoes.
+    2. Instantaneous proxy temperature (peak-gated): raw proxy temps only
+       approximate the daily high near the diurnal peak. A 6-10 AM observation
+       sits near the diurnal MINIMUM, so comparing it to a daily-HIGH bracket
+       floor vetoed every legitimate morning YES entry; the cold-side and
+       inside-bracket checks now apply only within SHIELD_PEAK_WINDOW_HOURS of
+       the typical peak. The warm-side check (proxy already at/above ceiling)
+       stays unconditional: temps only rise off the morning minimum, so
+       converging air at the ceiling breaks a YES thesis at any hour.
+
+    Vectors whose thermal_impact_f equals the raw proxy temp (engine placeholder
+    when target ASOS was unavailable) skip the impact channel.
     """
     if not vectors:
         return True, "OK (no upwind vectors)"
+
+    near_peak = _near_diurnal_peak(city_key, now)
+    impact_threshold = _shield_impact_threshold_f(bracket_low, bracket_high)
 
     for v in vectors:
         if not getattr(v, "is_converging", False):
             continue
         eta = getattr(v, "eta_minutes", float("inf"))
-        if eta > 240:
+        if eta > SHIELD_MAX_ETA_MIN:
             continue
         proxy_temp = getattr(v, "proxy_temp_f", None)
         if proxy_temp is None:
@@ -213,26 +261,41 @@ def check_upwind_shield(
         proxy_name = (
             getattr(v.proxy, "name", "proxy") if hasattr(v, "proxy") else "proxy"
         )
+        impact = getattr(v, "thermal_impact_f", None)
+        if impact is not None and impact == round(proxy_temp, 2):
+            impact = None  # engine placeholder: target ASOS temp was unavailable
 
         if trade_side == "yes":
-            if proxy_temp < bracket_low:
-                return (
-                    False,
-                    f"SHIELD: Cold front at {proxy_name} ({proxy_temp:.1f}°F) "
-                    f"ETA {eta:.0f} min will breach floor ({bracket_low}°F)",
-                )
             if proxy_temp >= bracket_high:
                 return (
                     False,
                     f"SHIELD: Warm front at {proxy_name} ({proxy_temp:.1f}°F) "
                     f"ETA {eta:.0f} min will breach ceiling ({bracket_high}°F)",
                 )
+            if impact is not None and impact >= impact_threshold:
+                return (
+                    False,
+                    f"SHIELD: Warm front at {proxy_name} (decayed impact {impact:+.1f}°F) "
+                    f"ETA {eta:.0f} min would push high above ceiling ({bracket_high}°F)",
+                )
+            if impact is not None and impact <= -impact_threshold:
+                return (
+                    False,
+                    f"SHIELD: Cold front at {proxy_name} (decayed impact {impact:+.1f}°F) "
+                    f"ETA {eta:.0f} min would drag high below floor ({bracket_low}°F)",
+                )
+            if near_peak and proxy_temp < bracket_low:
+                return (
+                    False,
+                    f"SHIELD: Cold front at {proxy_name} ({proxy_temp:.1f}°F) "
+                    f"ETA {eta:.0f} min near peak will breach floor ({bracket_low}°F)",
+                )
         elif trade_side == "no":
-            if bracket_low <= proxy_temp < bracket_high:
+            if near_peak and bracket_low <= proxy_temp < bracket_high:
                 return (
                     False,
                     f"SHIELD: Proxy temp at {proxy_name} ({proxy_temp:.1f}°F) "
-                    f"ETA {eta:.0f} min is inside bracket ({bracket_low}–{bracket_high}°F)",
+                    f"ETA {eta:.0f} min near peak is inside bracket ({bracket_low}–{bracket_high}°F)",
                 )
 
     return True, "OK (upwind shield clear)"
