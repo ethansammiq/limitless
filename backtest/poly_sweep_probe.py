@@ -216,7 +216,7 @@ def price_at_cutoff(cache: dict, token_id: str, day: str, tz: ZoneInfo,
 
 
 def run_probe(cities: list[str], max_days: int, cutoffs: list[int],
-              slippage: float, verbose: bool) -> None:
+              slippage: float, max_entry: float, verbose: bool) -> None:
     cache = _load_cache()
     events = discover_events(cities, max_days)
     counts = ", ".join(
@@ -294,12 +294,17 @@ def run_probe(cities: list[str], max_days: int, cutoffs: list[int],
         time.sleep(0.1)
 
     print(f"\nskips: {', '.join(f'{k}={v}' for k, v in skipped.items() if v)}")
-    print(f"slippage haircut: {slippage:.0f}c/side (last-trade px, not ask)\n")
+    print(f"slippage haircut: {slippage:.0f}c/side (last-trade px, not ask)")
+    if max_entry < 100:
+        print(f"cheapness filter: only entries priced <= {max_entry:.0f}c "
+              f"(days above are skipped, not losses)")
+    print()
     header = f"{'city':5s} {'cutoff':>6s} {'n':>4s} {'hit%':>6s} {'med_px':>7s} {'EV_net(c)':>10s}"
     print(header)
     for city in cities + ["ALL"]:
         for cutoff in cutoffs:
-            sel = [r for r in rows if r[2] == cutoff and (city == "ALL" or r[0] == city)]
+            sel = [r for r in rows if r[2] == cutoff and r[3] <= max_entry
+                   and (city == "ALL" or r[0] == city)]
             if not sel:
                 continue
             wins = [r for r in sel if r[4]]
@@ -320,6 +325,8 @@ def main() -> None:
     ap.add_argument("--cutoffs", default="14,15,16,17",
                     help="local entry hours, comma list")
     ap.add_argument("--slippage-cents", type=float, default=3.0)
+    ap.add_argument("--max-entry-cents", type=float, default=100.0,
+                    help="only take entries priced at/below this (conditional EV)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     cities = [c.strip().upper() for c in args.cities.split(",") if c.strip()]
@@ -327,7 +334,8 @@ def main() -> None:
     if unknown:
         ap.error(f"unknown cities: {unknown}")
     cutoffs = [int(h) for h in args.cutoffs.split(",")]
-    run_probe(cities, args.days, cutoffs, args.slippage_cents, args.verbose)
+    run_probe(cities, args.days, cutoffs, args.slippage_cents,
+              args.max_entry_cents, args.verbose)
 
 
 if __name__ == "__main__":
