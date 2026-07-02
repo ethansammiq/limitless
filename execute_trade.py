@@ -31,8 +31,6 @@ Safety:
 import argparse
 import asyncio
 import json
-import os
-import sys
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -73,6 +71,160 @@ async def send_discord_confirmation(ticker: str, side: str, price: int, qty: int
         color=color,
         context="execute_trade",
     )
+
+
+# Kalshi statuses that mean the order is not working — never register these.
+REJECTED_STATUSES = frozenset({"REJECTED", "CANCELED", "CANCELLED", "FAILED", "ERROR"})
+
+
+async def _place_and_register(
+    client: KalshiClient, ticker: str, side: str, price: int, quantity: int,
+    total_cost: float, interactive: bool,
+) -> dict:
+    """Shared order pipeline for execute() and execute_auto().
+
+    register_order → place_order → verify order_id/status → confirm_order →
+    register_position (with orphaned-order alert) → Discord confirmation.
+
+    interactive=True prints progress to the terminal (execute);
+    interactive=False logs instead (execute_auto).
+
+    Returns:
+        {"success": bool, "order_id": str, "status": str, "cost": float,
+         "error": str} plus "client_order_id" on success.
+    """
+    # Generate client_order_id BEFORE the API call. Kalshi deduplicates
+    # on this key, so a network timeout + retry won't create a second order.
+    db = get_db()
+    order_uuid = str(uuid.uuid4())
+    db.register_order(
+        client_order_id=order_uuid, ticker=ticker, side=side,
+        count=quantity, price=price,
+        # PaperBroker exposes mode="paper"; live brokers/raw clients are live.
+        is_paper=getattr(client, "mode", "live") == "paper",
+    )
+    if interactive:
+        print("\n  Placing order...")
+    result = await client.place_order(
+        ticker=ticker,
+        side=side,
+        action="buy",
+        count=quantity,
+        price=price,
+        order_type="limit",
+        client_order_id=order_uuid,
+    )
+
+    if not result:
+        db.reject_order(order_uuid)
+        if interactive:
+            print("  ✗ Order placement failed. Check logs.")
+        await send_discord_confirmation(ticker, side, price, quantity, total_cost, "FAILED")
+        return {"success": False, "order_id": "", "status": "FAILED", "cost": total_cost,
+                "error": "Order placement returned empty result"}
+
+    order = result.get("order", result)
+    status = order.get("status", "unknown").upper()
+    order_id = order.get("order_id", "")
+
+    # ── Verify order was actually accepted before registering ──
+    if not order_id or order_id == "N/A":
+        db.reject_order(order_uuid)
+        db.write_audit("ORDER_MISSING_ID", ticker=ticker, payload={
+            "client_order_id": order_uuid, "side": side,
+            "quantity": quantity, "price": price, "status": status,
+            "raw": str(result)[:300],
+        })
+        if interactive:
+            print("  ✗ Order response missing order_id — NOT registering position")
+            print(f"    Raw response: {json.dumps(result, default=str)[:300]}")
+        else:
+            logger.error("Order response missing order_id — NOT registering position")
+        await send_discord_alert(
+            title="⚠ ORDER MISSING ID — Position NOT registered",
+            description=(
+                f"Kalshi returned a response without order_id.\n"
+                f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
+                f"Status: {status}\n"
+                f"**Check Kalshi dashboard for orphaned orders.**"
+            ),
+            color=0xFF0000,
+            context="missing_order_id",
+        )
+        return {"success": False, "order_id": "", "status": status, "cost": total_cost,
+                "error": "Order response missing order_id"}
+
+    if status in REJECTED_STATUSES:
+        db.reject_order(order_uuid)
+        db.write_audit("ORDER_REJECTED", ticker=ticker, payload={
+            "client_order_id": order_uuid, "kalshi_order_id": order_id,
+            "status": status, "side": side, "quantity": quantity, "price": price,
+        })
+        if interactive:
+            print(f"  ✗ Order REJECTED by Kalshi (status: {status})")
+            print(f"     Order ID: {order_id}")
+            # Interactive flow notifies Discord directly; auto_trader handles
+            # rejection notifications from the returned dict.
+            await send_discord_confirmation(ticker, side, price, quantity, total_cost, status)
+        else:
+            logger.warning("Order REJECTED by Kalshi (status: %s, order: %s)", status, order_id)
+        return {"success": False, "order_id": order_id, "status": status, "cost": total_cost,
+                "error": f"Order rejected: {status}"}
+
+    db.confirm_order(order_uuid, kalshi_order_id=order_id,
+                     status="resting" if status in ("RESTING", "PENDING") else "open")
+    db.write_audit("ORDER_PLACED", ticker=ticker, payload={
+        "client_order_id": order_uuid, "kalshi_order_id": order_id,
+        "side": side, "quantity": quantity, "price": price, "status": status,
+    })
+
+    if interactive:
+        if status in ("RESTING", "PENDING"):
+            print("  ⏳ Order RESTING (limit order in book)")
+            print(f"     Order ID: {order_id}")
+            print(f"     Waiting for fill at {price}¢...")
+        elif status == "EXECUTED":
+            print("  ✅ Order FILLED!")
+            print(f"     Order ID: {order_id}")
+        else:
+            print(f"  Order status: {status}")
+            print(f"     Order ID: {order_id}")
+
+    # Register position for the position monitor to track.
+    # Critical: if this fails, we have an orphaned order on Kalshi
+    # that position_monitor can't see. Log loudly + Discord alert.
+    try:
+        register_position(ticker, side, price, quantity, order_id, status,
+                          client_order_id=order_uuid)
+    except Exception as reg_err:
+        db.write_audit("ORPHANED_ORDER", ticker=ticker, payload={
+            "client_order_id": order_uuid, "kalshi_order_id": order_id,
+            "side": side, "quantity": quantity, "price": price,
+            "error": str(reg_err),
+        })
+        if interactive:
+            print(f"  ⚠ CRITICAL: Order placed but register_position failed: {reg_err}")
+            print(f"    Orphaned order: {order_id} — {quantity}x {side} {ticker} @ {price}c")
+        else:
+            logger.error(
+                "ORPHANED ORDER: %s placed but register_position failed: %s",
+                order_id, reg_err,
+            )
+        await send_discord_alert(
+            title="🚨 ORPHANED ORDER — register_position FAILED",
+            description=(
+                f"Order {order_id} placed successfully but position tracking failed.\n"
+                f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
+                f"Error: {reg_err}\n"
+                f"**Manual action required:** Add to positions.json or cancel order."
+            ),
+            color=0xFF0000,
+            context="orphaned_order",
+        )
+
+    await send_discord_confirmation(ticker, side, price, quantity, total_cost, status)
+    return {"success": True, "order_id": order_id, "status": status, "cost": total_cost,
+            "client_order_id": order_uuid, "error": ""}
 
 
 async def execute(ticker: str, side: str, price: int, quantity: int, confirm: bool = False):
@@ -148,7 +300,7 @@ async def execute(ticker: str, side: str, price: int, quantity: int, confirm: bo
         profit_if_win = max_payout - total_cost
         roi = (profit_if_win / total_cost * 100) if total_cost > 0 else 0
 
-        print(f"\n  ORDER SUMMARY")
+        print("\n  ORDER SUMMARY")
         print(f"  {'─'*42}")
         print(f"  Ticker:       {ticker}")
         print(f"  Side:         {side.upper()}")
@@ -188,121 +340,16 @@ async def execute(ticker: str, side: str, price: int, quantity: int, confirm: bo
 
         # ── Confirm ──
         if not confirm:
-            response = input(f"\n  Execute this trade? (y/n): ").strip().lower()
+            response = input("\n  Execute this trade? (y/n): ").strip().lower()
             if response != "y":
                 print("  Cancelled.")
                 return False
 
         # ── Execute ──
-        # Generate client_order_id BEFORE the API call. Kalshi deduplicates
-        # on this key, so a network timeout + retry won't create a second order.
-        db = get_db()
-        order_uuid = str(uuid.uuid4())
-        db.register_order(
-            client_order_id=order_uuid, ticker=ticker, side=side,
-            count=quantity, price=price, is_paper=False,
+        outcome = await _place_and_register(
+            client, ticker, side, price, quantity, total_cost, interactive=True,
         )
-        print(f"\n  Placing order...")
-        result = await client.place_order(
-            ticker=ticker,
-            side=side,
-            action="buy",
-            count=quantity,
-            price=price,
-            order_type="limit",
-            client_order_id=order_uuid,
-        )
-
-        if result:
-            order = result.get("order", result)
-            status = order.get("status", "unknown").upper()
-            order_id = order.get("order_id", "")
-
-            # ── Verify order was actually accepted before registering ──
-            if not order_id or order_id == "N/A":
-                db.reject_order(order_uuid)
-                db.write_audit("ORDER_MISSING_ID", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "side": side,
-                    "quantity": quantity, "price": price, "raw": str(result)[:300],
-                })
-                print(f"  ✗ Order response missing order_id — NOT registering position")
-                print(f"    Raw response: {json.dumps(result, default=str)[:300]}")
-                await send_discord_alert(
-                    title="⚠ ORDER MISSING ID — Position NOT registered",
-                    description=(
-                        f"Kalshi returned a response without order_id.\n"
-                        f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
-                        f"Status: {status}\n"
-                        f"**Check Kalshi dashboard for orphaned orders.**"
-                    ),
-                    color=0xFF0000,
-                    context="missing_order_id",
-                )
-                return False
-
-            REJECTED_STATUSES = {"REJECTED", "CANCELED", "CANCELLED", "FAILED", "ERROR"}
-            if status in REJECTED_STATUSES:
-                db.reject_order(order_uuid)
-                db.write_audit("ORDER_REJECTED", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                    "status": status, "side": side, "quantity": quantity, "price": price,
-                })
-                print(f"  ✗ Order REJECTED by Kalshi (status: {status})")
-                print(f"     Order ID: {order_id}")
-                await send_discord_confirmation(ticker, side, price, quantity, total_cost, status)
-                return False
-
-            db.confirm_order(order_uuid, kalshi_order_id=order_id,
-                             status="resting" if status in ("RESTING", "PENDING") else "open")
-            db.write_audit("ORDER_PLACED", ticker=ticker, payload={
-                "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                "side": side, "quantity": quantity, "price": price, "status": status,
-            })
-
-            if status in ("RESTING", "PENDING"):
-                print(f"  ⏳ Order RESTING (limit order in book)")
-                print(f"     Order ID: {order_id}")
-                print(f"     Waiting for fill at {price}¢...")
-            elif status == "EXECUTED":
-                print(f"  ✅ Order FILLED!")
-                print(f"     Order ID: {order_id}")
-            else:
-                print(f"  Order status: {status}")
-                print(f"     Order ID: {order_id}")
-
-            # Register position for the position monitor to track.
-            # Critical: if this fails, we have an orphaned order on Kalshi
-            # that position_monitor can't see. Log loudly + Discord alert.
-            try:
-                register_position(ticker, side, price, quantity, order_id, status,
-                                  client_order_id=order_uuid)
-            except Exception as reg_err:
-                print(f"  ⚠ CRITICAL: Order placed but register_position failed: {reg_err}")
-                print(f"    Orphaned order: {order_id} — {quantity}x {side} {ticker} @ {price}c")
-                db.write_audit("ORPHANED_ORDER", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                    "side": side, "quantity": quantity, "price": price,
-                    "error": str(reg_err),
-                })
-                await send_discord_alert(
-                    title="🚨 ORPHANED ORDER — register_position FAILED",
-                    description=(
-                        f"Order {order_id} placed successfully but position tracking failed.\n"
-                        f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
-                        f"Error: {reg_err}\n"
-                        f"**Manual action required:** Add to positions.json or cancel order."
-                    ),
-                    color=0xFF0000,
-                    context="orphaned_order",
-                )
-
-            await send_discord_confirmation(ticker, side, price, quantity, total_cost, status)
-            return True
-        else:
-            db.reject_order(order_uuid)
-            print(f"  ✗ Order placement failed. Check logs.")
-            await send_discord_confirmation(ticker, side, price, quantity, total_cost, "FAILED")
-            return False
+        return outcome["success"]
 
     finally:
         await client.stop()
@@ -351,98 +398,9 @@ async def execute_auto(
             return {"success": False, "order_id": "", "status": "", "cost": total_cost,
                     "error": f"Insufficient balance: ${balance:.2f}"}
 
-        db = get_db()
-        order_uuid = str(uuid.uuid4())
-        db.register_order(
-            client_order_id=order_uuid, ticker=ticker, side=side,
-            count=quantity, price=price, is_paper=False,
+        return await _place_and_register(
+            client, ticker, side, price, quantity, total_cost, interactive=False,
         )
-
-        result = await client.place_order(
-            ticker=ticker, side=side, action="buy",
-            count=quantity, price=price, order_type="limit",
-            client_order_id=order_uuid,
-        )
-
-        if result:
-            order = result.get("order", result)
-            status = order.get("status", "unknown").upper()
-            order_id = order.get("order_id", "")
-
-            # ── Verify order was actually accepted before registering ──
-            if not order_id:
-                db.reject_order(order_uuid)
-                db.write_audit("ORDER_MISSING_ID", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "side": side,
-                    "quantity": quantity, "price": price, "status": status,
-                })
-                logger.error("Order response missing order_id — NOT registering position")
-                await send_discord_alert(
-                    title="⚠ ORDER MISSING ID — Position NOT registered",
-                    description=(
-                        f"Kalshi returned a response without order_id.\n"
-                        f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
-                        f"Status: {status}\n"
-                        f"**Check Kalshi dashboard for orphaned orders.**"
-                    ),
-                    color=0xFF0000,
-                    context="missing_order_id",
-                )
-                return {"success": False, "order_id": "", "status": status, "cost": total_cost,
-                        "error": "Order response missing order_id"}
-
-            REJECTED_STATUSES = {"REJECTED", "CANCELED", "CANCELLED", "FAILED", "ERROR"}
-            if status in REJECTED_STATUSES:
-                db.reject_order(order_uuid)
-                db.write_audit("ORDER_REJECTED", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                    "status": status, "side": side, "quantity": quantity, "price": price,
-                })
-                logger.warning("Order REJECTED by Kalshi (status: %s, order: %s)", status, order_id)
-                return {"success": False, "order_id": order_id, "status": status, "cost": total_cost,
-                        "error": f"Order rejected: {status}"}
-
-            db.confirm_order(order_uuid, kalshi_order_id=order_id,
-                             status="resting" if status in ("RESTING", "PENDING") else "open")
-            db.write_audit("ORDER_PLACED", ticker=ticker, payload={
-                "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                "side": side, "quantity": quantity, "price": price, "status": status,
-            })
-
-            # Critical: protect against register_position failure leaving orphaned orders
-            try:
-                register_position(ticker, side, price, quantity, order_id, status,
-                                  client_order_id=order_uuid)
-            except Exception as reg_err:
-                db.write_audit("ORPHANED_ORDER", ticker=ticker, payload={
-                    "client_order_id": order_uuid, "kalshi_order_id": order_id,
-                    "side": side, "quantity": quantity, "price": price,
-                    "error": str(reg_err),
-                })
-                logger.error(
-                    "ORPHANED ORDER: %s placed but register_position failed: %s",
-                    order_id, reg_err,
-                )
-                await send_discord_alert(
-                    title="🚨 ORPHANED ORDER — register_position FAILED",
-                    description=(
-                        f"Order {order_id} placed but position tracking failed.\n"
-                        f"**{side.upper()} {ticker}** — {quantity}x @ {price}c\n"
-                        f"Error: {reg_err}\n"
-                        f"**Manual action required:** Add to positions.json or cancel order."
-                    ),
-                    color=0xFF0000,
-                    context="orphaned_order",
-                )
-
-            await send_discord_confirmation(ticker, side, price, quantity, total_cost, status)
-            return {"success": True, "order_id": order_id, "status": status, "cost": total_cost,
-                    "client_order_id": order_uuid, "error": ""}
-        else:
-            db.reject_order(order_uuid)
-            await send_discord_confirmation(ticker, side, price, quantity, total_cost, "FAILED")
-            return {"success": False, "order_id": "", "status": "FAILED", "cost": total_cost,
-                    "error": "Order placement returned empty result"}
 
     except Exception as e:
         return {"success": False, "order_id": "", "status": "ERROR", "cost": 0, "error": str(e)}

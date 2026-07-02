@@ -2,7 +2,6 @@
 """Tests for execute_trade.py — order verification, fill handling."""
 
 import asyncio
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -141,6 +140,24 @@ class TestExecuteAutoVerification:
         assert result["success"] is False
         assert "MAX" in result["error"]
 
+    def test_na_order_id_does_not_register(self):
+        """Literal 'N/A' order_id → treated as missing, position NOT registered."""
+        from execute_trade import execute_auto
+        from position_store import load_positions
+
+        client = _mock_client(
+            order_response={"order": {"order_id": "N/A", "status": "resting"}},
+            balance=100.0,
+        )
+
+        with patch("execute_trade.send_discord_confirmation", new_callable=AsyncMock):
+            with patch("execute_trade.send_discord_alert", new_callable=AsyncMock):
+                result = asyncio.run(execute_auto("TICKER1", "yes", 25, 5, client=client))
+
+        assert result["success"] is False
+        assert "missing order_id" in result["error"]
+        assert len(load_positions()) == 0
+
     def test_register_failure_sends_orphan_alert(self):
         """register_position fails → orphaned order Discord alert sent."""
         from execute_trade import execute_auto
@@ -161,3 +178,34 @@ class TestExecuteAutoVerification:
         mock_alert.assert_called_once()
         call_kwargs = mock_alert.call_args
         assert "ORPHANED" in call_kwargs.kwargs.get("title", "") or "ORPHANED" in str(call_kwargs)
+
+
+class TestIsPaperRegistration:
+    """register_order records is_paper based on the active broker's mode."""
+
+    def _run_with_mode(self, mode):
+        from execute_trade import execute_auto
+
+        client = _mock_client(
+            order_response={"order": {"order_id": "abc123", "status": "resting"}},
+            balance=100.0,
+        )
+        client.mode = mode
+
+        mock_db = MagicMock()
+        with patch("execute_trade.get_db", return_value=mock_db):
+            with patch("execute_trade.send_discord_confirmation", new_callable=AsyncMock):
+                result = asyncio.run(execute_auto("TICKER1", "yes", 25, 5, client=client))
+
+        assert result["success"] is True
+        return mock_db.register_order.call_args.kwargs
+
+    def test_paper_broker_records_is_paper_true(self):
+        """PaperBroker (mode='paper') → order registered with is_paper=True."""
+        kwargs = self._run_with_mode("paper")
+        assert kwargs["is_paper"] is True
+
+    def test_live_broker_records_is_paper_false(self):
+        """Live broker (mode='live') → order registered with is_paper=False."""
+        kwargs = self._run_with_mode("live")
+        assert kwargs["is_paper"] is False
