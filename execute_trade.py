@@ -79,7 +79,7 @@ REJECTED_STATUSES = frozenset({"REJECTED", "CANCELED", "CANCELLED", "FAILED", "E
 
 async def _place_and_register(
     client: KalshiClient, ticker: str, side: str, price: int, quantity: int,
-    total_cost: float, interactive: bool,
+    total_cost: float, interactive: bool, strategy: str = "untagged",
 ) -> dict:
     """Shared order pipeline for execute() and execute_auto().
 
@@ -88,6 +88,9 @@ async def _place_and_register(
 
     interactive=True prints progress to the terminal (execute);
     interactive=False logs instead (execute_auto).
+
+    strategy attributes the position (and paper order) to the subsystem
+    placing it — "auto_trader", "peak_trader", or "manual".
 
     Returns:
         {"success": bool, "order_id": str, "status": str, "cost": float,
@@ -113,6 +116,7 @@ async def _place_and_register(
         price=price,
         order_type="limit",
         client_order_id=order_uuid,
+        strategy=strategy,
     )
 
     if not result:
@@ -195,7 +199,7 @@ async def _place_and_register(
     # that position_monitor can't see. Log loudly + Discord alert.
     try:
         register_position(ticker, side, price, quantity, order_id, status,
-                          client_order_id=order_uuid)
+                          client_order_id=order_uuid, strategy=strategy)
     except Exception as reg_err:
         db.write_audit("ORPHANED_ORDER", ticker=ticker, payload={
             "client_order_id": order_uuid, "kalshi_order_id": order_id,
@@ -348,6 +352,7 @@ async def execute(ticker: str, side: str, price: int, quantity: int, confirm: bo
         # ── Execute ──
         outcome = await _place_and_register(
             client, ticker, side, price, quantity, total_cost, interactive=True,
+            strategy="manual",
         )
         return outcome["success"]
 
@@ -358,11 +363,14 @@ async def execute(ticker: str, side: str, price: int, quantity: int, confirm: bo
 async def execute_auto(
     ticker: str, side: str, price: int, quantity: int,
     client: KalshiClient = None, close_client: bool = False,
+    strategy: str = "untagged",
 ) -> dict:
     """Non-interactive trade execution for auto_trader.py.
 
     Caller is responsible for safety checks (trading_guards).
     Accepts optional KalshiClient to avoid reconnection overhead.
+    Callers should pass strategy= so the position is attributable
+    (auto_trader / peak_trader); omitted → "untagged".
 
     Returns:
         {"success": bool, "order_id": str, "status": str, "cost": float, "error": str}
@@ -400,6 +408,7 @@ async def execute_auto(
 
         return await _place_and_register(
             client, ticker, side, price, quantity, total_cost, interactive=False,
+            strategy=strategy,
         )
 
     except Exception as e:

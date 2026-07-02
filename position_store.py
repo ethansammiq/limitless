@@ -91,6 +91,9 @@ class PositionDict(TypedDict, total=False):
     # ── Idempotency (set at order-placement time, never changes) ──
     client_order_id: str
 
+    # ── Attribution (set at open time; legacy records lack it → "untagged") ──
+    strategy: str
+
 
 ET = ZoneInfo("America/New_York")
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -301,11 +304,16 @@ def register_position(
     status: str,
     positions_file: Optional[Path] = None,
     client_order_id: str = "",
+    strategy: str = "untagged",
 ) -> None:
     """Register a new position (or average into existing) in the positions file.
 
     Called after a successful order placement. Uses a single lock transaction.
     Honors PAPER_TRADING_MODE unless positions_file is passed explicitly.
+
+    strategy tags which subsystem opened the position ("auto_trader",
+    "peak_trader", "manual") so realized P&L can be attributed per strategy.
+    Averaging keeps the opener's tag.
     """
     with position_transaction(positions_file) as positions:
         existing = None
@@ -344,6 +352,7 @@ def register_position(
             existing["contracts"] = new_total
             existing["original_contracts"] = new_total
             existing["averaged_in"] = True
+            existing.setdefault("strategy", "untagged")
             existing.setdefault("exit_rules", {})["freeroll_at"] = int(new_avg * 2)
             existing.setdefault("notes", []).append(
                 f"{now.isoformat()}: ⚠ AVERAGED {direction} — added {quantity}x @ {price}c (avg now {new_avg}c)"
@@ -359,6 +368,7 @@ def register_position(
                 "original_contracts": quantity,
                 "order_id": order_id,
                 "client_order_id": client_order_id,
+                "strategy": strategy,
                 "status": pos_status,
                 "entry_time": now.isoformat(),
                 "freerolled": False,

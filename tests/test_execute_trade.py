@@ -209,3 +209,36 @@ class TestIsPaperRegistration:
         """Live broker (mode='live') → order registered with is_paper=False."""
         kwargs = self._run_with_mode("live")
         assert kwargs["is_paper"] is False
+
+
+class TestStrategyAttribution:
+    """strategy= threads through to place_order and register_position."""
+
+    def _run(self, **extra):
+        from execute_trade import execute_auto
+
+        client = _mock_client(
+            order_response={"order": {"order_id": "abc123", "status": "executed"}},
+            balance=100.0,
+        )
+        with patch("execute_trade.send_discord_confirmation", new_callable=AsyncMock):
+            with patch("execute_trade.send_discord_alert", new_callable=AsyncMock):
+                result = asyncio.run(
+                    execute_auto("TICKER1", "yes", 25, 5, client=client, **extra)
+                )
+        assert result["success"] is True
+        return client
+
+    def test_execute_auto_tags_position_with_strategy(self):
+        from position_store import load_positions
+        client = self._run(strategy="peak_trader")
+        positions = load_positions()
+        assert positions[0]["strategy"] == "peak_trader"
+        # Broker receives the tag too (paper order ledger attribution)
+        assert client.place_order.await_args.kwargs["strategy"] == "peak_trader"
+
+    def test_execute_auto_defaults_to_untagged(self):
+        from position_store import load_positions
+        self._run()
+        positions = load_positions()
+        assert positions[0]["strategy"] == "untagged"

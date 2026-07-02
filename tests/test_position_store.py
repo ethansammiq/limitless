@@ -173,6 +173,46 @@ class TestRegisterPosition:
         assert rules.get("trailing_offset") == 8
 
 
+class TestStrategyAttribution:
+    """strategy tag set at open time, preserved through averaging."""
+
+    def test_register_sets_strategy(self):
+        from position_store import register_position, load_positions
+        register_position("T1", "yes", 25, 10, "order1", "EXECUTED",
+                          strategy="auto_trader")
+        loaded = load_positions()
+        assert loaded[0]["strategy"] == "auto_trader"
+
+    def test_register_defaults_to_untagged(self):
+        from position_store import register_position, load_positions
+        register_position("T1", "yes", 25, 10, "order1", "EXECUTED")
+        loaded = load_positions()
+        assert loaded[0]["strategy"] == "untagged"
+
+    def test_averaging_preserves_opener_strategy(self):
+        """The subsystem that OPENED the position owns its P&L attribution."""
+        from position_store import register_position, load_positions
+        register_position("T1", "yes", 20, 10, "order1", "EXECUTED",
+                          strategy="peak_trader")
+        register_position("T1", "yes", 30, 10, "order2", "EXECUTED",
+                          strategy="manual")
+        loaded = load_positions()
+        assert len(loaded) == 1
+        assert loaded[0]["strategy"] == "peak_trader"
+
+    def test_averaging_into_legacy_position_tags_untagged(self):
+        """Legacy records (pre-strategy) get backfilled as untagged on averaging."""
+        from position_store import register_position, load_positions, save_positions
+        save_positions([
+            {"ticker": "T1", "side": "yes", "avg_price": 20, "contracts": 10,
+             "status": "open", "exit_rules": {}, "notes": []},
+        ])
+        register_position("T1", "yes", 30, 10, "order2", "EXECUTED",
+                          strategy="auto_trader")
+        loaded = load_positions()
+        assert loaded[0]["strategy"] == "untagged"
+
+
 class TestValidation:
     """Schema validation."""
 

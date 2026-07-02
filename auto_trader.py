@@ -628,6 +628,7 @@ async def auto_trade(
                     quantity=contracts,
                     client=client,
                     close_client=False,
+                    strategy="auto_trader",
                 )
                 if result["success"]:
                     logger.info("  EXECUTED: %s (order: %s)", result["status"], result["order_id"])
@@ -716,6 +717,7 @@ async def auto_trade(
                 result = await execute_auto(
                     ticker=opp.ticker, side=opp.side, price=entry_price,
                     quantity=contracts, client=client, close_client=False,
+                    strategy="auto_trader",
                 )
                 if result["success"]:
                     logger.info("  RE-ENTERED: %s (order: %s)", result["status"], result["order_id"])

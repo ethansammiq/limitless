@@ -77,6 +77,7 @@ class BrokerInterface(ABC):
     async def place_order(
         self, ticker: str, side: str, action: str, count: int, price: int,
         order_type: str = "limit", client_order_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> dict: ...
 
     @abstractmethod
@@ -133,6 +134,9 @@ class KalshiBroker(BrokerInterface):
         return await self._client.get_fills(*args, **kwargs)
 
     async def place_order(self, *args, **kwargs):
+        # strategy is local attribution metadata — the Kalshi API rejects
+        # unknown params, and position_store records it independently.
+        kwargs.pop("strategy", None)
         return await self._client.place_order(*args, **kwargs)
 
     async def get_orders(self, *args, **kwargs):
@@ -275,6 +279,7 @@ class PaperBroker(BrokerInterface):
     async def place_order(
         self, ticker: str, side: str, action: str, count: int, price: int,
         order_type: str = "limit", client_order_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> dict:
         order_id = f"paper_{self._next_order_id}"
         self._next_order_id += 1
@@ -288,6 +293,7 @@ class PaperBroker(BrokerInterface):
             # Generated when absent, mirroring KalshiClient's idempotency key,
             # so the order dict shape matches the live API response.
             "client_order_id": client_order_id or str(uuid.uuid4()),
+            "strategy": strategy or "untagged",
             "ticker": ticker,
             "side": side,
             "action": action,

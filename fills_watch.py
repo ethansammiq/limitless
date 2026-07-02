@@ -80,6 +80,26 @@ def _delta(now: datetime, hour: int) -> str:
     return f"{mins // 60}h{mins % 60:02d}m" if mins >= 60 else f"{mins}m"
 
 
+def strategy_pnl(positions: list[dict]) -> dict[str, dict]:
+    """Aggregate realized P&L by the strategy that opened each position.
+
+    Legacy records predate the strategy field and group under "untagged".
+    Cancelled/rejected entries never held contracts, so they're excluded.
+    """
+    NEVER_HELD = ("cancelled", "canceled", "rejected")
+    out: dict[str, dict] = {}
+    for p in positions:
+        if not _is_real(p) or p.get("status") in NEVER_HELD:
+            continue
+        strat = p.get("strategy") or "untagged"
+        row = out.setdefault(strat, {"positions": 0, "open": 0, "pnl": 0.0})
+        row["positions"] += 1
+        if p.get("status") in ("open", "resting", "pending_sell"):
+            row["open"] += 1
+        row["pnl"] += float(p.get("pnl_realized") or 0.0)
+    return out
+
+
 def snapshot() -> tuple[str, int]:
     """Render the readout. Returns (text, executed_count) for new-fill detection."""
     now = datetime.now(ET)
@@ -185,6 +205,18 @@ def snapshot() -> tuple[str, int]:
             col = GREEN if st == "open" else (RED if st == "pending_sell" else YELLOW)
             L.append(f"  {col}{st:8}{RESET} {p.get('side','').upper():3} {p.get('contracts',0):>3}x "
                      f"{p.get('ticker',''):26} @ {p.get('avg_price',0):>2}c  pnl ${p.get('pnl_realized',0):.2f}")
+    else:
+        L.append(f"  {DIM}—{RESET}")
+    L.append("")
+
+    # Realized P&L attributed to the subsystem that opened each position
+    L.append(f"{BOLD}P&L BY STRATEGY{RESET} {DIM}(Σ realized; pre-tagging records = untagged){RESET}")
+    by_strat = strategy_pnl(positions)
+    if by_strat:
+        for strat, row in sorted(by_strat.items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+            pcol = GREEN if row["pnl"] > 0 else (RED if row["pnl"] < 0 else DIM)
+            L.append(f"  {strat:12} {row['positions']:>3} pos ({row['open']} open)  "
+                     f"{pcol}${row['pnl']:+.2f}{RESET}")
     else:
         L.append(f"  {DIM}—{RESET}")
 

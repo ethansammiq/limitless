@@ -279,6 +279,7 @@ async def execute_peak_trade(
                 quantity=trade["contracts"],
                 client=broker,
                 close_client=False,
+                strategy="peak_trader",
             )
 
             if exec_result["success"]:

@@ -344,3 +344,66 @@ class TestBidAskExtraction:
         assert _would_cross("buy", 44, bid=40, ask=45) is False
         assert _would_cross("sell", 40, bid=40, ask=45) is True  # <= bid
         assert _would_cross("sell", 41, bid=40, ask=45) is False
+
+
+class TestStrategyAttribution:
+    """strategy= tags paper order records; live delegate strips it."""
+
+    def test_paper_order_records_strategy(self):
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="resting",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            # 41c rests below the 45c ask — resting orders are persisted
+            # (instant-crossing fills never enter the ledger; known gap)
+            resp = await broker.place_order(
+                "X", "yes", "buy", 10, 41, strategy="auto_trader",
+            )
+            assert resp["order"]["strategy"] == "auto_trader"
+            saved = json.loads(_test_orders.read_text())
+            assert saved[0]["strategy"] == "auto_trader"
+            await broker.stop()
+
+        asyncio.run(go())
+
+    def test_paper_order_defaults_to_untagged(self):
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="resting",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            resp = await broker.place_order("X", "yes", "buy", 10, 41)
+            assert resp["order"]["strategy"] == "untagged"
+            await broker.stop()
+
+        asyncio.run(go())
+
+    def test_kalshi_broker_strips_strategy_before_api_client(self):
+        """The live API rejects unknown params — strategy must never reach it."""
+        from core.broker import KalshiBroker
+
+        broker = KalshiBroker(api_key_id="k", private_key_path="p")
+
+        # Strict fake mirroring KalshiClient.place_order's exact signature:
+        # a leaked strategy kwarg would raise TypeError here.
+        class StrictClient:
+            async def place_order(self, ticker, side, action, count, price,
+                                  order_type="limit", client_order_id=None):
+                return {"order": {"order_id": "live_1", "status": "resting"}}
+
+        broker._client = StrictClient()
+
+        resp = asyncio.run(broker.place_order(
+            ticker="X", side="yes", action="buy", count=10, price=46,
+            order_type="limit", client_order_id="cid-1", strategy="peak_trader",
+        ))
+        assert resp["order"]["order_id"] == "live_1"
