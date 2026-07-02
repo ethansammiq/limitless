@@ -92,10 +92,37 @@ def snapshot() -> tuple[str, int]:
     delta = balance - initial
 
     real = [o for o in orders if _is_real(o)]
-    fills = [o for o in real if o.get("status") == "EXECUTED"]
     counts: dict[str, int] = {}
     for o in real:
         counts[o.get("status", "?")] = counts.get(o.get("status", "?"), 0) + 1
+
+    # Positions are the source of truth for fills: a real market fill shows up as an
+    # open/closed position at a real price, and the position store can LEAD the order
+    # ledger (paper_orders.json sometimes lacks the EXECUTED record — the DEN-T88
+    # case). Unify EXECUTED orders with filled positions, deduped by order_id, so a
+    # fill is never missed just because the order ledger lagged.
+    fill_events: dict[str, dict] = {}
+    for o in (x for x in real if x.get("status") == "EXECUTED"):
+        key = o.get("order_id") or f"ord:{o.get('ticker')}:{o.get('filled_at')}"
+        fill_events[key] = {
+            "ts": o.get("filled_at") or o.get("created_at"),
+            "side": o.get("side", ""), "qty": o.get("filled_count", o.get("count", 0)),
+            "ticker": o.get("ticker", ""), "price": o.get("filled_price", o.get("price", 0)),
+        }
+    # A filled position can be open/closed/pending_sell/freerolled/... — anything
+    # except the never-filled states. Denylist is more robust than an allowlist.
+    NOT_FILLED = ("resting", "cancelled", "canceled", "rejected")
+    for p in positions:
+        if not (_is_real(p) and p.get("status") not in NOT_FILLED
+                and (p.get("avg_price") or 0) > 1):   # >1c excludes 1c placeholders + synthetic
+            continue
+        key = p.get("order_id") or f"pos:{p.get('ticker')}"
+        fill_events.setdefault(key, {
+            "ts": p.get("entry_time"), "side": p.get("side", ""),
+            "qty": p.get("contracts", 0), "ticker": p.get("ticker", ""),
+            "price": p.get("avg_price", 0),
+        })
+    fills = sorted(fill_events.values(), key=lambda f: f.get("ts") or "", reverse=True)
 
     L = []
     L.append(f"{BOLD}{CYAN}═══ WEATHER EDGE · FILLS WATCH ═══{RESET}  {DIM}{now:%Y-%m-%d %H:%M:%S ET}{RESET}")
@@ -114,20 +141,20 @@ def snapshot() -> tuple[str, int]:
     L.append(f"  {BOLD}Real orders ({len(real)}){RESET}  " + "  ".join(parts))
 
     if fills:
-        L.append(f"  {BOLD}{GREEN}★ {len(fills)} FILL(S) — the system is executing on the real book.{RESET}")
+        L.append(f"  {BOLD}{GREEN}★ {len(fills)} FILL(S) — real positions on the live book "
+                 f"(tracked via positions; order ledger may show Executed:0 if it lagged).{RESET}")
     else:
         L.append(f"  {DIM}No fills yet. First fill will come from the next auto_trader window above.{RESET}")
     L.append("")
 
-    # Recent fills
+    # Recent fills (unified from EXECUTED orders + filled positions)
     L.append(f"{BOLD}FILLS{RESET} {DIM}(most recent first){RESET}")
     if fills:
-        for o in sorted(fills, key=lambda x: x.get("filled_at") or x.get("created_at") or "", reverse=True)[:8]:
-            px = o.get("filled_price", o.get("price", 0))
-            qty = o.get("filled_count", o.get("count", 0))
+        for f in fills[:8]:
+            px, qty = f.get("price", 0), f.get("qty", 0)
             cost = qty * px / 100
-            L.append(f"  {GREEN}●{RESET} {_fmt_ts(o.get('filled_at'))}  {o.get('action','').upper():4} "
-                     f"{o.get('side','').upper():3} {qty:>3}x {o.get('ticker',''):26} @ {px:>2}c  ${cost:.2f}")
+            L.append(f"  {GREEN}●{RESET} {_fmt_ts(f.get('ts'))}  "
+                     f"{f.get('side', '').upper():3} {qty:>3}x {f.get('ticker', ''):26} @ {px:>2}c  ${cost:.2f}")
     else:
         L.append(f"  {DIM}—{RESET}")
     L.append("")
@@ -148,13 +175,14 @@ def snapshot() -> tuple[str, int]:
         L.append(f"  {DIM}—{RESET}")
     L.append("")
 
-    # Live positions
-    live = [p for p in positions if p.get("status") in ("open", "resting") and _is_real(p)]
-    L.append(f"{BOLD}POSITIONS{RESET} {DIM}(open/resting){RESET}")
+    # Live positions (held or in-flight — everything except terminal cancelled/rejected)
+    live = [p for p in positions
+            if p.get("status") not in ("cancelled", "canceled", "rejected") and _is_real(p)]
+    L.append(f"{BOLD}POSITIONS{RESET} {DIM}(held / in-flight){RESET}")
     if live:
         for p in sorted(live, key=lambda x: x.get("entry_time") or "", reverse=True)[:10]:
             st = p.get("status", "?")
-            col = GREEN if st == "open" else YELLOW
+            col = GREEN if st == "open" else (RED if st == "pending_sell" else YELLOW)
             L.append(f"  {col}{st:8}{RESET} {p.get('side','').upper():3} {p.get('contracts',0):>3}x "
                      f"{p.get('ticker',''):26} @ {p.get('avg_price',0):>2}c  pnl ${p.get('pnl_realized',0):.2f}")
     else:

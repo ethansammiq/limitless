@@ -583,6 +583,7 @@ def build_state() -> dict:
         "health": {
             "alive": alive, "position_monitor_age_seconds": pm_age,
             "scan_age_seconds": scan_meta.get("age_seconds"),
+            "scan_stale": scan_stale,
             "mode": "PAPER" if PAPER_MODE else "LIVE",
             "errors": errors,
             "prices_enabled": PRICES_ENABLED,

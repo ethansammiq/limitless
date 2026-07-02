@@ -608,16 +608,116 @@ body::before {
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border-active); border-radius: 3px; }
 
+/* ─── LIVE BOT PANELS ─── */
+.status-banner{display:flex;justify-content:space-between;align-items:center;padding:10px 24px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(34,197,94,0.04),transparent);font-size:0.8rem;flex-wrap:wrap;gap:8px;}
+.sb-left{display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+.sb-right{display:flex;align-items:center;gap:16px;color:var(--text-dim);}
+.mode-pill{background:rgba(245,158,11,0.15);color:var(--amber);border:1px solid var(--amber-dim);padding:2px 10px;border-radius:3px;font-weight:700;letter-spacing:0.08em;font-size:0.7rem;}
+.live-ind{display:flex;align-items:center;gap:7px;font-weight:600;letter-spacing:0.06em;color:var(--text-bright);}
+.live-dot{width:8px;height:8px;border-radius:50%;}
+.live-dot.on{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite;}
+.live-dot.off{background:var(--red);box-shadow:0 0 8px var(--red);}
+.sb-meta{color:var(--text-dim);}
+#conn.ok{color:var(--green);} #conn.bad{color:var(--red);}
+
+.vitals-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--bg);border-bottom:1px solid var(--border);}
+.vital-card{background:var(--bg-card);padding:14px 18px;text-align:center;}
+.vital-num{font-size:1.5rem;font-weight:700;color:var(--text-bright);line-height:1;}
+.vital-num.success{color:var(--green);} .vital-num.danger{color:var(--red);} .vital-num.highlight{color:var(--amber);}
+.vital-label{font-size:0.68rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.1em;margin-top:6px;}
+
+/* KPI feed — four grouped cards */
+.kpi-feed{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:1px;background:var(--bg);border-bottom:1px solid var(--border);}
+.kpi-group{background:var(--bg-card);padding:13px 18px;}
+.kpi-gtitle{font-family:var(--sans);font-weight:700;font-size:0.68rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:11px;}
+.kpi-cells{display:grid;grid-template-columns:repeat(3,1fr);gap:11px 10px;}
+.kpi-cell{text-align:left;min-width:0;}
+.kpi-val{font-size:1.04rem;font-weight:700;color:var(--text-bright);line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.kpi-val.success{color:var(--green);} .kpi-val.danger{color:var(--red);} .kpi-val.highlight{color:var(--amber);} .kpi-val.warn{color:var(--amber);}
+.kpi-sub{font-size:0.7rem;font-weight:600;opacity:0.75;}
+.kpi-off{font-size:0.76rem;color:var(--text-dim);font-weight:500;}
+.kpi-lab{font-size:0.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em;margin-top:4px;}
+
+.live-section{padding:14px 24px;border-bottom:1px solid var(--border);}
+.ls-title{font-family:var(--sans);font-weight:700;font-size:0.82rem;color:var(--text-bright);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.ls-title .count{background:var(--bg-surface);padding:2px 8px;border-radius:3px;font-family:var(--mono);font-size:0.72rem;color:var(--text-dim);}
+.oc-pill{background:var(--bg-surface);border:1px solid var(--border);padding:1px 7px;border-radius:3px;font-size:0.65rem;color:var(--text-dim);font-weight:400;letter-spacing:0;}
+
+.live-table{width:100%;border-collapse:collapse;font-size:0.78rem;}
+.live-table th{padding:6px 10px;text-align:right;font-weight:500;color:var(--text-dim);text-transform:uppercase;font-size:0.62rem;letter-spacing:0.07em;border-bottom:1px solid var(--border);}
+.live-table th:first-child,.live-table th:last-child{text-align:left;}
+.live-table td{padding:6px 10px;text-align:right;border-bottom:1px solid rgba(30,35,48,0.5);font-variant-numeric:tabular-nums;}
+.live-table td:first-child,.live-table td:last-child{text-align:left;}
+.live-table tr:hover{background:var(--bg-card-hover);}
+.mono-cell{color:var(--text);font-size:0.72rem;}
+.note-cell{color:var(--text-dim);font-size:0.68rem;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.dim{color:var(--text-dim);}
+.live-table td.pos{color:var(--green);} .live-table td.neg{color:var(--red);}
+.side-pill{font-weight:700;font-size:0.62rem;padding:1px 6px;border-radius:2px;}
+.side-pill.yes{background:rgba(34,197,94,0.12);color:var(--green);border:1px solid rgba(34,197,94,0.3);}
+.side-pill.no{background:rgba(239,68,68,0.1);color:var(--red);border:1px solid rgba(239,68,68,0.2);}
+.flag{font-size:0.6rem;padding:1px 5px;border-radius:2px;background:rgba(167,139,250,0.12);color:var(--purple);border:1px solid rgba(167,139,250,0.3);}
+.ostatus{font-size:0.62rem;padding:1px 6px;border-radius:2px;text-transform:uppercase;letter-spacing:0.04em;}
+.ostatus.resting{background:rgba(34,211,238,0.1);color:var(--cyan);border:1px solid rgba(34,211,238,0.25);}
+.ostatus.canceled,.ostatus.cancelled{background:rgba(107,114,128,0.1);color:var(--text-dim);border:1px solid var(--border);}
+.ostatus.filled{background:rgba(34,197,94,0.12);color:var(--green);border:1px solid rgba(34,197,94,0.3);}
+
+.health-strip{display:flex;gap:8px;flex-wrap:wrap;}
+.health-pill{display:flex;flex-direction:column;gap:2px;padding:6px 12px;border-radius:4px;background:var(--bg-surface);border:1px solid var(--border);border-left-width:3px;}
+.health-pill.ok{border-left-color:var(--green);}
+.health-pill.warm{border-left-color:var(--cyan);}
+.health-pill.hot{border-left-color:var(--red);}
+.health-pill.neutral{border-left-color:var(--border-active);}
+.hp-name{font-size:0.68rem;color:var(--text);font-weight:500;}
+.hp-age{font-size:0.62rem;color:var(--text-dim);}
+
+.scan-notice{padding:40px 24px;text-align:center;}
+.sn-title{font-family:var(--sans);font-weight:700;color:var(--text-bright);font-size:0.95rem;letter-spacing:0.05em;text-transform:uppercase;}
+.sn-sub{color:var(--text-dim);font-size:0.8rem;margin-top:8px;max-width:640px;margin-left:auto;margin-right:auto;line-height:1.5;}
+.sn-sub code{color:var(--amber);background:var(--bg-surface);padding:1px 6px;border-radius:3px;}
+
+/* ─── LIVE PRICE CHART ─── */
+.price-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.price-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;}
+.price-tab{padding:3px 13px;border-radius:3px;font-family:var(--mono);font-size:0.72rem;font-weight:600;letter-spacing:0.04em;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-dim);cursor:pointer;transition:all 0.15s;}
+.price-tab:hover{color:var(--text);border-color:var(--border-active);}
+.price-tab.active{background:rgba(245,158,11,0.12);border-color:var(--amber-dim);color:var(--amber);}
+.price-chart{width:100%;height:auto;display:block;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;}
+.price-grid-line{stroke:var(--border);stroke-width:1;}
+.price-axis-label{fill:var(--text-dim);font-family:var(--mono);font-size:11px;}
+.price-line{fill:none;stroke-width:2;vector-effect:non-scaling-stroke;}
+.price-dot{stroke:var(--bg-card);stroke-width:1.5;}
+.price-legend{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+.pl-item{display:flex;align-items:center;gap:7px;padding:4px 9px;border-radius:4px;background:var(--bg-surface);border:1px solid var(--border);font-size:0.7rem;}
+.pl-swatch{width:10px;height:10px;border-radius:2px;flex-shrink:0;}
+.pl-label{color:var(--text);font-weight:500;}
+.pl-mid{color:var(--text-bright);font-weight:700;font-variant-numeric:tabular-nums;}
+.pl-sub{color:var(--text-dim);}
+.price-empty{padding:30px;text-align:center;color:var(--text-dim);font-size:0.82rem;}
+/* temperature chart */
+.temp-line{fill:none;stroke:var(--amber);stroke-width:2.2;vector-effect:non-scaling-stroke;}
+.temp-dot{fill:var(--amber);stroke:var(--bg-card);stroke-width:1.5;}
+.temp-cur-lab{fill:var(--amber);font-family:var(--mono);font-size:12px;font-weight:700;}
+.temp-brk{stroke:var(--text-dim);stroke-width:1;stroke-dasharray:3 4;opacity:0.4;vector-effect:non-scaling-stroke;}
+.temp-brk.held{stroke:var(--cyan);stroke-dasharray:none;opacity:0.85;stroke-width:1.4;}
+.temp-brk-lab{fill:var(--text-dim);font-family:var(--mono);font-size:10px;opacity:0.7;}
+.temp-brk-lab.held{fill:var(--cyan);opacity:1;font-weight:600;}
+.temp-peak{stroke:var(--red);stroke-width:1.2;stroke-dasharray:6 3;opacity:0.7;vector-effect:non-scaling-stroke;}
+.temp-peak-lab{fill:var(--red);font-family:var(--mono);font-size:10.5px;font-weight:600;}
+
 </style>
 </head>
 <body>
 
-<div id="app">
+<div id="live">
   <div class="loading">
     <div class="loading-spinner"></div>
-    <div class="loading-text">Loading scan data...</div>
+    <div class="loading-text">Connecting to bot…</div>
   </div>
 </div>
+<div id="prices"></div>
+<div id="temps"></div>
+<div id="app"></div>
 
 <script>
 const MODEL_LABELS = {
@@ -947,19 +1047,463 @@ function renderDashboard(data) {
   document.getElementById('app').innerHTML = html;
 }
 
-// Load data
-fetch('scan_data.json')
-  .then(r => r.json())
-  .then(data => {
-    setTimeout(() => renderDashboard(data), 300);
-  })
-  .catch(err => {
-    document.getElementById('app').innerHTML = `
-      <div class="loading">
-        <div style="color:var(--red);font-size:1.1rem">Failed to load scan data</div>
-        <div style="color:var(--text-dim)">${err.message}</div>
+// ─── LIVE POLLING ───────────────────────────────────────────────────────────
+const REFRESH_MS = 15000;
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function fmtMoney(n){ const v = Number(n||0); return (v<0?'-$':'$') + Math.abs(v).toFixed(2); }
+function fmtAge(s){
+  if (s==null) return '—';
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm';
+  if (s < 86400) return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+  return Math.floor(s/86400) + 'd';
+}
+function ageClass(s, warn, bad){ if (s==null) return 'hot'; if (s<warn) return 'ok'; if (s<bad) return 'warm'; return 'hot'; }
+function vital(label, val, cls){
+  return `<div class="vital-card"><div class="vital-num ${cls}">${val}</div><div class="vital-label">${label}</div></div>`;
+}
+
+function signCls(n){ return n==null ? '' : (n>0?'success':(n<0?'danger':'')); }
+function fmtPct(n, dp){ if(n==null) return ''; dp = (dp==null)?1:dp; return (n>=0?'+':'')+n.toFixed(dp)+'%'; }
+function kpiCell(label, val, cls){
+  return `<div class="kpi-cell"><div class="kpi-val ${cls||''}">${val}</div><div class="kpi-lab">${label}</div></div>`;
+}
+function kpiGroup(title, cells){
+  return `<div class="kpi-group"><div class="kpi-gtitle">${title}</div><div class="kpi-cells">${cells.join('')}</div></div>`;
+}
+function shortTicker(t){ if(!t) return '—'; const seg=String(t).split('-'); return esc(seg[seg.length-1]||t); }
+
+function renderKpis(state, fb){
+  const k = state.kpis;
+  if (!k){  // older server without /api/state kpis — fall back to basic vitals
+    return `<div class="vitals-grid">
+      ${vital('Paper Balance', fmtMoney(fb.bal), (fb.bal!=null&&fb.init!=null)?(fb.bal>=fb.init?'success':'danger'):'')}
+      ${vital('Realized P&amp;L', fmtMoney(fb.pnl), signCls(fb.pnl))}
+      ${vital('Open Positions', fb.sum.open_count, fb.sum.open_count>0?'highlight':'')}
+      ${vital('Open Contracts', fb.sum.open_contracts, '')}
+      ${vital('Open Cost', fmtMoney(fb.sum.open_cost_basis), '')}
+      ${vital('Orders Logged', state.orders.total, '')}
+    </div>`;
+  }
+  const ep=k.equity_pnl, ex=k.exposure, pf=k.performance, hl=k.health;
+  const unreal = ep.unrealized_pnl;
+  const groups = [];
+
+  groups.push(kpiGroup('Equity &amp; P&amp;L', [
+    kpiCell('Equity', fmtMoney(ep.equity), signCls(ep.total_pnl)),
+    kpiCell('Total P&amp;L', (ep.total_pnl!=null?fmtMoney(ep.total_pnl):'—') + (ep.total_pnl_pct!=null?` <span class="kpi-sub">${fmtPct(ep.total_pnl_pct)}</span>`:''), signCls(ep.total_pnl)),
+    kpiCell('Today', ep.daily_pnl!=null?fmtMoney(ep.daily_pnl):'—', signCls(ep.daily_pnl)),
+    kpiCell('Unrealized', unreal!=null?fmtMoney(unreal):'<span class="kpi-off">marks off</span>', signCls(unreal)),
+    kpiCell('Realized', fmtMoney(ep.realized_pnl), signCls(ep.realized_pnl)),
+    kpiCell('Cash', fmtMoney(ep.cash), ''),
+  ]));
+
+  groups.push(kpiGroup('Exposure &amp; Positions', [
+    kpiCell('Open Cost', fmtMoney(ex.open_cost_basis), ''),
+    kpiCell('Deployed', ex.deployed_pct!=null?ex.deployed_pct.toFixed(0)+'%':'—', (ex.deployed_pct!=null&&ex.deployed_pct>=50)?'danger':((ex.deployed_pct!=null&&ex.deployed_pct>=25)?'warn':'')),
+    kpiCell('Positions', ex.open_count, ex.open_count>0?'highlight':''),
+    kpiCell('Contracts', ex.open_contracts, ''),
+  ]));
+
+  const bestTxt = pf.best?`${shortTicker(pf.best.ticker)} <span class="kpi-sub">${fmtPct(pf.best.roi_pct,0)}</span>`:'—';
+  const worstTxt = pf.worst?`${shortTicker(pf.worst.ticker)} <span class="kpi-sub">${fmtPct(pf.worst.roi_pct,0)}</span>`:'—';
+  groups.push(kpiGroup('Performance', [
+    kpiCell('Win Rate', pf.win_rate!=null?pf.win_rate.toFixed(0)+'%':'—', pf.win_rate==null?'':(pf.win_rate>=50?'success':'danger')),
+    kpiCell('Avg ROI', pf.avg_roi_pct!=null?fmtPct(pf.avg_roi_pct,0):'—', signCls(pf.avg_roi_pct)),
+    kpiCell('Settled', pf.settled_count, ''),
+    kpiCell('Best Open', bestTxt, pf.best?'success':''),
+    kpiCell('Worst Open', worstTxt, (pf.worst&&pf.worst.roi_pct<0)?'danger':''),
+  ]));
+
+  const mon = ageClass(hl.position_monitor_age_seconds, 600, 1200);
+  const monCls = mon==='ok'?'success':(mon==='warm'?'warn':'danger');
+  const pricesTxt = hl.prices_enabled ? (hl.prices_ok===false?'error':(hl.prices_ok?'live':'…')) : 'off';
+  const pricesCls = hl.prices_enabled ? (hl.prices_ok?'success':(hl.prices_ok===false?'danger':'')) : '';
+  const nErr = (hl.errors&&hl.errors.length)||0;
+  groups.push(kpiGroup('Bot Health', [
+    kpiCell('Status', hl.alive?'LIVE':'STALLED', hl.alive?'success':'danger'),
+    kpiCell('Monitor', fmtAge(hl.position_monitor_age_seconds), monCls),
+    kpiCell('Last Scan', hl.scan_stale ? 'stale' : fmtAge(hl.scan_age_seconds), hl.scan_stale ? 'warm' : ''),
+    kpiCell('Prices', pricesTxt, pricesCls),
+    kpiCell('Errors', nErr, nErr?'danger':'success'),
+  ]));
+
+  return `<div class="kpi-feed">${groups.join('')}</div>`;
+}
+
+function renderLive(state){
+  const b = state.balance || {};
+  const sum = state.positions.summary;
+  const live = state.liveness;
+  const pnl = sum.total_realized_pnl;
+  const bal = b.balance, init = b.initial_balance;
+  const pnlPct = (init && init>0) ? (pnl/init*100) : null;
+
+  let h = '';
+
+  // Status banner
+  h += `<div class="status-banner">
+    <div class="sb-left">
+      <span class="mode-pill">${esc(state.mode)}</span>
+      <span class="live-ind"><span class="live-dot ${live.alive?'on':'off'}"></span>${live.alive?'LIVE':'STALLED'}</span>
+      <span class="sb-meta">position_monitor ${fmtAge(live.position_monitor_age_seconds)} ago</span>
+    </div>
+    <div class="sb-right">
+      <span class="sb-meta" id="conn">●</span>
+      <span class="sb-meta">updated ${new Date(state.server_time).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'})}</span>
+    </div>
+  </div>`;
+
+  // KPI feed (live) — 4 groups; gracefully falls back to basic vitals
+  h += renderKpis(state, {bal, init, pnl, pnlPct, sum});
+
+  // Open positions
+  const open = state.positions.open || [];
+  if (open.length){
+    h += `<div class="live-section"><div class="ls-title">Open Positions <span class="count">${open.length}</span></div>
+      <table class="live-table"><thead><tr>
+        <th>Ticker</th><th>Side</th><th>Qty</th><th>Avg ¢</th><th>Realized</th><th>Peak ¢</th><th>Flags</th><th>Last note</th>
+      </tr></thead><tbody>`;
+    for (const p of open){
+      const note = (p.notes && p.notes.length) ? p.notes[p.notes.length-1] : '';
+      const pr = Number(p.pnl_realized||0);
+      h += `<tr>
+        <td class="mono-cell">${esc(p.ticker)}</td>
+        <td><span class="side-pill ${esc(p.side)}">${esc(String(p.side||'').toUpperCase())}</span></td>
+        <td>${esc(p.contracts)}</td>
+        <td>${esc(p.avg_price)}</td>
+        <td class="${pr>0?'pos':(pr<0?'neg':'')}">${fmtMoney(pr)}</td>
+        <td>${esc(p.peak_price)}</td>
+        <td>${p.freerolled?'<span class="flag">FREEROLL</span>':''}</td>
+        <td class="note-cell" title="${esc(note)}">${esc(note)}</td>
+      </tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+
+  // Recent orders
+  const ords = state.orders.recent || [];
+  const counts = state.orders.counts || {};
+  const now = Date.now();
+  h += `<div class="live-section"><div class="ls-title">Recent Orders <span class="count">${state.orders.total}</span>`;
+  h += Object.entries(counts).map(([k,v]) => ` <span class="oc-pill">${esc(k)}: ${v}</span>`).join('');
+  h += `</div><table class="live-table"><thead><tr>
+      <th>Ticker</th><th>Act</th><th>Side</th><th>Qty</th><th>¢</th><th>Status</th><th>Age</th>
+    </tr></thead><tbody>`;
+  for (const o of ords){
+    const age = o.created_at ? (now - new Date(o.created_at).getTime())/1000 : null;
+    h += `<tr>
+      <td class="mono-cell">${esc(o.ticker)}</td>
+      <td class="dim">${esc(o.action)}</td>
+      <td><span class="side-pill ${esc(o.side)}">${esc(String(o.side||'').toUpperCase())}</span></td>
+      <td>${esc(o.count)}</td>
+      <td>${esc(o.price)}</td>
+      <td><span class="ostatus ${esc(String(o.status||'').toLowerCase())}">${esc(o.status)}</span></td>
+      <td class="dim">${fmtAge(age)}</td>
+    </tr>`;
+  }
+  h += `</tbody></table></div>`;
+
+  // Service heartbeats
+  h += `<div class="live-section"><div class="ls-title">Service Heartbeats</div><div class="health-strip">`;
+  for (const [svc, hb] of Object.entries(state.heartbeats||{})){
+    if (svc.startsWith('_')) continue;
+    const a = hb.age_seconds;
+    const cls = (svc === 'position_monitor') ? ageClass(a, 600, 1200) : 'neutral';
+    h += `<div class="health-pill ${cls}"><span class="hp-name">${esc(svc)}</span><span class="hp-age">${fmtAge(a)} ago</span></div>`;
+  }
+  h += `</div></div>`;
+
+  // Peak monitor
+  const pk = Object.values(state.peaks||{});
+  if (pk.length){
+    h += `<div class="live-section"><div class="ls-title">Peak Monitor <span class="count">${pk[0].date||''}</span></div><div class="health-strip">`;
+    for (const c of pk){
+      h += `<div class="health-pill ${c.peak_confirmed?'ok':'warm'}">
+        <span class="hp-name">${esc(c.city_key)} ${c.peak_confirmed?'✓':'…'}</span>
+        <span class="hp-age">${esc(c.running_max)}° · ${esc(c.peak_bracket)}</span>
       </div>`;
+    }
+    h += `</div></div>`;
+  }
+
+  document.getElementById('live').innerHTML = h;
+}
+
+// ─── LIVE PRICE CHART ───────────────────────────────────────────────────────
+const PRICE_COLORS = ['#22d3ee','#f59e0b','#22c55e','#a78bfa','#60a5fa','#ef4444','#ec4899','#14b8a6'];
+let priceCity = null;
+let lastPrices = null;
+let lastTemps = null;
+
+function fmtClock(t){ return new Date(t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}); }
+function fmtVol(v){ v = Number(v||0); return v>=1000 ? (v/1000).toFixed(1)+'k' : String(Math.round(v)); }
+function selectPriceCity(city){ priceCity = city; if (lastPrices) renderPrices(lastPrices); if (lastTemps) renderTemps(lastTemps); }
+window.selectPriceCity = selectPriceCity;
+
+function renderPriceChart(contracts){
+  const W=1000, H=340, mL=46, mR=14, mT=14, mB=28;
+  const plotW=W-mL-mR, plotH=H-mT-mB;
+
+  let tmin=Infinity, tmax=-Infinity, ymin=Infinity, ymax=-Infinity;
+  const series = contracts.map((c,i) => {
+    const pts = (c.points||[]).map(p => ({t:new Date(p.t).getTime(), v:p.mid}))
+                              .filter(p => isFinite(p.t) && p.v!=null);
+    for (const p of pts){ if(p.t<tmin)tmin=p.t; if(p.t>tmax)tmax=p.t; if(p.v<ymin)ymin=p.v; if(p.v>ymax)ymax=p.v; }
+    return { c, pts, color: PRICE_COLORS[i % PRICE_COLORS.length] };
   });
+  if (!isFinite(tmin)) return `<div class="price-empty">No price points yet — first sample lands within one poll interval.</div>`;
+  if (tmin===tmax){ tmin-=60000; tmax+=60000; }
+  if (!isFinite(ymin)){ ymin=0; ymax=100; }
+  const pad = Math.max(1,(ymax-ymin)*0.12);
+  ymin = Math.max(0, Math.floor(ymin-pad));
+  ymax = Math.min(100, Math.ceil(ymax+pad));
+  if (ymax-ymin < 4) ymax = Math.min(100, ymin+4);
+
+  const X = t => mL + ((t-tmin)/(tmax-tmin))*plotW;
+  const Y = v => mT + (1-((v-ymin)/(ymax-ymin)))*plotH;
+
+  let grid='';
+  const yt=4;
+  for (let i=0;i<=yt;i++){
+    const v=ymin+(ymax-ymin)*i/yt, y=Y(v);
+    grid += `<line class="price-grid-line" x1="${mL}" y1="${y.toFixed(1)}" x2="${W-mR}" y2="${y.toFixed(1)}"/>`;
+    grid += `<text class="price-axis-label" x="${mL-6}" y="${(y+3.5).toFixed(1)}" text-anchor="end">${Math.round(v)}¢</text>`;
+  }
+  const xt=5;
+  for (let i=0;i<=xt;i++){
+    const t=tmin+(tmax-tmin)*i/xt, x=X(t);
+    grid += `<text class="price-axis-label" x="${x.toFixed(1)}" y="${H-8}" text-anchor="middle">${fmtClock(t)}</text>`;
+  }
+
+  let lines='';
+  for (const s of series){
+    if (!s.pts.length) continue;
+    const last=s.pts[s.pts.length-1];
+    if (s.pts.length>1){
+      const d=s.pts.map(p => `${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ');
+      lines += `<polyline class="price-line" points="${d}" stroke="${s.color}"/>`;
+    }
+    lines += `<circle class="price-dot" cx="${X(last.t).toFixed(1)}" cy="${Y(last.v).toFixed(1)}" r="3" fill="${s.color}"/>`;
+  }
+
+  const svg = `<svg class="price-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Contract prices over time">${grid}${lines}</svg>`;
+
+  let legend='<div class="price-legend">';
+  for (const s of series){
+    const c=s.c;
+    const ba = (c.bid!=null && c.ask!=null) ? `${c.bid}/${c.ask}¢` : '';
+    legend += `<div class="pl-item">
+      <span class="pl-swatch" style="background:${s.color}"></span>
+      <span class="pl-label">${esc(c.label||c.ticker)}</span>
+      <span class="pl-mid">${c.mid!=null?Math.round(c.mid)+'¢':'—'}</span>
+      <span class="pl-sub">${ba}</span>
+      <span class="pl-sub">vol ${fmtVol(c.volume)}</span>
+    </div>`;
+  }
+  legend += '</div>';
+  return svg + legend;
+}
+
+function renderPrices(data){
+  lastPrices = data;
+  const el = document.getElementById('prices');
+  if (!el) return;
+  const all = (data && data.contracts) || [];
+
+  if (data && data.enabled === false){
+    el.innerHTML = `<div class="live-section"><div class="ls-title">Live Contract Prices</div>
+      <div class="price-empty">Live pricing is off — set <code>DASHBOARD_PRICES=1</code> and restart the server.</div></div>`;
+    return;
+  }
+
+  const ageTxt = data.updated ? fmtAge((Date.now()-new Date(data.updated).getTime())/1000)+' ago' : 'never';
+  const status = (data.last_poll_ok===false)
+    ? `<span style="color:var(--red)">poll error</span> · every ${data.poll_seconds}s`
+    : `updated ${ageTxt} · every ${data.poll_seconds}s`;
+
+  let h = `<div class="live-section">
+    <div class="price-head">
+      <div class="ls-title" style="margin:0">Live Contract Prices <span class="count">${all.length}</span></div>
+      <div class="sb-meta">${status}</div>
+    </div>`;
+
+  if (!all.length){
+    h += `<div class="price-empty">Capturing first prices from Kalshi… (polls every ${data.poll_seconds||60}s)</div></div>`;
+    el.innerHTML = h; return;
+  }
+
+  const cities = [...new Set(all.map(c => c.city))];
+  if (!priceCity || !cities.includes(priceCity)){
+    const vol = {};
+    all.forEach(c => { vol[c.city] = (vol[c.city]||0) + (c.volume||0); });
+    priceCity = cities.slice().sort((a,b) => (vol[b]||0)-(vol[a]||0))[0] || null;
+  }
+
+  h += `<div class="price-tabs">`;
+  for (const c of cities){
+    // data-city + delegated listener (below) — never interpolate a value into
+    // an inline onclick/attribute, even from a trusted source.
+    h += `<button class="price-tab ${c===priceCity?'active':''}" data-city="${esc(c)}">${esc(c)}</button>`;
+  }
+  h += `</div>`;
+
+  let vis = all.filter(c => c.city===priceCity && c.points && c.points.length);
+  vis.sort((a,b) => (b.volume||0)-(a.volume||0));
+  vis = vis.slice(0, 8);
+
+  h += renderPriceChart(vis);
+  h += `</div>`;
+  el.innerHTML = h;
+  if (!el._cityHandlerBound){
+    el.addEventListener('click', (e) => {
+      const btn = e.target.closest('.price-tab[data-city]');
+      if (btn) selectPriceCity(btn.dataset.city);
+    });
+    el._cityHandlerBound = true;
+  }
+}
+
+// ─── LIVE TEMPERATURE CHART (paired with the price chart, same city tab) ─────
+function renderTempChart(city, rec){
+  const W=1000, H=300, mL=42, mR=120, mT=14, mB=28;
+  const plotW=W-mL-mR, plotH=H-mT-mB;
+  const series = (rec.series||[]).map(p => ({t:new Date(p.t).getTime(), v:Number(p.temp)}))
+                                 .filter(p => isFinite(p.t) && isFinite(p.v));
+  if (series.length < 1) return `<div class="price-empty">No observations yet for ${esc(city)} — IEM/NWS poll lands within ${rec._poll||5} min.</div>`;
+
+  const brackets = (rec.brackets||[]);
+  let tmin=Infinity,tmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+  for (const p of series){ if(p.t<tmin)tmin=p.t; if(p.t>tmax)tmax=p.t; if(p.v<ymin)ymin=p.v; if(p.v>ymax)ymax=p.v; }
+  // include bracket lines + running max in the y-range so they're visible
+  // Scale the axis to the observed curve, the peak, and only OUR held brackets —
+  // watched bracket lines clip to the window (below) instead of stretching it.
+  const extra = [];
+  for (const b of brackets){ if(b.held){ if(b.lo!=null)extra.push(b.lo); if(b.hi!=null)extra.push(b.hi); } }
+  if (rec.running_max!=null && rec.running_max>-100) extra.push(rec.running_max);
+  for (const v of extra){ if(v<ymin)ymin=v; if(v>ymax)ymax=v; }
+  if (tmin===tmax){ tmin-=1800000; tmax+=1800000; }
+  if (!isFinite(ymin)){ ymin=30; ymax=90; }
+  const pad=Math.max(1,(ymax-ymin)*0.12); ymin=Math.floor(ymin-pad); ymax=Math.ceil(ymax+pad);
+  if (ymax-ymin<4) ymax=ymin+4;
+
+  const X=t=>mL+((t-tmin)/(tmax-tmin||1))*plotW;
+  const Y=v=>mT+(1-((v-ymin)/(ymax-ymin)))*plotH;
+
+  let grid='';
+  for (let i=0;i<=4;i++){ const v=ymin+(ymax-ymin)*i/4, y=Y(v);
+    grid+=`<line class="price-grid-line" x1="${mL}" y1="${y.toFixed(1)}" x2="${W-mR}" y2="${y.toFixed(1)}"/>`;
+    grid+=`<text class="price-axis-label" x="${mL-6}" y="${(y+3.5).toFixed(1)}" text-anchor="end">${Math.round(v)}°</text>`;
+  }
+  for (let i=0;i<=5;i++){ const t=tmin+(tmax-tmin)*i/5, x=X(t);
+    grid+=`<text class="price-axis-label" x="${x.toFixed(1)}" y="${H-8}" text-anchor="middle">${fmtClock(t)}</text>`;
+  }
+
+  // bracket threshold lines (held = bright/solid, watched = faint/dashed)
+  let blines='';
+  for (const b of brackets){
+    for (const edge of [b.lo,b.hi]){
+      if (edge==null) continue;
+      const y=Y(edge); if (y<mT-1||y>mT+plotH+1) continue;
+      const cls = b.held ? 'temp-brk held' : 'temp-brk';
+      blines+=`<line class="${cls}" x1="${mL}" y1="${y.toFixed(1)}" x2="${W-mR}" y2="${y.toFixed(1)}"/>`;
+      blines+=`<text class="temp-brk-lab ${b.held?'held':''}" x="${W-mR+5}" y="${(y+3.5).toFixed(1)}">${esc(b.label)}${b.held?' ◆':''}</text>`;
+    }
+  }
+
+  // running daily max line + marker
+  let peak='';
+  if (rec.running_max!=null && rec.running_max>-100){
+    const y=Y(rec.running_max);
+    peak+=`<line class="temp-peak" x1="${mL}" y1="${y.toFixed(1)}" x2="${W-mR}" y2="${y.toFixed(1)}"/>`;
+    peak+=`<text class="temp-peak-lab" x="${mL+4}" y="${(y-4).toFixed(1)}">peak ${rec.running_max}°${rec.peak_confirmed?' ✓':' …'}</text>`;
+  }
+
+  const d=series.map(p=>`${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ');
+  const line = series.length>1 ? `<polyline class="temp-line" points="${d}"/>` : '';
+  const last=series[series.length-1];
+  const dot=`<circle class="temp-dot" cx="${X(last.t).toFixed(1)}" cy="${Y(last.v).toFixed(1)}" r="3.5"/>`;
+  const lastLab=`<text class="temp-cur-lab" x="${(X(last.t)+7).toFixed(1)}" y="${(Y(last.v)+3.5).toFixed(1)}">${last.v.toFixed(1)}°</text>`;
+
+  return `<svg class="price-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Observed temperature over time for ${esc(city)}">${grid}${blines}${peak}${line}${dot}${lastLab}</svg>`;
+}
+
+function renderTemps(data){
+  lastTemps = data;
+  const el = document.getElementById('temps');
+  if (!el) return;
+  if (data && data.enabled === false){ el.innerHTML=''; return; }
+  const cities = (data && data.cities) || {};
+  const keys = Object.keys(cities);
+  // follow the price chart's selected city; fall back to first available
+  let city = priceCity;
+  if (!city || !cities[city]) city = keys[0] || null;
+  if (!city){
+    el.innerHTML = `<div class="live-section"><div class="ls-title">Live Temperature</div>
+      <div class="price-empty">Capturing observations… (IEM ASOS / NWS, every ${Math.round((data.poll_seconds||300)/60)} min)</div></div>`;
+    return;
+  }
+  const rec = cities[city];
+  rec._poll = Math.round((data.poll_seconds||300)/60);
+  const ageTxt = data.updated ? fmtAge((Date.now()-new Date(data.updated).getTime())/1000)+' ago' : 'never';
+  const status = (data.last_poll_ok===false) ? `<span style="color:var(--red)">poll error</span>` : `updated ${ageTxt}`;
+  const cur = rec.current!=null ? `${rec.current.toFixed(1)}°` : '—';
+  const hi = rec.high!=null ? `${rec.high.toFixed(1)}°` : '—';
+  el.innerHTML = `<div class="live-section">
+    <div class="price-head">
+      <div class="ls-title" style="margin:0">Live Temperature — ${esc(city)} <span class="count">now ${cur} · today's high ${hi}</span></div>
+      <div class="sb-meta">${status} · every ${Math.round((data.poll_seconds||300)/60)}min</div>
+    </div>
+    ${renderTempChart(city, rec)}
+  </div>`;
+}
+
+function setConn(ok){
+  const el = document.getElementById('conn');
+  if (el){ el.className = ok ? 'sb-meta ok' : 'sb-meta bad'; el.textContent = ok ? '● connected' : '● disconnected'; }
+}
+
+async function tick(){
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const state = await r.json();
+    renderLive(state);
+    setConn(true);
+    if (state.scan){
+      renderDashboard(state.scan);
+    } else {
+      const m = state.scan_meta || {};
+      document.getElementById('app').innerHTML = `<div class="scan-notice">
+        <div class="sn-title">Weather scan idle</div>
+        <div class="sn-sub">Last scan ${m.exists ? fmtAge(m.age_seconds)+' ago' : 'never generated'}. The city cards light up once <code>scan_data.json</code> is fresh — add a cron line running <code>scan_json.py</code> on the same schedule as <code>auto_scan</code>.</div>
+      </div>`;
+    }
+    // Live contract prices (independent — never let it break the bot panel)
+    try {
+      const pr = await fetch('/api/prices', { cache: 'no-store' });
+      if (pr.ok) renderPrices(await pr.json());
+    } catch (_) { /* keep last chart */ }
+    // Live temperature (paired with the price chart)
+    try {
+      const tr = await fetch('/api/temps', { cache: 'no-store' });
+      if (tr.ok) renderTemps(await tr.json());
+    } catch (_) { /* keep last chart */ }
+  } catch (err) {
+    setConn(false);
+    if (!document.querySelector('#live .status-banner')){
+      document.getElementById('live').innerHTML = `<div class="loading">
+        <div style="color:var(--red);font-size:1.1rem">Can't reach dashboard server</div>
+        <div style="color:var(--text-dim)">${esc(err.message)} — start it with <code>.venv/bin/python3 dashboard_server.py</code></div>
+      </div>`;
+    }
+  }
+}
+
+tick();
+setInterval(tick, REFRESH_MS);
 </script>
 </body>
 </html>
