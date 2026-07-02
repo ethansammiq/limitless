@@ -2,7 +2,7 @@
 """
 MODEL BIAS — Per-model, per-city rolling error tracker.
 
-Tracks systematic forecast biases across 5 ensemble models and 5 cities
+Tracks systematic forecast biases across all ensemble models and 5 cities
 to enable:
   1. Bias detection (e.g., "ICON runs +2.0F hot for Chicago in winter")
   2. Data-driven weight adjustments (inverse-MAE weighting)
@@ -33,16 +33,10 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# Canonical model names and their current default weights
-DEFAULT_MODEL_WEIGHTS: Dict[str, float] = {
-    "ecmwf_aifs025": 1.30,
-    "ecmwf_ifs025": 1.15,
-    "gfs_seamless": 1.00,
-    "icon_seamless": 0.95,
-    "gem_global": 0.85,
-}
+# Canonical model names and default weights (single source of truth in config.py)
+from config import DEFAULT_MODEL_WEIGHTS
 
-TOTAL_DEFAULT_WEIGHT = sum(DEFAULT_MODEL_WEIGHTS.values())  # 5.25
+TOTAL_DEFAULT_WEIGHT = sum(DEFAULT_MODEL_WEIGHTS.values())
 
 # Minimum records needed before we trust bias statistics
 MIN_RECORDS_FOR_BIAS = 5
@@ -404,7 +398,7 @@ def _inverse_mae_weights(model_mae: Dict[str, float]) -> Dict[str, float]:
     """
     Compute weights inversely proportional to MAE.
 
-    Normalized so the total equals TOTAL_DEFAULT_WEIGHT (5.25).
+    Normalized so the total equals TOTAL_DEFAULT_WEIGHT.
     Models not in model_mae get their default weight.
     """
     if not model_mae:

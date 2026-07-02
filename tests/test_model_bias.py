@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for model_bias.py — per-model bias tracking, rolling bias, weight suggestions."""
 
-import pytest
 
 
 # ─── Record builder ──────────────────────────────────────────────────────────
@@ -38,6 +37,8 @@ def _make_batch(n=10, city="NYC", base_actual=42.0, **per_model_offsets):
         "gfs_seamless": 0.2,
         "icon_seamless": 2.0,
         "gem_global": -1.0,
+        "bom_access_global_ensemble": -1.5,
+        "ukmo_global_ensemble_20km": 0.8,
     }
     offsets.update(per_model_offsets)
 
@@ -85,7 +86,7 @@ class TestComputeModelBiases:
         assert len(all_entries) >= 1  # at least one model has ALL
 
     def test_insufficient_records_excluded(self):
-        from model_bias import compute_model_biases, MIN_RECORDS_FOR_BIAS
+        from model_bias import compute_model_biases
 
         # Only 3 records — below the threshold of 5
         records = _make_batch(n=3, city="NYC")
@@ -224,6 +225,23 @@ class TestGetBiasCorrection:
 class TestSuggestWeights:
     """Test inverse-MAE weight suggestions."""
 
+    def test_canonical_weights_from_config(self):
+        """DEFAULT_MODEL_WEIGHTS must be the canonical config.py table (all 7 models)."""
+        import config
+        from model_bias import DEFAULT_MODEL_WEIGHTS, TOTAL_DEFAULT_WEIGHT
+
+        assert DEFAULT_MODEL_WEIGHTS is config.DEFAULT_MODEL_WEIGHTS
+        assert DEFAULT_MODEL_WEIGHTS == {
+            "ecmwf_aifs025": 1.30,
+            "ecmwf_ifs025": 1.15,
+            "gfs_seamless": 1.00,
+            "icon_seamless": 0.95,
+            "gem_global": 0.85,
+            "bom_access_global_ensemble": 0.80,
+            "ukmo_global_ensemble_20km": 0.85,
+        }
+        assert abs(TOTAL_DEFAULT_WEIGHT - 6.90) < 1e-9
+
     def test_weights_sum_to_target(self):
         from model_bias import suggest_weights, TOTAL_DEFAULT_WEIGHT
 
@@ -233,6 +251,30 @@ class TestSuggestWeights:
         agg = result["aggregate"]
         total = sum(agg.values())
         assert abs(total - TOTAL_DEFAULT_WEIGHT) < 0.05
+
+    def test_missing_models_get_default_weights_not_one(self):
+        """Models without backtest data must keep canonical defaults, not 1.0."""
+        from model_bias import suggest_weights
+
+        # Records cover only the original 5 models — bom/ukmo have no data
+        per_model_means_5 = {
+            "ecmwf_aifs025": 43.0,
+            "ecmwf_ifs025": 41.5,
+            "gfs_seamless": 42.2,
+            "icon_seamless": 44.0,
+            "gem_global": 41.0,
+        }
+        records = [
+            _make_record(
+                city="NYC", date=f"2026-02-{i+1:02d}", actual_high=42.0,
+                per_model_means=dict(per_model_means_5),
+            )
+            for i in range(10)
+        ]
+        result = suggest_weights(records)
+        agg = result["aggregate"]
+        assert agg["bom_access_global_ensemble"] == 0.80
+        assert agg["ukmo_global_ensemble_20km"] == 0.85
 
     def test_lower_mae_gets_higher_weight(self):
         from model_bias import suggest_weights

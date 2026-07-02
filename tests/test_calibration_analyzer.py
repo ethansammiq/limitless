@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for calibration_analyzer.py — calibration curve, model accuracy, weights, thresholds."""
 
-import pytest
 
 
 # ─── Synthetic record builders ───────────────────────────────────────────────
@@ -161,6 +160,22 @@ class TestModelAccuracyReport:
 class TestOptimalWeights:
     """Test inverse-MAE weight computation."""
 
+    def test_canonical_weights_from_config(self):
+        """CURRENT_MODEL_WEIGHTS must be the canonical config.py table (all 7 models)."""
+        import config
+        from calibration_analyzer import CURRENT_MODEL_WEIGHTS
+
+        assert CURRENT_MODEL_WEIGHTS is config.DEFAULT_MODEL_WEIGHTS
+        assert CURRENT_MODEL_WEIGHTS == {
+            "ecmwf_aifs025": 1.30,
+            "ecmwf_ifs025": 1.15,
+            "gfs_seamless": 1.00,
+            "icon_seamless": 0.95,
+            "gem_global": 0.85,
+            "bom_access_global_ensemble": 0.80,
+            "ukmo_global_ensemble_20km": 0.85,
+        }
+
     def test_weights_sum_to_target(self):
         from calibration_analyzer import optimal_weights, CURRENT_TOTAL_WEIGHT
 
@@ -171,13 +186,32 @@ class TestOptimalWeights:
                 model_errors={
                     "ecmwf_aifs025": 0.5, "ecmwf_ifs025": 1.0,
                     "gfs_seamless": 1.5, "icon_seamless": 2.0, "gem_global": 2.5,
+                    "bom_access_global_ensemble": 3.0, "ukmo_global_ensemble_20km": 2.8,
                 },
                 date=f"2026-02-{i+1:02d}",
             ))
         weights = optimal_weights(records)
-        assert len(weights) == 5
+        assert len(weights) == 7
         total = sum(weights.values())
-        assert abs(total - CURRENT_TOTAL_WEIGHT) < 0.05  # close to 5.25
+        assert abs(total - CURRENT_TOTAL_WEIGHT) < 0.05  # close to 6.90
+
+    def test_missing_models_get_default_weights_not_one(self):
+        """Models without backtest data must fall back to canonical defaults, not 1.0."""
+        from calibration_analyzer import optimal_weights
+
+        # Only the original 5 models have error data — bom/ukmo missing
+        records = []
+        for i in range(10):
+            records.append(_make_record(
+                model_errors={
+                    "ecmwf_aifs025": 0.5, "ecmwf_ifs025": 1.0,
+                    "gfs_seamless": 1.5, "icon_seamless": 2.0, "gem_global": 2.5,
+                },
+                date=f"2026-02-{i+1:02d}",
+            ))
+        weights = optimal_weights(records)
+        assert weights["bom_access_global_ensemble"] == 0.80
+        assert weights["ukmo_global_ensemble_20km"] == 0.85
 
     def test_lower_mae_gets_higher_weight(self):
         from calibration_analyzer import optimal_weights

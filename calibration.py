@@ -14,7 +14,6 @@ Usage:
 """
 
 import json
-import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,14 +26,8 @@ CACHE_FILE = PROJECT_ROOT / "calibration_cache.json"
 # Minimum number of data points required for calibration
 MIN_DAYS_FOR_CALIBRATION = 14
 
-# Default weights (from edge_scanner_v2.py) — used as priors
-DEFAULT_MODEL_WEIGHTS = {
-    "ecmwf_aifs025": 1.30,
-    "ecmwf_ifs025": 1.15,
-    "gfs_seamless": 1.00,
-    "icon_seamless": 0.95,
-    "gem_global": 0.85,
-}
+# Canonical default weights (single source of truth in config.py) — used as priors
+from config import DEFAULT_MODEL_WEIGHTS
 
 
 def load_backtest_records(city_filter: str = None) -> list:
@@ -248,7 +241,7 @@ def get_calibrated_params() -> tuple:
     """
     # Try cache first
     cache = load_calibration_cache()
-    if cache.get("calibrated_weights") and cache.get("bandwidth_factor"):
+    if cache.get("calibrated_weights") and cache.get("bandwidth_factor") is not None:
         return cache["calibrated_weights"], cache["bandwidth_factor"]
 
     # Compute from backtest data
@@ -276,7 +269,7 @@ if __name__ == "__main__":
     n_days = len(set(r.get("date") for r in records))
 
     print(f"\n{'='*50}")
-    print(f"  CALIBRATION REPORT")
+    print("  CALIBRATION REPORT")
     print(f"{'='*50}")
     print(f"  Records: {len(records)} ({n_days} unique days)")
     print(f"  Min required: {MIN_DAYS_FOR_CALIBRATION} days")
@@ -288,7 +281,7 @@ if __name__ == "__main__":
         weights = calibrate_model_weights(records)
         bw_factor = calibrate_bandwidth_factor(records)
 
-        print(f"\n  MODEL WEIGHTS (calibrated vs default)")
+        print("\n  MODEL WEIGHTS (calibrated vs default)")
         print(f"  {'Model':<20s} {'Default':>8s} {'Calibrated':>10s} {'Delta':>8s}")
         print(f"  {'─'*48}")
         for model in DEFAULT_MODEL_WEIGHTS:
@@ -299,11 +292,11 @@ if __name__ == "__main__":
 
         print(f"\n  BANDWIDTH FACTOR: {bw_factor:.3f}x")
         if bw_factor > 1.05:
-            print(f"  → Model is UNDER-CONFIDENT: widening bandwidth")
+            print("  → Model is UNDER-CONFIDENT: widening bandwidth")
         elif bw_factor < 0.95:
-            print(f"  → Model is OVER-CONFIDENT: narrowing bandwidth")
+            print("  → Model is OVER-CONFIDENT: narrowing bandwidth")
         else:
-            print(f"  → Model is well-calibrated")
+            print("  → Model is well-calibrated")
 
         if args.apply:
             save_calibration_cache(weights, bw_factor, n_days)

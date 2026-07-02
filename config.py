@@ -157,24 +157,24 @@ def get_station_config(city_code: str) -> StationConfig:
 
 
 # =============================================================================
-# LEGACY CONSTANTS (for backward compatibility)
-# These point to NYC by default. New code should use STATIONS dict.
+# ENSEMBLE MODEL WEIGHTS — single source of truth
 # =============================================================================
+# Canonical default weights for ALL ensemble models, based on general
+# verification performance. Consumed by edge_scanner_v2.py (live ensemble),
+# calibration.py (priors), calibration_analyzer.py, and model_bias.py.
+# Calibration overrides these per-model from backtest data; any model missing
+# from a calibration result MUST fall back to these values (never 1.0).
 
-_default_station = STATIONS[DEFAULT_CITY]
+DEFAULT_MODEL_WEIGHTS: Dict[str, float] = {
+    "ecmwf_aifs025": 1.30,                # AI model — 10% better than IFS per ECMWF
+    "ecmwf_ifs025": 1.15,                 # Gold standard physics model
+    "gfs_seamless": 1.00,                 # Baseline
+    "icon_seamless": 0.95,                # Slightly less skillful at US sites
+    "gem_global": 0.85,                   # Lower resolution, less verification data
+    "bom_access_global_ensemble": 0.80,   # 40km, 6-hourly — less US skill
+    "ukmo_global_ensemble_20km": 0.85,    # 20km global, decent skill
+}
 
-# NWS APIs (NYC defaults)
-NWS_STATION_URL = _default_station.nws_station_url
-NWS_OBSERVATION_URL = _default_station.nws_observation_url
-NWS_HOURLY_FORECAST_URL = _default_station.nws_hourly_forecast_url
-NWS_GRIDPOINT_FALLBACK = _default_station.nws_gridpoint
-
-# MOS URLs (NYC defaults)
-MOS_MAV_URL = _default_station.mos_mav_url
-MOS_MET_URL = _default_station.mos_met_url
-
-# Market identifier (NYC default)
-NYC_HIGH_SERIES_TICKER = _default_station.series_ticker
 
 # =============================================================================
 # KALSHI API ENDPOINTS

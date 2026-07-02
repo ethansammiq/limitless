@@ -37,16 +37,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 BACKTEST_DIR = PROJECT_ROOT / "backtest"
 CALIBRATION_LOG = BACKTEST_DIR / "calibration_log.jsonl"
 
-# Model names and their current default weights (from edge_scanner_v2.py)
-CURRENT_MODEL_WEIGHTS: Dict[str, float] = {
-    "ecmwf_aifs025": 1.30,
-    "ecmwf_ifs025": 1.15,
-    "gfs_seamless": 1.00,
-    "icon_seamless": 0.95,
-    "gem_global": 0.85,
-}
+# Canonical model weights (single source of truth in config.py)
+from config import DEFAULT_MODEL_WEIGHTS as CURRENT_MODEL_WEIGHTS
 
-CURRENT_TOTAL_WEIGHT = sum(CURRENT_MODEL_WEIGHTS.values())  # 5.25
+CURRENT_TOTAL_WEIGHT = sum(CURRENT_MODEL_WEIGHTS.values())
 
 ALL_MODELS = list(CURRENT_MODEL_WEIGHTS.keys())
 
@@ -623,7 +617,7 @@ def generate_report(
 
     # ── 3. Optimal Weights ──
     section("3. OPTIMAL MODEL WEIGHTS")
-    lines.append("  (Inverse-MAE weighting, normalized to sum=5.25)")
+    lines.append(f"  (Inverse-MAE weighting, normalized to sum={CURRENT_TOTAL_WEIGHT:.2f})")
     lines.append("")
 
     suggested = optimal_weights(records)
