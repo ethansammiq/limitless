@@ -34,7 +34,9 @@ positions.json
 .positions.lock
 alerts_fallback.jsonl
 scan_logs/
-backtest/
+# backtest data/caches stay ignored; research CODE is tracked
+backtest/*
+!backtest/*.py
 
 # OS
 .DS_Store
