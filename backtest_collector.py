@@ -125,8 +125,9 @@ async def fetch_settlement_results(session: aiohttp.ClientSession, city_key: str
         months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
         date_str = f"{date.year % 100:02d}{months[date.month - 1]}{date.day:02d}"
 
+        from kalshi_client import normalize_market
         results = []
-        for m in data.get("markets", []):
+        for m in (normalize_market(x) for x in data.get("markets", [])):
             ticker = m.get("ticker", "")
             if date_str in ticker:
                 results.append({
@@ -283,7 +284,7 @@ async def collect_daily_data(target_date: datetime = None):
             line_count = sum(1 for _ in f)
         print(f"  Total records: {line_count} (collecting since {_first_date_in_file()})")
     else:
-        print(f"  First collection — no historical data yet")
+        print("  First collection — no historical data yet")
 
     print(f"  {'─'*40}")
 
@@ -388,7 +389,7 @@ def enrich_daily_data():
         tmp_path.rename(DAILY_DATA_FILE)
         print(f"  Enriched {enriched} records with snapshot data")
     else:
-        print(f"  No records to enrich (all have data or no snapshots available)")
+        print("  No records to enrich (all have data or no snapshots available)")
 
 
 def _first_date_in_file() -> str:

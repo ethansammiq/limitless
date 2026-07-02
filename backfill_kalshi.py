@@ -181,7 +181,8 @@ def fetch_settled_markets(series_ticker: str) -> list:
                 else:
                     raise
 
-        batch = data.get("markets", [])
+        from kalshi_client import normalize_market
+        batch = [normalize_market(m) for m in data.get("markets", [])]
         all_markets.extend(batch)
         cursor = data.get("cursor")
         if not cursor or not batch:
@@ -239,7 +240,7 @@ def main():
     now = datetime.now().isoformat()
 
     print(f"\n{'='*55}")
-    print(f"  KALSHI SETTLEMENT BACKFILL")
+    print("  KALSHI SETTLEMENT BACKFILL")
     print(f"{'='*55}")
 
     # Load existing records to preserve ensemble data
@@ -346,7 +347,7 @@ def main():
     # Summary
     n_dates = len(set(r["date"] for r in sorted_records))
     print(f"\n{'─'*55}")
-    print(f"  SUMMARY")
+    print("  SUMMARY")
     print(f"{'─'*55}")
     print(f"  Total records:     {len(sorted_records)} ({n_dates} unique dates)")
     print(f"  By expiration_val: {stats['expiration_value']} (exact temperature — best)")
@@ -362,7 +363,7 @@ def main():
     city_dates = defaultdict(list)
     for r in sorted_records:
         city_dates[r["city"]].append(r["date"])
-    print(f"\n  Date ranges:")
+    print("\n  Date ranges:")
     for city in sorted(city_dates.keys()):
         dates = sorted(city_dates[city])
         print(f"    {city:4s}: {dates[0]} → {dates[-1]} ({len(dates)} days)")
@@ -370,14 +371,14 @@ def main():
     # Show NWS deviation examples
     deviations = [r for r in sorted_records if "nws_deviation" in r]
     if deviations:
-        print(f"\n  NWS vs Kalshi deviations (top 10):")
+        print("\n  NWS vs Kalshi deviations (top 10):")
         for r in sorted(deviations, key=lambda x: abs(x["nws_deviation"]), reverse=True)[:10]:
             print(f"    {r['date']} {r['city']:4s}: NWS={r['nws_actual_high']:.1f}°F  "
                   f"Kalshi={r['actual_high']:.1f}°F  "
                   f"Δ={r['nws_deviation']:+.1f}°F")
 
     if args.dry_run:
-        print(f"\n  DRY RUN — no changes written")
+        print("\n  DRY RUN — no changes written")
     else:
         # Backup existing file
         if DAILY_DATA_FILE.exists():
@@ -395,7 +396,7 @@ def main():
         cache_file = PROJECT_ROOT / "calibration_cache.json"
         if cache_file.exists():
             cache_file.unlink()
-            print(f"  Cleared calibration cache (will recalibrate on next scan)")
+            print("  Cleared calibration cache (will recalibrate on next scan)")
 
     print(f"{'='*55}\n")
 

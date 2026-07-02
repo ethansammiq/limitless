@@ -95,18 +95,30 @@ async def fetch_previous_run_max(
     Fetch what a model predicted for target_date's max temp using
     the Previous Runs API (historical model runs).
 
-    Uses past_days=2 to get the run from ~24h before target date.
+    The API rejects past_days alongside start_date/end_date as mutually
+    exclusive (HTTP 400) — sending all three is why this silently returned
+    None for every model/city, so bias_data.jsonl never got a record. Instead
+    we size past_days to reach target_date and match it in the returned series.
     Returns the predicted daily max in Fahrenheit, or None.
     """
+    try:
+        tgt = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    days_back = (datetime.now(ET).date() - tgt).days
+    if days_back < 0:
+        return None  # future date — no prior run to evaluate
+    # Window must include target_date; cap at the API's past_days ceiling.
+    past_days = min(max(days_back + 1, 2), 92)
+
     params = {
         "latitude": lat,
         "longitude": lon,
         "models": model,
         "daily": "temperature_2m_max",
         "temperature_unit": "fahrenheit",
-        "start_date": target_date,
-        "end_date": target_date,
-        "past_days": 2,  # Get historical run from 2 days ago
+        "past_days": past_days,
+        "forecast_days": 1,
     }
 
     try:
@@ -163,6 +175,16 @@ async def collect_bias_data(target_date_str: Optional[str] = None):
     if not actuals:
         print(f"  ✗ No actual settlement data for {target_str}")
         print("    Run backtest_collector.py first, then re-run this script.")
+        # Liveness ≠ work-done: this is a benign "upstream data not ready yet"
+        # exit, not a crash. Beat the heartbeat anyway so the watchdog doesn't
+        # read a healthy no-op run as a dead service. (This exact early-exit,
+        # which sits ABOVE the success-path beat below, is why the heartbeat
+        # froze for 8 days while the process kept exiting 0.)
+        try:
+            from heartbeat import write_heartbeat
+            write_heartbeat("bias_collector")
+        except Exception:
+            pass
         return
 
     print(f"  Actual highs: {', '.join(f'{c}={t:.1f}°F' for c, t in actuals.items())}")

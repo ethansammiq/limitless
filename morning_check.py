@@ -17,7 +17,6 @@ Or manually:
 """
 
 import asyncio
-import math
 import re
 from datetime import datetime
 from typing import Dict, Optional
@@ -89,7 +88,8 @@ async def fetch_bracket_price(session: aiohttp.ClientSession, ticker: str, serie
         url = f"{KALSHI_BASE}/markets?series_ticker={series}&status=open&limit=50"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
-        for m in data.get("markets", []):
+        from kalshi_client import normalize_market
+        for m in (normalize_market(x) for x in data.get("markets", [])):
             if m.get("ticker") == ticker:
                 return {
                     "bid": m.get("yes_bid", 0),
