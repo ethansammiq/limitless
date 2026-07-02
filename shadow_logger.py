@@ -297,13 +297,34 @@ def capture_poly(now_utc: datetime, force: bool) -> list[dict]:
     return rows
 
 
-def write_rows(rows: list[dict], now_utc: datetime) -> Path:
+def write_rows(rows: list[dict], now_utc: datetime) -> tuple[Path, bool]:
+    """Append rows to the UTC-dated JSONL; True when this created the file."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{now_utc.strftime('%Y-%m-%d')}.jsonl"
+    created = not path.exists()
     with path.open("a") as fh:
         for row in rows:
             fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-    return path
+    return path, created
+
+
+def send_daily_digest(rows: list[dict], now_utc: datetime) -> None:
+    """One Discord embed on the first capture of each UTC day. Never raises."""
+    by_venue: dict[str, int] = {}
+    for row in rows:
+        by_venue[row["venue"]] = by_venue.get(row["venue"], 0) + 1
+    detail = ", ".join(f"{v}: {n}" for v, n in sorted(by_venue.items()))
+    try:
+        from notifications import send_discord_alert
+
+        asyncio.run(send_discord_alert(
+            title="Shadow logger — first capture of the day",
+            description=f"{len(rows)} book snapshots ({detail}) for {now_utc.strftime('%Y-%m-%d')} UTC.",
+            color=0x3498DB,
+            context="shadow_logger",
+        ))
+    except Exception as exc:  # noqa: BLE001 — digest must never block capture
+        logger.warning(f"daily digest failed (capture unaffected): {exc}")
 
 
 def main() -> None:
@@ -329,8 +350,10 @@ def main() -> None:
             print(json.dumps(row))
         print(f"# {len(rows)} rows (dry run)")
     elif rows:
-        path = write_rows(rows, now_utc)
+        path, created = write_rows(rows, now_utc)
         logger.info(f"shadow capture: {len(rows)} rows -> {path.name}")
+        if created:
+            send_daily_digest(rows, now_utc)
     else:
         logger.info("shadow capture: nothing in window")
     write_heartbeat("shadow_logger")

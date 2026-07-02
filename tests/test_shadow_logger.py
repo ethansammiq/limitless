@@ -93,12 +93,30 @@ class TestConfig:
 
 
 class TestWriteRows(object):
-    def test_appends_jsonl(self, tmp_path, monkeypatch):
+    def test_appends_jsonl_and_flags_first_write(self, tmp_path, monkeypatch):
         from datetime import datetime, timezone
         monkeypatch.setattr(sl, "OUT_DIR", tmp_path / "books")
         now = datetime(2026, 7, 2, 21, 0, tzinfo=timezone.utc)
-        p1 = sl.write_rows([{"a": 1}], now)
-        p2 = sl.write_rows([{"b": 2}], now)
+        p1, created1 = sl.write_rows([{"a": 1}], now)
+        p2, created2 = sl.write_rows([{"b": 2}], now)
         assert p1 == p2
+        assert created1 and not created2
         lines = [json.loads(x) for x in p1.read_text().splitlines()]
         assert lines == [{"a": 1}, {"b": 2}]
+
+
+class TestDailyDigest:
+    def test_digest_failure_never_raises(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        def boom(*a, **k):
+            raise RuntimeError("discord down")
+        monkeypatch.setattr(sl.asyncio, "run", boom)
+        sl.send_daily_digest(
+            [{"venue": "kalshi"}], datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+
+class TestWatchdogWiring:
+    def test_shadow_logger_monitored(self):
+        import watchdog
+        assert watchdog.EXPECTED_INTERVALS.get("shadow_logger") == 2
