@@ -74,17 +74,9 @@ MODEL_KEY_SUFFIXES = {
     "ukmo_global_ensemble_20km": "ukmo_global_ensemble_20km",
 }
 
-# Model weights — defaults based on general verification performance
-# Overridden by calibration.py when backtest data is available
-_DEFAULT_MODEL_WEIGHTS = {
-    "ecmwf_aifs025": 1.30,                # AI model — 10% better than IFS per ECMWF
-    "ecmwf_ifs025": 1.15,                 # Gold standard physics model
-    "gfs_seamless": 1.00,                 # Baseline
-    "icon_seamless": 0.95,                # Slightly less skillful at US sites
-    "gem_global": 0.85,                   # Lower resolution, less verification data
-    "bom_access_global_ensemble": 0.80,   # 40km, 6-hourly — less US skill
-    "ukmo_global_ensemble_20km": 0.85,    # 20km global, decent skill
-}
+# Model weights — canonical defaults live in config.py (single source of truth)
+# Overridden per-model by calibration.py when backtest data is available
+from config import DEFAULT_MODEL_WEIGHTS as _DEFAULT_MODEL_WEIGHTS
 
 # Load calibrated params if available (falls back to defaults gracefully)
 _CALIBRATED_WEIGHTS = {}
@@ -103,7 +95,9 @@ except ImportError:
 except Exception as e:
     logger.debug("Calibration load failed (using defaults): %s", e)
 
-MODEL_WEIGHTS = _CALIBRATED_WEIGHTS if _CALIBRATED_WEIGHTS else _DEFAULT_MODEL_WEIGHTS
+# Merge (not replace): models absent from a calibration result — e.g. a stale
+# 5-model cache — keep their tuned defaults instead of falling back to 1.0.
+MODEL_WEIGHTS = {**_DEFAULT_MODEL_WEIGHTS, **_CALIBRATED_WEIGHTS}
 
 # Derive CITIES dict from canonical config.py STATIONS (single source of truth)
 from config import STATIONS as _STATIONS
@@ -228,6 +222,8 @@ class NWSData:
 class OrderBookDepth:
     """Order book depth metrics for a single bracket."""
     ticker: str = ""
+    best_bid: int = 0         # Best YES bid (cents); 0 if no resting bid
+    best_ask: int = 100       # Best YES ask (cents); 100 if no resting ask
     bid_depth: int = 0        # Total contracts resting on bid side
     ask_depth: int = 0        # Total contracts resting on ask side
     bid_levels: int = 0       # Number of price levels with bids
@@ -625,7 +621,8 @@ async def fetch_kalshi_brackets(session: aiohttp.ClientSession, city_key: str) -
             if resp.status != 200:
                 return []
             data = await resp.json()
-            return data.get("markets", [])
+            from kalshi_client import normalize_market
+            return [normalize_market(m) for m in data.get("markets", [])]
     except Exception as e:
         logger.error("Kalshi fetch failed for %s: %s", city_key, e)
         return []
@@ -655,9 +652,10 @@ async def fetch_orderbook_depth(
                     return ticker, ob
                 data = await resp.json()
 
-            book = data.get("orderbook", data)  # Sometimes nested, sometimes flat
-            yes_bids = book.get("yes", [])  # [[price, qty], ...]
-            no_bids = book.get("no", [])    # [[price, qty], ...]
+            from kalshi_client import normalize_orderbook
+            book = normalize_orderbook(data)  # handles legacy + post-2026-03-12 orderbook_fp
+            yes_bids = book.get("yes", [])  # [[cents, qty], ...]
+            no_bids = book.get("no", [])    # [[cents, qty], ...]
 
             # Bid side (YES bids)
             if yes_bids:
@@ -677,6 +675,10 @@ async def fetch_orderbook_depth(
                 best_ask = 100 - best_no_bid
             else:
                 best_ask = 100
+
+            # Best levels (authoritative live quote; the /markets summary can be stale)
+            ob.best_bid = best_bid
+            ob.best_ask = best_ask
 
             # Spread
             ob.spread = max(0, best_ask - best_bid) if best_bid > 0 else 99
@@ -959,16 +961,13 @@ def compute_confidence_score(ensemble: EnsembleV2, nws: NWSData, bracket_low: fl
 
 from config import (
     MAX_POSITION_PCT,
-    MAX_DAILY_EXPOSURE,
     MAX_CORRELATED_EXPOSURE,
     MIN_EDGE_THRESHOLD,
     MIN_KDE_PROBABILITY,
     MIN_CONFIDENCE_TO_TRADE,
     MAX_ENTRY_PRICE_CENTS,
-    FREEROLL_MULTIPLIER,
     CAPITAL_EFFICIENCY_THRESHOLD_CENTS,
     SETTLEMENT_HOUR_ET,
-    LLM_CONFIDENCE_ENABLED,
     TRADE_SCORE_ENABLED,
     TRADE_SCORE_THRESHOLD,
 )
@@ -1097,6 +1096,18 @@ def analyze_opportunities_v2(
         yes_bid = get_bid(mkt)
         yes_ask = mkt.get("yes_ask", 0)
         volume = mkt.get("volume", 0)
+
+        # Reconcile against the live order book: the /markets summary quote is
+        # often stale/0 on these brackets even when real bids rest (the cause of
+        # 1c-into-an-empty-book orders that never fill). The depth book is
+        # authoritative — prefer it when populated. This fixes both the entry
+        # price below AND auto_trader._entry_price, which reads opp.yes_bid.
+        _depth = depth_map.get(ticker) if depth_map else None
+        if _depth is not None:
+            if _depth.best_bid > 0:
+                yes_bid = _depth.best_bid
+            if 0 < _depth.best_ask < 100:
+                yes_ask = _depth.best_ask
 
         # KDE probability (augmented with HRRR pseudo-members if available)
         kde_prob = kde_probability(
@@ -1281,7 +1292,7 @@ def print_model_breakdown(ensemble: EnsembleV2):
     if not ensemble.models:
         return
 
-    print(f"\n  MODEL BREAKDOWN")
+    print("\n  MODEL BREAKDOWN")
     print(f"  {'Model':<20} {'Members':>7} {'Mean':>7} {'σ':>5} {'Weight':>7} {'Eff.Wt':>7}")
     print(f"  {'─'*20} {'─'*7} {'─'*7} {'─'*5} {'─'*7} {'─'*7}")
 
@@ -1349,7 +1360,7 @@ def print_city_report_v2(
 
     # NWS
     if nws.forecast_high > 0:
-        print(f"\n  NWS POINT FORECAST")
+        print("\n  NWS POINT FORECAST")
         print(f"  ├─ Forecast High: {nws.forecast_high:.0f}°F")
         adj = []
         if nws.wind_penalty > 0:
@@ -1369,7 +1380,7 @@ def print_city_report_v2(
 
     # HRRR / NBM deterministic models
     if hrrr_nbm and (hrrr_nbm.hrrr_high > 0 or hrrr_nbm.nbm_high > 0):
-        print(f"\n  HIGH-RES DETERMINISTIC")
+        print("\n  HIGH-RES DETERMINISTIC")
         if hrrr_nbm.hrrr_high > 0:
             hrrr_div = hrrr_nbm.hrrr_high - ensemble.mean if ensemble.mean > 0 else 0
             print(f"  ├─ HRRR (3km):  {hrrr_nbm.hrrr_high:.1f}°F  (Δ{hrrr_div:+.1f} vs ensemble)")
@@ -1380,7 +1391,7 @@ def print_city_report_v2(
 
     # Confidence breakdown
     if conf_reasons:
-        print(f"\n  CONFIDENCE FACTORS")
+        print("\n  CONFIDENCE FACTORS")
         for r in conf_reasons:
             print(f"  ├─ {r}")
         gate = "★ PASSES 90+ GATE — TRADEABLE" if conf_score >= MIN_CONFIDENCE_TO_TRADE else f"✗ Below {MIN_CONFIDENCE_TO_TRADE} gate — OBSERVE ONLY"
@@ -1401,7 +1412,7 @@ def print_city_report_v2(
             ml_short = shorten_bracket_title(_ticker_to_title(most_liquid.ticker, brackets))
             ll_short = shorten_bracket_title(_ticker_to_title(least_liquid.ticker, brackets))
 
-            print(f"\n  ORDER BOOK INTELLIGENCE")
+            print("\n  ORDER BOOK INTELLIGENCE")
             print(f"  ├─ Total market depth: {total_contracts:,} contracts across {len(tmrw_depths)} brackets")
             print(f"  ├─ Most liquid:  {ml_short} ({ml_total:,} contracts, spread {most_liquid.spread}¢, grade {most_liquid.grade})")
             print(f"  ├─ Least liquid: {ll_short} ({ll_total:,} contracts, spread {least_liquid.spread}¢, grade {least_liquid.grade})")
@@ -1430,7 +1441,7 @@ def print_city_report_v2(
                 tb_title = shorten_bracket_title(_ticker_to_title(tb.ticker, brackets))
                 print(f"  └─ Fair value gap: {tb_title} thin bid side ({tb.bid_depth} contracts) — slippage risk on exit")
             else:
-                print(f"  └─ No significant fair value gaps detected")
+                print("  └─ No significant fair value gaps detected")
 
     # Brackets with KDE probabilities
     if depth_map is None:
@@ -1512,12 +1523,12 @@ def print_city_report_v2(
                         print(f"      Walls:      Bid wall={d.bid_wall:,}  Ask wall={d.ask_wall:,}")
             print(f"      Rationale:  {opp.rationale}")
     else:
-        print(f"\n  No opportunities above threshold.")
+        print("\n  No opportunities above threshold.")
 
 
 def print_summary_v2(all_opps: list[Opportunity], balance: float):
     print(f"\n{'='*72}")
-    print(f"  SCAN SUMMARY v2.0 — RISK MANAGEMENT ACTIVE")
+    print("  SCAN SUMMARY v2.0 — RISK MANAGEMENT ACTIVE")
     print(f"{'='*72}")
     print(f"  Balance:       ${balance:.2f}")
     print(f"  Opportunities: {len(all_opps)}")
@@ -1530,7 +1541,7 @@ def print_summary_v2(all_opps: list[Opportunity], balance: float):
     print(f"  Min Edge:      {MIN_EDGE_THRESHOLD*100:.0f}%  |  Min KDE: {MIN_KDE_PROBABILITY*100:.0f}%  |  Max Entry: {MAX_ENTRY_PRICE}¢")
 
     if not all_opps:
-        print(f"\n  No opportunities above threshold. Check again at next model run.")
+        print("\n  No opportunities above threshold. Check again at next model run.")
         return
 
     if TRADE_SCORE_ENABLED:
@@ -1561,7 +1572,7 @@ def print_summary_v2(all_opps: list[Opportunity], balance: float):
             print(f"\n  No opportunities meet the trade score threshold ({TRADE_SCORE_THRESHOLD}).")
         else:
             print(f"\n  No opportunities meet the {MIN_CONFIDENCE_TO_TRADE}+ confidence gate.")
-        print(f"  This is NORMAL — high-confidence setups appear 2-5 times per week.")
+        print("  This is NORMAL — high-confidence setups appear 2-5 times per week.")
 
 
 def _save_snapshot(city_key: str, target_date, ensemble: EnsembleV2, nws: NWSData, brackets: list, opps: list):
@@ -1615,10 +1626,10 @@ def _save_snapshot(city_key: str, target_date, ensemble: EnsembleV2, nws: NWSDat
 async def scan(city_filter: str = None, show_timing: bool = False):
     now = datetime.now()
     print(f"\n{'#'*72}")
-    print(f"  EDGE SCANNER v2.0 — FRONTIER AI MODELS")
+    print("  EDGE SCANNER v2.0 — FRONTIER AI MODELS")
     print(f"  {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"  Models: AIFS(AI) + IFS + GFS + ICON + GEM = ~194 members")
-    print(f"  Method: Gaussian KDE + Model Weighting + Bot Protection")
+    print("  Models: AIFS(AI) + IFS + GFS + ICON + GEM = ~194 members")
+    print("  Method: Gaussian KDE + Model Weighting + Bot Protection")
     print(f"{'#'*72}")
 
     if show_timing:
@@ -1646,7 +1657,7 @@ async def scan(city_filter: str = None, show_timing: bool = False):
         startup_warnings.append("DISCORD_WEBHOOK_URL not set — alerts will fall back to file")
 
     if startup_warnings:
-        print(f"\n  ⚠ STARTUP WARNINGS:")
+        print("\n  ⚠ STARTUP WARNINGS:")
         for sw in startup_warnings:
             print(f"    └─ {sw}")
             logger.warning("Startup: %s", sw)
@@ -1830,17 +1841,17 @@ async def scan(city_filter: str = None, show_timing: bool = False):
             except Exception as e:
                 failed_cities.append(city_key)
                 print(f"    ✗ {city_key} FAILED — {e}")
-                print(f"    Skipping to next city...")
+                print("    Skipping to next city...")
                 continue
 
     if failed_cities:
         n_ok = len(cities_to_scan) - len(failed_cities)
         print(f"\n  ⚠ FAILED CITIES: {', '.join(failed_cities)} ({n_ok}/{len(cities_to_scan)} scanned)")
         if n_ok == 0:
-            print(f"  ✗ ALL CITIES FAILED — check internet connection and API status")
+            print("  ✗ ALL CITIES FAILED — check internet connection and API status")
             logger.error("ALL cities failed scan — possible API outage or network issue")
         elif len(failed_cities) >= len(cities_to_scan) // 2:
-            print(f"  ⚠ MAJORITY FAILED — results may be unreliable, check data sources")
+            print("  ⚠ MAJORITY FAILED — results may be unreliable, check data sources")
             logger.warning("Majority of cities failed: %s", failed_cities)
 
     print_summary_v2(all_opps, balance)

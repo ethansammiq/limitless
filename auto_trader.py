@@ -28,17 +28,19 @@ Emergency stop:
 
 import argparse
 import asyncio
+import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from auto_scan import run_scan
+from auto_scan import format_discord_alert, run_scan
 from config import (
     STATIONS,
     MIN_CONFIDENCE_TO_TRADE,
@@ -53,9 +55,9 @@ from config import (
     WATCHLIST_MIN_CONFIDENCE,
 )
 from trade_score import compute_trade_score, should_trade
-from edge_scanner_v2 import shorten_bracket_title
+from edge_scanner_v2 import fetch_kalshi_brackets, shorten_bracket_title
 from execute_trade import execute_auto
-from notifications import send_discord_alert
+from notifications import send_discord_alert, send_discord_embeds
 from outcome_tracker import log_trade_prediction
 from position_store import load_positions, position_transaction
 from preflight import preflight_check
@@ -72,6 +74,14 @@ ET = ZoneInfo("America/New_York")
 # Build reverse mapping: series_ticker -> city_code
 SERIES_TO_CITY = {s.series_ticker: code for code, s in STATIONS.items()}
 
+# Alert diffing — only re-send the multi-embed scan dump when the opportunity
+# set or prices changed materially since the last send (cron fires 6x/day).
+ALERT_STATE_FILE = Path(__file__).resolve().parent / "alert_state.json"
+ALERT_PRICE_CHANGE_CENTS = float(os.getenv("ALERT_PRICE_CHANGE_CENTS", "3"))
+
+# Ticker date segment, e.g. KXHIGHNY-26JUN13-B34.5 -> 26JUN13
+_TICKER_DATE_RE = re.compile(r"-(\d{2}[A-Z]{3}\d{2})-")
+
 
 def _entry_price(opp) -> int:
     """Compute bid+1 entry price, capped at MAX_ENTRY_PRICE."""
@@ -86,9 +96,204 @@ def _city_for_ticker(ticker: str) -> str:
     return SERIES_TO_CITY.get(match.group(1), "UNK") if match else "UNK"
 
 
+def _parse_market_close(market: dict) -> datetime | None:
+    """Extract the close/settlement timestamp from a Kalshi market payload.
+
+    Prefers close_time (trading deadline); falls back to the expected or
+    actual expiration. Returns an aware datetime, or None if unparseable.
+    """
+    raw = (
+        market.get("close_time")
+        or market.get("expected_expiration_time")
+        or market.get("expiration_time")
+    )
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)  # Kalshi timestamps are UTC
+    return parsed
+
+
+def _settlement_from_ticker(ticker: str) -> datetime | None:
+    """Fallback: settlement derived from the ticker's embedded market date.
+
+    A daily-high market for date D is determined by end of day D and pays out
+    the next morning, so settlement is D+1 at SETTLEMENT_HOUR_ET.
+    """
+    match = _TICKER_DATE_RE.search(ticker)
+    if not match:
+        return None
+    try:
+        market_date = datetime.strptime(match.group(1), "%y%b%d").date()
+    except ValueError:
+        return None
+    return datetime.combine(
+        market_date + timedelta(days=1), datetime.min.time()
+    ).replace(hour=SETTLEMENT_HOUR_ET, tzinfo=ET)
+
+
+def _next_settlement_heuristic(now: datetime) -> datetime:
+    """Last resort when neither payload nor ticker yields a date: next 7 AM ET."""
+    today_settle = datetime.combine(now.date(), datetime.min.time()).replace(
+        hour=SETTLEMENT_HOUR_ET, tzinfo=ET,
+    )
+    if now < today_settle:
+        return today_settle
+    return datetime.combine(
+        now.date() + timedelta(days=1), datetime.min.time()
+    ).replace(hour=SETTLEMENT_HOUR_ET, tzinfo=ET)
+
+
+async def _fetch_market_close_times(opps: list) -> dict[str, datetime]:
+    """Fetch ticker -> close timestamp for every series present in opps."""
+    city_codes = {_city_for_ticker(opp.ticker) for opp in opps}
+    city_codes.discard("UNK")
+    close_times: dict[str, datetime] = {}
+    if not city_codes:
+        return close_times
+    async with aiohttp.ClientSession() as session:
+        for city_code in sorted(city_codes):
+            try:
+                markets = await fetch_kalshi_brackets(session, city_code)
+            except Exception as e:
+                logger.warning("Close-time fetch failed for %s: %s", city_code, e)
+                continue
+            for market in markets:
+                ticker = market.get("ticker", "")
+                parsed = _parse_market_close(market)
+                if ticker and parsed is not None:
+                    close_times[ticker] = parsed
+    return close_times
+
+
+def _hours_to_settlement_by_ticker(
+    opps: list,
+    close_times: dict[str, datetime],
+    now: datetime,
+) -> dict[str, float]:
+    """Per-ticker hours to settlement from the actual market close timestamps.
+
+    The old next-7AM heuristic made the 6 AM run treat tomorrow-settling
+    markets (~25-49h out) as ~1h away, inflating the trade-score urgency
+    signal and flipping live trade decisions.
+    """
+    hours: dict[str, float] = {}
+    for opp in opps:
+        settle_dt = close_times.get(opp.ticker) or _settlement_from_ticker(opp.ticker)
+        if settle_dt is None:
+            settle_dt = _next_settlement_heuristic(now)
+        hours[opp.ticker] = max(0.5, (settle_dt - now).total_seconds() / 3600)
+    return hours
+
+
+def _opportunity_fingerprint(opps: list, tradeable_tickers: set[str]) -> dict[str, dict]:
+    """Compact per-ticker snapshot used to detect material changes between scans."""
+    fingerprint: dict[str, dict] = {}
+    for opp in opps:
+        price = opp.yes_bid if opp.side == "yes" else (100 - opp.yes_ask)
+        fingerprint[opp.ticker] = {
+            "side": opp.side,
+            "price": int(price),
+            "edge_cents": round(opp.edge_after_fees * 100, 1),
+            "tradeable": opp.ticker in tradeable_tickers,
+        }
+    return fingerprint
+
+
+def _scan_changed_materially(
+    prev: dict | None,
+    curr: dict,
+    price_threshold_cents: float | None = None,
+) -> bool:
+    """True when the opportunity set, sides, tradeable flags, or prices moved.
+
+    Price/edge moves below the threshold (ALERT_PRICE_CHANGE_CENTS) are
+    treated as noise and do not trigger a re-alert.
+    """
+    if prev is None:
+        return True
+    threshold = (
+        price_threshold_cents if price_threshold_cents is not None
+        else ALERT_PRICE_CHANGE_CENTS
+    )
+    if set(prev) != set(curr):
+        return True
+    for ticker, c in curr.items():
+        p = prev[ticker]
+        if p.get("side") != c["side"] or bool(p.get("tradeable")) != c["tradeable"]:
+            return True
+        if abs(float(p.get("price", 0)) - c["price"]) >= threshold:
+            return True
+        if abs(float(p.get("edge_cents", 0.0)) - c["edge_cents"]) >= threshold:
+            return True
+    return False
+
+
+def _load_alert_state() -> dict | None:
+    """Last-sent opportunity fingerprint, or None if absent/corrupt."""
+    try:
+        with open(ALERT_STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    fingerprint = data.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, dict) else None
+
+
+def _save_alert_state(fingerprint: dict) -> None:
+    try:
+        payload = {
+            "sent_at": datetime.now(ET).isoformat(),
+            "fingerprint": fingerprint,
+        }
+        with open(ALERT_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except OSError as e:
+        logger.warning("Could not persist alert state: %s", e)
+
+
+async def _send_scan_embeds_if_changed(
+    *,
+    all_opps: list,
+    tradeable: list,
+    city_summaries: list,
+    balance: float,
+    scan_time: str,
+    hours_by_ticker: dict[str, float],
+    scan_only: bool,
+) -> None:
+    """Send the scan-summary embeds only when the scan changed materially.
+
+    auto_trader suppresses run_scan's own Discord send (dry_run=True) and
+    gates the embeds here on a fingerprint diff, so the 6x/day cron only
+    alerts when the opportunity set or prices actually moved.
+    """
+    fingerprint = _opportunity_fingerprint(all_opps, {o.ticker for o in tradeable})
+    if not _scan_changed_materially(_load_alert_state(), fingerprint):
+        logger.info("Scan unchanged since last alert — skipping Discord embeds")
+        return
+
+    # Display-only: format_discord_alert takes one representative h2s value.
+    rep_h2s = min(hours_by_ticker.values()) if hours_by_ticker else 14.0
+    embeds = format_discord_alert(
+        all_opps, city_summaries, balance, scan_time, hours_to_settlement=rep_h2s,
+    )
+    if not scan_only:
+        # The bot executes tradeable setups itself seconds later — a manual
+        # execute_trade.py prompt would invite duplicate fills.
+        embeds = [e for e in embeds if "execute_trade.py" not in e.get("description", "")]
+    if embeds:
+        await send_discord_embeds(embeds, context="auto_trader")
+    _save_alert_state(fingerprint)
+
+
 def _find_reentry_candidates(
     positions: list, all_opps: list, now: datetime,
-    hours_to_settlement: float = 14.0,
+    hours_by_ticker: dict[str, float] | None = None,
 ) -> list[tuple]:
     """Find positions that were recently trailing-stop exited but still have high scanner confidence.
 
@@ -107,7 +312,8 @@ def _find_reentry_candidates(
     opp_by_ticker = {}
     for opp in all_opps:
         if TRADE_SCORE_ENABLED:
-            if should_trade(opp, hours_to_settlement):
+            h2s = (hours_by_ticker or {}).get(opp.ticker, 14.0)
+            if should_trade(opp, h2s):
                 opp_by_ticker[opp.ticker] = opp
         else:
             if opp.confidence_score >= REENTRY_MIN_CONFIDENCE:
@@ -193,7 +399,9 @@ async def auto_trade(
         return
 
     # ── Step 1: Run scan (reuse auto_scan.run_scan) ──
-    scan_result = await run_scan(city_filter=city_filter, quiet=False, dry_run=False)
+    # dry_run=True suppresses run_scan's own Discord send; auto_trader
+    # re-sends the embeds diff-gated in Step 2.8 to avoid 6x/day repeats.
+    scan_result = await run_scan(city_filter=city_filter, quiet=False, dry_run=True)
     all_opps = scan_result.get("opps", [])
     balance = scan_result.get("balance", 0.0)
     city_summaries = scan_result.get("city_summaries", [])
@@ -220,19 +428,18 @@ async def auto_trade(
     except Exception as _proxy_err:
         logger.warning("Proxy front scan failed (non-critical, continuing): %s", _proxy_err)
 
-    # ── Step 2: Compute hours to settlement ──
-    # Target today's settlement if before settlement hour, else tomorrow's.
-    today_settle = datetime.combine(now.date(), datetime.min.time()).replace(
-        hour=SETTLEMENT_HOUR_ET, tzinfo=ET,
-    )
-    if now < today_settle:
-        settlement_dt = today_settle
-    else:
-        tomorrow = (now + timedelta(days=1)).date()
-        settlement_dt = datetime.combine(tomorrow, datetime.min.time()).replace(
-            hour=SETTLEMENT_HOUR_ET, tzinfo=ET,
-        )
-    hours_to_settlement = max(0.5, (settlement_dt - now).total_seconds() / 3600)
+    # ── Step 2: Compute hours to settlement per market ──
+    # Use the actual close/settlement timestamp from each Kalshi market
+    # payload (falling back to the ticker's market date) instead of the old
+    # next-7AM heuristic, which treated tomorrow-settling markets as ~1h out
+    # at the 6 AM run and inflated the trade-score urgency signal.
+    close_times: dict[str, datetime] = {}
+    if all_opps:
+        try:
+            close_times = await _fetch_market_close_times(all_opps)
+        except Exception as e:
+            logger.warning("Market close-time fetch failed (using ticker dates): %s", e)
+    hours_by_ticker = _hours_to_settlement_by_ticker(all_opps, close_times, now)
 
     # ── Step 2.5: Filter for tradeable (hybrid trade score or legacy gate) ──
     tradeable = []
@@ -241,7 +448,7 @@ async def auto_trade(
 
     for opp in all_opps:
         if TRADE_SCORE_ENABLED:
-            ts = compute_trade_score(opp, hours_to_settlement)
+            ts = compute_trade_score(opp, hours_by_ticker[opp.ticker])
             trade_scores[opp.ticker] = ts
             if ts.tradeable:
                 tradeable.append(opp)
@@ -269,6 +476,17 @@ async def auto_trade(
     # ── Step 2.7: Update open positions with latest confidence + trend ──
     _update_position_confidence(all_opps, city_summaries)
 
+    # ── Step 2.8: Scan-summary embeds, diff-gated against the last send ──
+    await _send_scan_embeds_if_changed(
+        all_opps=all_opps,
+        tradeable=tradeable,
+        city_summaries=city_summaries,
+        balance=balance,
+        scan_time=scan_result.get("scan_time", ""),
+        hours_by_ticker=hours_by_ticker,
+        scan_only=scan_only,
+    )
+
     if not tradeable:
         gate_desc = f"TS>={TRADE_SCORE_THRESHOLD}" if TRADE_SCORE_ENABLED else "90+ confidence"
         miss_note = f" ({len(near_misses)} near-miss)" if near_misses else ""
@@ -294,7 +512,9 @@ async def auto_trade(
         _write_heartbeat()
         return
 
-    logger.info("%d TRADEABLE setup(s) found! (hours_to_settlement=%.1fh)", len(tradeable), hours_to_settlement)
+    h_vals = sorted(hours_by_ticker[o.ticker] for o in tradeable)
+    logger.info("%d TRADEABLE setup(s) found! (hours_to_settlement=%.1f-%.1fh)",
+                len(tradeable), h_vals[0], h_vals[-1])
 
     if scan_only:
         logger.info("--scan-only mode, not executing.")
@@ -423,7 +643,7 @@ async def auto_trade(
                     log_trade_prediction(
                         opp,
                         trade_score=trade_scores.get(opp.ticker),
-                        hours_to_settlement=hours_to_settlement,
+                        hours_to_settlement=hours_by_ticker.get(opp.ticker, 14.0),
                         entry_price=entry_price,
                         action="entry",
                     )
@@ -440,7 +660,7 @@ async def auto_trade(
         # ── Step 3.5: Re-entry after trailing stop exits ──
         # If a position was exited by trailing stop recently and the scanner
         # still shows high confidence for that ticker, re-enter.
-        reentry_candidates = _find_reentry_candidates(positions, all_opps, now, hours_to_settlement)
+        reentry_candidates = _find_reentry_candidates(positions, all_opps, now, hours_by_ticker)
         if reentry_candidates:
             logger.info("%d RE-ENTRY candidate(s) found", len(reentry_candidates))
         for opp, exited_pos in reentry_candidates:
@@ -510,7 +730,7 @@ async def auto_trade(
                     log_trade_prediction(
                         opp,
                         trade_score=trade_scores.get(opp.ticker),
-                        hours_to_settlement=hours_to_settlement,
+                        hours_to_settlement=hours_by_ticker.get(opp.ticker, 14.0),
                         entry_price=entry_price,
                         action="reentry",
                     )
@@ -533,13 +753,13 @@ async def auto_trade(
             o = ex["opp"]
             short = shorten_bracket_title(o.bracket_title)
             dr = " [DRY RUN]" if ex.get("dry_run") else ""
-            re = " 🔄 RE-ENTRY" if ex.get("reentry") else ""
+            reentry_tag = " 🔄 RE-ENTRY" if ex.get("reentry") else ""
             ts_txt = ""
             if TRADE_SCORE_ENABLED and o.ticker in trade_scores:
                 ts_txt = f" TS:{trade_scores[o.ticker].score:.2f}"
             lines.append(
                 f"**{o.side.upper()} {short} @ {ex['price']}c x{ex['qty']}** "
-                f"(conf:{o.confidence_score:.0f}{ts_txt}){dr}{re}"
+                f"(conf:{o.confidence_score:.0f}{ts_txt}){dr}{reentry_tag}"
             )
         await send_discord_alert(
             f"AUTO TRADER: {len(executed)} trade(s) {'simulated' if dry_run else 'placed'}",

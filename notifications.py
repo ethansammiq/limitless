@@ -7,9 +7,11 @@ If Discord is unreachable, alerts are saved to a local JSONL fallback file
 so no opportunity is silently lost.
 
 Features:
-  - 3 retries with exponential backoff (2s, 4s, 8s)
+  - Exponential backoff for connection errors (5 attempts, 2s→60s, ~2 min total)
+  - Fast-fail on 4xx client errors (except 429, which honors retry_after)
   - Discord embed chunking (respects 10 embed / 6000 char limits)
   - JSONL fallback file when Discord is persistently down
+  - Fallback replay: pending alerts (<48h old) resend on next successful delivery
   - Dry-run mode for testing
 """
 
@@ -42,9 +44,22 @@ def _get_discord_webhook() -> str:
     """
     return os.getenv("DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK") or ""
 
-# Retry config
-MAX_RETRIES = 3
-BACKOFF_BASE = 2  # seconds: 2, 4, 8
+# Retry config — backoff must outlast the transient DNS failures the Mac
+# hits right after wake ("Cannot connect to host discord.com:443 nodename
+# nor servname"), which can persist for a minute or more.
+MAX_RETRIES = 5
+BACKOFF_BASE = 2.0        # first retry delay (seconds)
+BACKOFF_MULTIPLIER = 4.0
+BACKOFF_CAP = 60.0        # max delay between attempts
+
+# Fallback replay config
+FALLBACK_MAX_AGE_HOURS = 48
+REPLAY_MARKER = "⏪ delayed"
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Delay after 0-indexed attempt N: 2s, 8s, 32s, then capped at 60s."""
+    return min(BACKOFF_CAP, BACKOFF_BASE * BACKOFF_MULTIPLIER ** attempt)
 
 
 async def _post_with_retry(
@@ -52,7 +67,12 @@ async def _post_with_retry(
     url: str,
     payload: dict,
 ) -> bool:
-    """POST to Discord with exponential backoff. Returns True on success."""
+    """POST to Discord with exponential backoff. Returns True on success.
+
+    Connection-class errors (DNS failures after wake, timeouts, resets) get
+    the full backoff schedule (~2 min total). 4xx client errors fail fast —
+    retrying a rejected payload can't succeed. 429 honors Discord's retry_after.
+    """
     for attempt in range(MAX_RETRIES):
         try:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -62,20 +82,24 @@ async def _post_with_retry(
                     # Rate limited — use Discord's retry_after if available
                     try:
                         data = await resp.json()
-                        wait = data.get("retry_after", BACKOFF_BASE ** (attempt + 1))
+                        wait = data.get("retry_after", _backoff_delay(attempt))
                     except Exception:
-                        wait = BACKOFF_BASE ** (attempt + 1)
+                        wait = _backoff_delay(attempt)
                     logger.warning(f"Discord rate limited, waiting {wait:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     await asyncio.sleep(wait)
+                elif 400 <= resp.status < 500:
+                    body = await resp.text()
+                    logger.error(f"Discord returned {resp.status} — not retrying: {body[:200]}")
+                    return False
                 else:
                     body = await resp.text()
                     logger.warning(f"Discord returned {resp.status}: {body[:200]} (attempt {attempt + 1}/{MAX_RETRIES})")
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        await asyncio.sleep(_backoff_delay(attempt))
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
             logger.warning(f"Discord request failed: {e} (attempt {attempt + 1}/{MAX_RETRIES})")
             if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
+                await asyncio.sleep(_backoff_delay(attempt))
 
     return False
 
@@ -93,6 +117,85 @@ def _save_to_fallback(embeds: list[dict], context: str = ""):
         logger.warning(f"Discord unreachable — alert saved to {FALLBACK_FILE}")
     except Exception as e:
         logger.error(f"Failed to write fallback alert: {e}")
+
+
+def _mark_replayed(embeds: list[dict]) -> list[dict]:
+    """Return copies of embeds with titles prefixed so delayed delivery is visible."""
+    marked = []
+    for embed in embeds:
+        copy = dict(embed)
+        title = copy.get("title", "")
+        if not title.startswith(REPLAY_MARKER):
+            copy["title"] = f"{REPLAY_MARKER} {title}".strip()
+        marked.append(copy)
+    return marked
+
+
+def _claim_fallback_records() -> list[dict]:
+    """Atomically claim pending fallback records for replay.
+
+    Renames the file before reading so concurrent senders can't replay the
+    same entries twice (at-most-once delivery), then deletes the claimed
+    copy. Records older than FALLBACK_MAX_AGE_HOURS and corrupt lines are
+    dropped.
+    """
+    if not FALLBACK_FILE.exists():
+        return []
+
+    claimed_path = FALLBACK_FILE.with_suffix(".replaying")
+    try:
+        os.rename(FALLBACK_FILE, claimed_path)
+    except FileNotFoundError:
+        return []  # another process claimed it first
+    except OSError as e:
+        logger.error(f"Could not rotate fallback file for replay: {e}")
+        return []
+
+    now = datetime.now(ET)
+    records: list[dict] = []
+    try:
+        for line in claimed_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                saved_at = datetime.fromisoformat(record["timestamp"])
+                if saved_at.tzinfo is None:
+                    saved_at = saved_at.replace(tzinfo=ET)
+                age_hours = (now - saved_at).total_seconds() / 3600
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            if age_hours <= FALLBACK_MAX_AGE_HOURS and record.get("embeds"):
+                records.append(record)
+    except OSError as e:
+        logger.error(f"Could not read claimed fallback file: {e}")
+    finally:
+        claimed_path.unlink(missing_ok=True)
+    return records
+
+
+async def _replay_fallback(session: aiohttp.ClientSession, webhook_url: str):
+    """Resend stranded fallback alerts once a delivery proved Discord reachable."""
+    records = _claim_fallback_records()
+    if not records:
+        return
+
+    pending: list[dict] = []
+    for record in records:
+        pending.extend(_mark_replayed(record["embeds"]))
+
+    logger.info(f"Replaying {len(pending)} fallback embed(s) from {len(records)} saved alert(s)")
+    failed: list[dict] = []
+    for chunk in _chunk_embeds(pending):
+        await asyncio.sleep(1)  # rate-limit spacing after the main send
+        if await _post_with_retry(session, webhook_url, {"embeds": chunk}):
+            logger.debug(f"Replayed {len(chunk)} fallback embed(s)")
+        else:
+            failed.extend(chunk)
+
+    if failed:
+        _save_to_fallback(failed, context="replay_failed")
 
 
 def _chunk_embeds(embeds: list[dict]) -> list[list[dict]]:
@@ -175,6 +278,7 @@ async def send_discord_embeds(
         return
 
     failed_embeds = []
+    any_success = False
 
     async with aiohttp.ClientSession() as session:
         for chunk in chunks:
@@ -182,15 +286,21 @@ async def send_discord_embeds(
             success = await _post_with_retry(session, webhook_url, payload)
 
             if success:
+                any_success = True
                 logger.debug(f"Discord alert sent ({len(chunk)} embeds)")
             else:
-                logger.error(f"Discord delivery failed after {MAX_RETRIES} retries")
+                logger.error(f"Discord delivery failed after {MAX_RETRIES} attempts")
                 failed_embeds.extend(chunk)
 
             # Rate limit spacing between chunk sends
             if len(chunks) > 1:
                 await asyncio.sleep(1)
 
-    # Save any failed embeds to fallback
+        # Discord proven reachable — flush alerts stranded by earlier outages
+        if any_success:
+            await _replay_fallback(session, webhook_url)
+
+    # Save any failed embeds to fallback (after replay claim, so a failed
+    # chunk isn't immediately re-sent within this same call)
     if failed_embeds:
         _save_to_fallback(failed_embeds, context=context or "retry_exhausted")
