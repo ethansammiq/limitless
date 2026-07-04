@@ -161,7 +161,7 @@ def get_station_config(city_code: str) -> StationConfig:
 # =============================================================================
 # Canonical default weights for ALL ensemble models, based on general
 # verification performance. Consumed by edge_scanner_v2.py (live ensemble),
-# calibration.py (priors), calibration_analyzer.py, and model_bias.py.
+# calibration.py (priors), and model_bias.py.
 # Calibration overrides these per-model from backtest data; any model missing
 # from a calibration result MUST fall back to these values (never 1.0).
 
@@ -495,12 +495,6 @@ LLM_MODELS = [
 
 
 # =============================================================================
-# CPI TRADING PARAMETERS (mirrors cpi_config.py — cross-reference)
-# =============================================================================
-# These are duplicated here so modules importing from config.py can access
-# CPI params without importing cpi_config. Canonical values in cpi_config.py.
-
-# =============================================================================
 # POSITION MONITOR PARAMETERS
 # =============================================================================
 
@@ -589,15 +583,6 @@ STALE_PRICE_MIN_GAP_CENTS = 8
 
 # State file for previous scan data
 STALE_PRICE_STATE_FILE = "stale_price_state.json"
-
-
-CPI_MAX_POSITION_PCT = 0.15         # 15% per trade (vs 10% for weather)
-CPI_MAX_DAILY_EXPOSURE = 0.30       # 30% across all CPI positions
-CPI_MAX_CORRELATED_EXPOSURE = 0.20  # 20% across correlated CPI markets
-CPI_MIN_EDGE_THRESHOLD = 0.12       # 12% minimum edge (vs 15% for weather)
-CPI_MIN_KDE_PROBABILITY = 0.15      # 15% minimum model probability (vs 20%)
-CPI_MIN_CONFIDENCE_TO_TRADE = 85    # 85/100 (vs 90 for weather)
-CPI_MAX_ENTRY_PRICE_CENTS = 65      # 65 cents (vs 50 for weather)
 
 
 # =============================================================================

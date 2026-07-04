@@ -3,8 +3,8 @@
 WEATHER EDGE — Shared Statistical Engine
 
 Vectorized Gaussian KDE, Silverman bandwidth estimation, and ensemble
-member weighting. Used by edge_scanner_v2.py, cpi_scanner.py, and
-proxy_arb_engine.py so the math lives in exactly one place.
+member weighting. Used by edge_scanner_v2.py and proxy_arb_engine.py
+so the math lives in exactly one place.
 
 All functions are pure (no side effects, no file I/O) and importable
 without pulling in the full scanner or calibration modules.
