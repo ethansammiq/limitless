@@ -216,6 +216,12 @@ cat << EOF
 # Shadow Logger — dual-venue L2 depth capture (Poly gate data)
 */30 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/shadow_logger.py --once >> $LOG_DIR/shadow_logger.log 2>&1
 
+# Live Watch — read-only live-account journal + sell-into-strength pings
+*/10 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/live_watch.py --once >> $LOG_DIR/live_watch.log 2>&1
+
+# Weekly Digest — per-strategy P&L + live summary + dead-bracket base rate
+0 18 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/weekly_digest.py >> $LOG_DIR/weekly_digest.log 2>&1
+
 # Morning Check — 6:30 AM (position evaluation)
 30 6 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/morning_check.py >> $LOG_DIR/morning_check.log 2>&1
 

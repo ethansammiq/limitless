@@ -46,6 +46,8 @@ EXPECTED_INTERVALS = {
     "bias_collector": 25,      # Runs daily at 8:30 AM. Allow 25h.
     "shadow_logger": 2,        # Runs every 30 min (beats even out of window). Allow 2h.
     "dead_bracket_sweeper": 2,  # Runs every 15 min (beats even when nothing found). Allow 2h.
+    "live_watch": 2,            # Runs every 10 min (read-only live journal). Allow 2h.
+    "weekly_digest": 192,       # Runs Sundays 18:00. Allow 8 days.
 }
 
 # Daily cron jobs the watchdog can re-run when the Mac slept through the tick.

@@ -41,6 +41,7 @@ STATE_FILES=(
     positions_paper.json paper_balance.json paper_orders.json
     heartbeats.json peak_state.json stale_price_state.json
     alert_state.json dead_bracket_state.json watchdog_catchup.json
+    live_watch_state.json
     price_history.json temp_history.json dashboard_day_anchor.json
     weather_edge.db model_bias_corrections.json
 )
@@ -126,8 +127,13 @@ upload_state() {
         fi
     done
     rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/backtest/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/backtest/"
-    rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/logs/shadow_books/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/shadow_books/"
-    echo "  ✅ backtest data + shadow books synced"
+    for d in shadow_books dead_brackets; do
+        [ -d "$LOCAL_DIR/logs/$d" ] && rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/logs/$d/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$d/"
+    done
+    for f in live_fills.jsonl live_positions.jsonl live_balance.jsonl; do
+        [ -f "$LOCAL_DIR/logs/$f" ] && $SCP_CMD "$LOCAL_DIR/logs/$f" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$f"
+    done
+    echo "  ✅ backtest data + journals synced"
 }
 
 # ─── Remote setup ───────────────────────────

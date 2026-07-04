@@ -63,6 +63,7 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATE_FILE = PROJECT_ROOT / "dead_bracket_state.json"
+JOURNAL_DIR = PROJECT_ROOT / "logs" / "dead_brackets"
 MIN_BID_C = 5              # ignore 1-4¢ dust bids
 REALERT_GROWTH = 1.25      # re-alert a known ticker only if net grew 25%
 STATE_MAX_AGE_H = 48
@@ -111,6 +112,24 @@ def bid_proceeds_cents(yes_bids: list, min_bid: int = MIN_BID_C) -> tuple[int, i
         contracts += qty
         levels.append([price, qty])
     return net, contracts, sorted(levels, reverse=True)
+
+
+def journal_findings(findings: list[dict], now_utc: datetime) -> Path | None:
+    """Append EVERY finding to the daily journal, regardless of alert floor.
+
+    The alert path is gated (>= --min-net, deduped) so Discord stays quiet,
+    but the event-frequency base rate — the number that decides whether this
+    edge pays at all — must be measured uncensored."""
+    if not findings:
+        return None
+    JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+    path = JOURNAL_DIR / f"{now_utc.strftime('%Y-%m-%d')}.jsonl"
+    with path.open("a") as fh:
+        for f in findings:
+            fh.write(json.dumps(
+                {"ts": now_utc.isoformat(timespec="seconds"), **f},
+                separators=(",", ":")) + "\n")
+    return path
 
 
 def load_state() -> dict:
@@ -252,6 +271,8 @@ def main() -> None:
 
     findings = asyncio.run(sweep())
     total = sum(f["net_cents"] for f in findings)
+    if not args.dry_run:
+        journal_findings(findings, datetime.now(timezone.utc))
 
     if not findings:
         logger.info("dead-bracket sweep: nothing found")
