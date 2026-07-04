@@ -9,11 +9,17 @@ Orchestrates the complete trading cycle:
   4. Execute trades (via execute_trade.execute_auto)
   5. Send Discord notifications for every action
 
+EXECUTION IS OPT-IN since 2026-07: the KDE edge loop measured -EV against
+the market (10W/28L lifetime, model Brier 0.159 vs market 0.098), so the
+default mode is SCAN ONLY — full scan, alerts, confidence updates, and
+heartbeats, but no order placement. Re-enable with --execute or
+AUTO_TRADER_EXECUTE=true in .env.
+
 Usage:
-  python3 auto_trader.py                    # Full auto (scan + execute)
+  python3 auto_trader.py                    # Scan only (default)
+  python3 auto_trader.py --execute          # Scan + place orders
   python3 auto_trader.py --dry-run          # Scan + show what would trade
   python3 auto_trader.py --city NYC         # Single city
-  python3 auto_trader.py --scan-only        # Same as auto_scan.py (no execution)
 
 Cron setup (replaces auto_scan.py cron entries):
   0 6 * * *   $VENV $PROJ/auto_trader.py >> /tmp/auto_trader.log 2>&1
@@ -856,10 +862,28 @@ def _write_heartbeat():
         logger.warning("Failed to write heartbeat: %s", e)
 
 
+def resolve_scan_only(execute_flag: bool, scan_only_flag: bool, env_value: str | None) -> bool:
+    """Scan-only unless execution is explicitly requested via flag or env.
+
+    Default flipped 2026-07: the KDE edge loop is measured -EV, so order
+    placement is opt-in while scanning, alerts, and heartbeats keep running.
+    An explicit --scan-only always wins over the env override.
+    """
+    if scan_only_flag:
+        return True
+    execute = execute_flag or (env_value or "").strip().lower() in ("1", "true", "yes")
+    return not execute
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Auto Trader -- Fully automated trading pipeline")
+    parser = argparse.ArgumentParser(description="Auto Trader -- scan pipeline (execution opt-in)")
     parser.add_argument("--city", type=str, default=None, help="Single city code (NYC, CHI, DEN, MIA, LAX)")
     parser.add_argument("--dry-run", action="store_true", help="Scan and evaluate but don't place orders")
-    parser.add_argument("--scan-only", action="store_true", help="Scan only, no execution (same as auto_scan.py)")
+    parser.add_argument("--execute", action="store_true",
+                        help="Place orders (default scan-only; AUTO_TRADER_EXECUTE=true also enables)")
+    parser.add_argument("--scan-only", action="store_true", help="Force scan-only (overrides env)")
     args = parser.parse_args()
-    asyncio.run(auto_trade(args.city, args.dry_run, args.scan_only))
+    asyncio.run(auto_trade(
+        args.city, args.dry_run,
+        resolve_scan_only(args.execute, args.scan_only, os.getenv("AUTO_TRADER_EXECUTE")),
+    ))
