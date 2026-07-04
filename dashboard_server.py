@@ -62,6 +62,9 @@ except Exception:  # pragma: no cover - defensive fallback
     ORDERS_FILE = ROOT / "paper_orders.json"
 
 HEARTBEATS_FILE = ROOT / "heartbeats.json"
+# Real-money account snapshot, written by live_watch.py each run. This is the
+# actual Kalshi account — separate from the paper ledger below it.
+LIVE_ACCOUNT_FILE = ROOT / "logs" / "live_account.json"
 PEAKS_FILE = ROOT / "peak_state.json"
 CALIBRATION_FILE = ROOT / "calibration_cache.json"
 SCAN_FILE = ROOT / "scan_data.json"
@@ -747,6 +750,25 @@ async def handle_temps(_request: web.Request) -> web.Response:
     return web.json_response({**_temps_meta, "cities": cities}, headers={"Cache-Control": "no-store"})
 
 
+async def handle_live(_request: web.Request) -> web.Response:
+    """Real-money account snapshot (live_watch.py output). Distinct from
+    /api/state, which is the paper ledger."""
+    data, err = _read_json(LIVE_ACCOUNT_FILE)
+    if err or not data:
+        return web.json_response(
+            {"available": False, "reason": "no live snapshot yet — schedule live_watch.py"},
+            headers={"Cache-Control": "no-store"})
+    age = None
+    if data.get("updated"):
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(data["updated"])).total_seconds()
+        except ValueError:
+            age = None
+    return web.json_response({"available": True, "age_seconds": age, **data},
+                             headers={"Cache-Control": "no-store"})
+
+
 async def handle_radar(_request: web.Request) -> web.Response:
     """Opportunity radar: today's full ladder per city classified against the
     settlement station's observed running max (the 2026-07-02 dead-bracket
@@ -789,6 +811,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/scan", handle_scan)
     app.router.add_get("/api/prices", handle_prices)
     app.router.add_get("/api/temps", handle_temps)
+    app.router.add_get("/api/live", handle_live)
     app.router.add_get("/api/radar", handle_radar)
     app.router.add_get("/healthz", handle_health)
     if PRICES_ENABLED or TEMPS_ENABLED:

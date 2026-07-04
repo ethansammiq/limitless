@@ -720,10 +720,25 @@ body::before {
 .rd-lab{font-size:11px;color:var(--text-dim);white-space:nowrap;}
 .rd-px{font-family:var(--mono);font-size:12px;}
 .rd-alert-badge{background:var(--red);color:#fff;border-radius:10px;padding:1px 9px;font-size:11px;font-weight:700;margin-left:8px;vertical-align:2px;}
+
+.liveacct{border:1.5px solid var(--cyan);border-radius:10px;padding:14px 16px;margin:8px 0 18px;background:rgba(34,211,238,0.04);}
+.liveacct-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.liveacct-title{font-size:13px;font-weight:700;letter-spacing:.5px;color:var(--cyan);}
+.liveacct-title .real{background:var(--cyan);color:#04222a;border-radius:9px;padding:1px 8px;font-size:10px;margin-left:8px;vertical-align:1px;}
+.liveacct-cells{display:flex;flex-wrap:wrap;gap:20px;}
+.la-cell{min-width:70px;}
+.la-val{font-family:var(--mono);font-size:20px;font-weight:700;}
+.la-lab{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;}
+.la-pos{color:var(--green,#22c55e);} .la-neg{color:var(--red);}
+.la-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px;}
+.la-table th{text-align:left;color:var(--text-dim);font-weight:500;padding:3px 8px;font-size:10px;text-transform:uppercase;}
+.la-table td{padding:3px 8px;border-top:1px solid var(--border);font-family:var(--mono);}
+.paper-tag{font-size:10px;color:var(--text-dim);background:var(--border);border-radius:8px;padding:1px 8px;margin-left:8px;letter-spacing:.5px;}
 </style>
 </head>
 <body>
 
+<div id="liveacct"></div>
 <div id="live">
   <div class="loading">
     <div class="loading-spinner"></div>
@@ -1172,7 +1187,8 @@ function renderLive(state){
     </div>
   </div>`;
 
-  // KPI feed (live) — 4 groups; gracefully falls back to basic vitals
+  // KPI feed — PAPER simulation; the real account is the panel above.
+  h += `<div class="ls-title" style="margin:14px 0 6px">Paper ledger <span class="paper-tag">SIMULATION</span></div>`;
   h += renderKpis(state, {bal, init, pnl, pnlPct, sum});
 
   // Open positions
@@ -1476,6 +1492,56 @@ function renderTemps(data){
   </div>`;
 }
 
+function renderLiveAccount(data){
+  const el = document.getElementById('liveacct');
+  if (!el) return;
+  if (!data || !data.available){ el.innerHTML=''; return; }
+  const money = n => (n==null?'—':(n<0?'-$':'$')+Math.abs(n).toFixed(2));
+  const cls = n => n==null?'':(n>0?'la-pos':(n<0?'la-neg':''));
+  const ageTxt = data.age_seconds!=null ? fmtAge(data.age_seconds)+' ago' : 'never';
+
+  let h = `<div class="liveacct">
+    <div class="liveacct-head">
+      <div class="liveacct-title">Live account <span class="real">REAL MONEY</span></div>
+      <div class="sb-meta">Kalshi · updated ${ageTxt}</div>
+    </div>
+    <div class="liveacct-cells">
+      <div class="la-cell"><div class="la-val">${money(data.balance)}</div><div class="la-lab">Cash balance</div></div>
+      <div class="la-cell"><div class="la-val ${cls(data.realized_total)}">${money(data.realized_total)}</div><div class="la-lab">Realized P&amp;L</div></div>
+      <div class="la-cell"><div class="la-val">${(data.open_positions||[]).length}</div><div class="la-lab">Open positions</div></div>
+    </div>`;
+
+  const open = data.open_positions||[], closed = data.closed_positions||[];
+  const rows = [...open.map(p=>[p,'open']), ...closed.map(p=>[p,'closed'])];
+  if (rows.length){
+    h += `<table class="la-table"><thead><tr><th>Ticker</th><th>Qty</th><th>Exposure</th><th>Realized</th><th></th></tr></thead><tbody>`;
+    for (const [p,st] of rows){
+      h += `<tr>
+        <td>${esc(p.ticker)}</td>
+        <td>${p.qty}</td>
+        <td>${money(p.exposure)}</td>
+        <td class="${cls(p.realized)}">${p.realized?money(p.realized):'—'}</td>
+        <td class="dim">${st==='open'?'open':'closed'}</td>
+      </tr>`;
+    }
+    h += `</tbody></table>`;
+  }
+
+  const fills = (data.recent_fills||[]).slice(0,6);
+  if (fills.length){
+    h += `<table class="la-table"><thead><tr><th>Time</th><th>Ticker</th><th>Act</th><th>¢</th><th>Qty</th></tr></thead><tbody>`;
+    for (const f of fills){
+      const t = f.ts ? new Date(f.ts).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '';
+      h += `<tr><td class="dim">${esc(t)}</td><td>${esc(f.ticker)}</td>
+        <td class="${f.action==='sell'?'la-pos':''}">${esc(f.action)}</td>
+        <td>${f.price_c==null?'—':f.price_c+'¢'}</td><td>${esc(f.count)}</td></tr>`;
+    }
+    h += `</tbody></table>`;
+  }
+  h += `</div>`;
+  el.innerHTML = h;
+}
+
 function renderRadar(data){
   const el = document.getElementById('radar');
   if (!el) return;
@@ -1527,6 +1593,11 @@ async function tick(){
     const state = await r.json();
     renderLive(state);
     setConn(true);
+    // Live account panel (real money) — independent of the paper ledger
+    try {
+      const lr = await fetch('/api/live', { cache: 'no-store' });
+      if (lr.ok) renderLiveAccount(await lr.json());
+    } catch (_) { /* keep last panel */ }
     if (state.scan){
       renderDashboard(state.scan);
     } else {

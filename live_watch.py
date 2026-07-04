@@ -45,6 +45,9 @@ LOGS = PROJECT_ROOT / "logs"
 FILLS_LOG = LOGS / "live_fills.jsonl"
 POSITIONS_LOG = LOGS / "live_positions.jsonl"
 BALANCE_LOG = LOGS / "live_balance.jsonl"
+# Latest full-account snapshot (overwritten each run) — the dashboard reads
+# this to show REAL money instead of the paper ledger.
+ACCOUNT_FILE = LOGS / "live_account.json"
 STATE_FILE = PROJECT_ROOT / "live_watch_state.json"
 
 DEFAULT_STRENGTH_C = 85
@@ -114,6 +117,41 @@ def should_alert_strength(state: dict, ticker: str, bid: int, threshold: int,
     return prev is None or bid >= prev + REALERT_STEP_C
 
 
+def account_snapshot(balance, positions: list[dict], fills: list[dict], now: str) -> dict:
+    """Full real-account view for the dashboard: balance, realized P&L (incl.
+    closed positions), open/closed positions, recent fills."""
+    realized_total = 0.0
+    open_pos, closed_pos = [], []
+    for p in positions or []:
+        try:
+            qty = float(p.get("position_fp") or 0)
+            realized = float(p.get("realized_pnl_dollars") or 0)
+            exposure = float(p.get("market_exposure_dollars") or 0)
+        except (TypeError, ValueError):
+            continue
+        realized_total += realized
+        row = {"ticker": p.get("ticker"), "qty": qty,
+               "realized": round(realized, 2), "exposure": round(exposure, 2)}
+        (open_pos if qty != 0 else closed_pos).append(row)
+    recent = []
+    for f in sorted(fills or [], key=lambda x: x.get("created_time", ""), reverse=True)[:12]:
+        try:
+            px = round(float(f.get("yes_price_dollars") or 0) * 100)
+        except (TypeError, ValueError):
+            px = None
+        recent.append({"ts": f.get("created_time"), "ticker": f.get("ticker"),
+                       "action": f.get("action"), "price_c": px,
+                       "count": f.get("count_fp"), "taker": f.get("is_taker")})
+    return {
+        "updated": now,
+        "balance": round(balance, 2) if balance is not None else None,
+        "realized_total": round(realized_total, 2),
+        "open_positions": open_pos,
+        "closed_positions": [c for c in closed_pos if c["realized"] != 0],
+        "recent_fills": recent,
+    }
+
+
 def _append(path: Path, obj: dict) -> None:
     LOGS.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
@@ -170,6 +208,13 @@ async def run(threshold: int, dry_run: bool) -> None:
             _append(POSITIONS_LOG, {"ts": now, "positions": longs})
         if balance is not None and balance != last_logged_balance():
             _append(BALANCE_LOG, {"ts": now, "balance": balance})
+
+        # Latest full snapshot for the dashboard (atomic overwrite).
+        LOGS.mkdir(parents=True, exist_ok=True)
+        snap = account_snapshot(balance, positions, (fills_resp or {}).get("fills"), now)
+        tmp = ACCOUNT_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snap, indent=2))
+        tmp.replace(ACCOUNT_FILE)
 
         state = {}
         if STATE_FILE.exists():

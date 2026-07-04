@@ -55,6 +55,34 @@ class TestStrengthAlert:
         assert lw.bid_depth_near_best([]) == 0
 
 
+class TestAccountSnapshot:
+    def test_splits_open_closed_and_totals_realized(self):
+        positions = [
+            {"ticker": "MIA", "position_fp": "50.00", "realized_pnl_dollars": "0.00",
+             "market_exposure_dollars": "0.50"},
+            {"ticker": "CHI", "position_fp": "0.00", "realized_pnl_dollars": "18.24",
+             "market_exposure_dollars": "0.00"},
+            {"ticker": "OLD", "position_fp": "0.00", "realized_pnl_dollars": "0.00",
+             "market_exposure_dollars": "0.00"},
+        ]
+        fills = [{"created_time": "2026-07-04T21:20:45Z", "ticker": "CHI",
+                  "action": "sell", "yes_price_dollars": "0.9900", "count_fp": "20.00",
+                  "is_taker": True}]
+        snap = lw.account_snapshot(117.59, positions, fills, "2026-07-04T21:25:00+00:00")
+        assert snap["balance"] == 117.59
+        assert snap["realized_total"] == 18.24
+        assert [p["ticker"] for p in snap["open_positions"]] == ["MIA"]
+        # closed with zero realized (OLD) is dropped; only CHI kept
+        assert [p["ticker"] for p in snap["closed_positions"]] == ["CHI"]
+        assert snap["recent_fills"][0]["price_c"] == 99
+
+    def test_handles_none_balance_and_empty(self):
+        snap = lw.account_snapshot(None, [], [], "2026-07-04T21:25:00+00:00")
+        assert snap["balance"] is None
+        assert snap["realized_total"] == 0.0
+        assert snap["open_positions"] == []
+
+
 class TestJournalReads:
     def test_known_ids_from_file(self, tmp_path, monkeypatch):
         log = tmp_path / "live_fills.jsonl"
