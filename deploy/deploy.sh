@@ -21,15 +21,29 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"  # Override with SSH_KEY env var
 
 # ─── Args ───────────────────────────────────
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <server-ip> [--full|--secrets]"
+    echo "Usage: $0 <server-ip> [--full|--secrets|--state]"
     echo ""
     echo "  <server-ip>    SSH to this host"
-    echo "  --full         Upload code + secrets + run setup"
+    echo "  --full         Upload code + secrets + state + run setup"
     echo "  --secrets      Upload .env + private key only"
+    echo "  --state        Upload live state files (ONE-TIME migration —"
+    echo "                 overwrites the server's ledger; never run this"
+    echo "                 after the server's cron jobs have gone live)"
     echo ""
     echo "  Set SSH_KEY env var to use a custom SSH key"
     exit 1
 fi
+
+# Live state — the position ledger and friends. Code deploys must NEVER
+# touch these on a running server (a stale Mac copy would clobber the live
+# ledger); they move only via an explicit --state migration.
+STATE_FILES=(
+    positions_paper.json paper_balance.json paper_orders.json
+    heartbeats.json peak_state.json stale_price_state.json
+    alert_state.json dead_bracket_state.json watchdog_catchup.json
+    price_history.json temp_history.json dashboard_day_anchor.json
+    weather_edge.db model_bias_corrections.json
+)
 
 SERVER="$1"
 MODE="${2:-code}"
@@ -79,16 +93,41 @@ upload_code() {
         --exclude 'kalshi_private_key.pem' \
         --exclude 'positions.json' \
         --exclude '.positions.lock' \
+        --exclude '.positions_paper.lock' \
+        --exclude '.heartbeats.lock' \
         --exclude 'alerts_fallback.jsonl' \
         --exclude 'PAUSE_TRADING' \
         --exclude 'heartbeats/' \
         --exclude 'backtest/*.json' \
+        --exclude 'backtest/*.jsonl*' \
+        --exclude 'scan_logs/' \
         --exclude 'logs/' \
         --exclude '.pytest_cache' \
+        --exclude '.ruff_cache' \
+        --exclude '.claude/' \
+        "${STATE_FILES[@]/#/--exclude=}" \
         -e "$RSYNC_SSH" \
         "$LOCAL_DIR/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/"
 
-    echo "  ✅ Code synced"
+    echo "  ✅ Code synced (state files excluded)"
+}
+
+# ─── Upload live state (one-time migration) ─
+upload_state() {
+    echo ""
+    echo "[state] Migrating live state to $SERVER..."
+    echo "  ⚠ This OVERWRITES the server's ledger. Only do this before the"
+    echo "    server's cron jobs go live, with the Mac's crontab disabled."
+    $SSH_CMD "$REMOTE_USER@$SERVER" "mkdir -p $REMOTE_DIR/backtest $REMOTE_DIR/logs/shadow_books"
+    for f in "${STATE_FILES[@]}"; do
+        if [ -f "$LOCAL_DIR/$f" ]; then
+            $SCP_CMD "$LOCAL_DIR/$f" "$REMOTE_USER@$SERVER:$REMOTE_DIR/$f"
+            echo "  ✅ $f"
+        fi
+    done
+    rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/backtest/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/backtest/"
+    rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/logs/shadow_books/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/shadow_books/"
+    echo "  ✅ backtest data + shadow books synced"
 }
 
 # ─── Remote setup ───────────────────────────
@@ -151,9 +190,13 @@ case "$MODE" in
     --secrets)
         upload_secrets
         ;;
+    --state)
+        upload_state
+        ;;
     --full)
         upload_code
         upload_secrets
+        upload_state
         run_remote_setup
         run_remote_tests
         verify_deployment

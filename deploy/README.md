@@ -9,17 +9,25 @@
 ## What Gets Deployed
 
 ```
-CRON (6/8/10/15/23 ET)
-  auto_trader.py      → Scan + auto-execute 90+ confidence setups
+SYSTEMD TIMERS / SERVICES
+  position_monitor    → Every 5 min — exits, settlement, paper ledger
+  watchdog            → Every 15 min — health checks + self-healing
+  dashboard_server    → Always on, localhost:8787 (reach via ssh tunnel)
 
-SYSTEMD TIMERS
-  position_monitor    → Every 5 min — exits, trailing stops, freeroll
-  watchdog            → Every 15 min — cron health checks
-
-CRON (one-shot daily)
-  morning_check       → 6:30 AM — pre-settlement position evaluation
-  backtest_collector  → 8:30 AM — settlement data collection
+CRON (ET)
+  auto_trader         → 6/8/10/15/16/23 — SCAN-ONLY by default (exec opt-in)
+  auto_scan --quiet   → 22:00 — evening Discord scan
+  peak_monitor        → */10, 13-22 — peak formation tracking
+  dead_bracket_sweeper→ */15 — obs-killed brackets still holding bids
+  shadow_logger       → */30 — dual-venue L2 depth capture
+  morning_check       → 6:30 — pre-settlement position evaluation
+  backtest_collector  → 8:00 — settlement data collection
+  bias_collector      → 8:30 — model bias rows (needs backtest row first)
 ```
+
+**The whole bot moves — the Mac becomes a dev machine.** Cron on an
+always-on VPS is the fix for the entire sleep-related incident class
+(missed 8AM jobs, drifting catch-ups, stale heartbeats).
 
 ---
 
@@ -70,50 +78,58 @@ ssh ubuntu@<oracle-instance-ip>
 mkdir -p ~/limitless
 ```
 
-### 5. Deploy Code
+### 5. Migrate — ORDER MATTERS (no dual writers)
+
+The paper ledger is file-based state. Two machines running
+position_monitor against separate copies will diverge silently — the
+exact corruption class the 2026-06-25 rebuild fixed. Migrate in this
+order:
 
 ```bash
-# From your Mac (project root)
+# a. STOP the Mac's writers FIRST
+crontab -l > ~/mac_crontab_backup.txt   # keep a copy
+crontab -r                              # Mac cron off
+pkill -f dashboard_server.py            # stop local dashboard
+
+# b. Ship everything (code + secrets + state + setup + tests)
 chmod +x deploy/deploy.sh
-./deploy/deploy.sh <oracle-instance-ip> --full
+./deploy/deploy.sh <instance-ip> --full
 ```
 
-This will:
-1. rsync all code (excluding secrets, .venv, positions.json)
-2. Upload `.env` and `kalshi_private_key.pem`
-3. Run `setup_oracle.sh` (installs Python, chrony, systemd services, cron)
-4. Run tests on server
-5. Smoke test the deployment
+`--full` rsyncs code (state excluded), scps `.env` + key, runs the
+one-time `--state` migration (ledger, heartbeats, backtest data, shadow
+books), executes `setup_oracle.sh` (Python, chrony, systemd, cron —
+jobs go live at this point), then runs the test suite remotely.
 
 ### 6. Verify
 
 ```bash
 ssh ubuntu@<ip>
-
-# Check cron
 crontab -l
-
-# Check timers
 systemctl list-timers --all | grep weather
-
-# Manual dry run
-cd ~/limitless
-source .venv/bin/activate
-python3 auto_trader.py --dry-run
-
-# Watch logs
+cd ~/limitless && .venv/bin/python3 heartbeat.py --status   # all fresh within the hour
 tail -f /var/log/weather-edge/*.log
 ```
 
-### 7. Go Live
-
-When you're satisfied with dry-run results:
+Then from the Mac, tunnel to the dashboard:
 
 ```bash
-# Edit crontab to remove --dry-run flags
-crontab -e
-# Change: auto_trader.py --dry-run  →  auto_trader.py
+ssh -L 8787:127.0.0.1:8787 ubuntu@<ip>
+# open http://127.0.0.1:8787 — radar + heartbeats should be live
 ```
+
+### 7. New deploy model
+
+Cron no longer runs from the Mac's working tree. Code changes flow:
+
+```bash
+# On the Mac: commit + push as usual, then
+./deploy/deploy.sh <ip>        # code-only rsync — NEVER touches state
+# or on the server: cd ~/limitless && git pull
+```
+
+Never run `--state` again once the server is live — it would overwrite
+the live ledger with stale Mac copies.
 
 ---
 

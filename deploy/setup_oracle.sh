@@ -150,9 +150,33 @@ RandomizedDelaySec=30
 WantedBy=timers.target
 EOF
 
+# Dashboard — always-on, localhost only (reach it via ssh tunnel:
+#   ssh -L 8787:127.0.0.1:8787 ubuntu@<ip>  then open http://127.0.0.1:8787)
+sudo tee /etc/systemd/system/weather-edge-dashboard.service > /dev/null << EOF
+[Unit]
+Description=Weather Edge Dashboard (localhost:8787)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=$DEPLOY_DIR
+Environment=PYTHONUNBUFFERED=1
+ExecStart=$VENV_DIR/bin/python3 $DEPLOY_DIR/dashboard_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:$LOG_DIR/dashboard.log
+StandardError=append:$LOG_DIR/dashboard.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo systemctl daemon-reload
 sudo systemctl enable weather-edge-monitor.timer
 sudo systemctl enable weather-edge-watchdog.timer
+sudo systemctl enable weather-edge-dashboard.service
 
 # ─────────────────────────────────────────────
 # 7. CRON JOBS (for scheduled scans)
@@ -171,22 +195,39 @@ cat << EOF
 # All times are ET (server timezone set to America/New_York)
 # ═══════════════════════════════════════════════════
 
-# Auto Trader at optimal scan windows (all --dry-run until enabled)
-0 6 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run >> $LOG_DIR/auto_trader.log 2>&1
-0 8 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run >> $LOG_DIR/auto_trader.log 2>&1
-0 10 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run >> $LOG_DIR/auto_trader.log 2>&1
-0 15 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run >> $LOG_DIR/auto_trader.log 2>&1
-0 23 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run >> $LOG_DIR/auto_trader.log 2>&1
+# Auto Trader at scan windows (scan-only by default since 2026-07 —
+# order placement needs --execute or AUTO_TRADER_EXECUTE=true in .env)
+0 6 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+0 8 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+0 10 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+0 15 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+0 16 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+0 23 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
 
-# Backtest Collector — 8:30 AM (after settlement)
-30 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest_collector.py >> $LOG_DIR/backtest_collector.log 2>&1
+# Evening scan with Discord alert
+0 22 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_scan.py --quiet >> $LOG_DIR/auto_scan.log 2>&1
+
+# Peak Monitor — every 10 min during peak-formation hours
+*/10 13-22 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/peak_monitor.py --once >> $LOG_DIR/peak_monitor.log 2>&1
+
+# Dead-Bracket Sweeper — obs-killed brackets still holding bids (riskless class)
+*/15 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/dead_bracket_sweeper.py --once >> $LOG_DIR/dead_bracket_sweeper.log 2>&1
+
+# Shadow Logger — dual-venue L2 depth capture (Poly gate data)
+*/30 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/shadow_logger.py --once >> $LOG_DIR/shadow_logger.log 2>&1
 
 # Morning Check — 6:30 AM (position evaluation)
 30 6 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/morning_check.py >> $LOG_DIR/morning_check.log 2>&1
+
+# Backtest Collector — 8:00 AM (after settlement)
+0 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest_collector.py >> $LOG_DIR/backtest_collector.log 2>&1
+
+# Bias Collector — 8:30 AM (needs backtest_collector's row first)
+30 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/bias_collector.py >> $LOG_DIR/bias_collector.log 2>&1
 EOF
 ) | crontab -
 
-echo "  ✅ Cron jobs installed (auto_trader in --dry-run mode)"
+echo "  ✅ Cron jobs installed (auto_trader is scan-only by default)"
 
 # ─────────────────────────────────────────────
 # LOG ROTATION
