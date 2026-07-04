@@ -49,6 +49,11 @@ STATE_FILE = PROJECT_ROOT / "live_watch_state.json"
 
 DEFAULT_STRENGTH_C = 85
 REALERT_STEP_C = 3
+# A 1-lot 99c flicker is a phantom quote, not an exit (2026-07-04: a bid
+# printed 99c for seconds on a book whose last trade was 18c). Only alert
+# when there's real size within a few cents of the best bid.
+MIN_ALERT_DEPTH = 5
+DEPTH_BAND_C = 3
 
 
 def known_fill_ids() -> set[str]:
@@ -93,8 +98,17 @@ def open_long_positions(positions: list[dict]) -> list[dict]:
     return out
 
 
-def should_alert_strength(state: dict, ticker: str, bid: int, threshold: int) -> bool:
-    if bid < threshold:
+def bid_depth_near_best(yes_bids_sorted: list, band: int = DEPTH_BAND_C) -> float:
+    """Contracts resting within `band` cents of the best YES bid."""
+    if not yes_bids_sorted:
+        return 0
+    best = yes_bids_sorted[0][0]
+    return sum(q for p, q in yes_bids_sorted if p >= best - band)
+
+
+def should_alert_strength(state: dict, ticker: str, bid: int, threshold: int,
+                          depth: float = MIN_ALERT_DEPTH) -> bool:
+    if bid < threshold or depth < MIN_ALERT_DEPTH:
         return False
     prev = state.get(ticker, {}).get("bid")
     return prev is None or bid >= prev + REALERT_STEP_C
@@ -136,13 +150,16 @@ async def run(threshold: int, dry_run: bool) -> None:
             bid = yes_bids[0][0] if yes_bids else None
             if bid is not None:
                 p["best_bid"] = bid
+                p["bid_depth"] = bid_depth_near_best(yes_bids)
                 strength.append((p, bid))
 
         if dry_run:
             print(f"balance ${balance:.2f} | {len(fresh)} new fill(s) | {len(longs)} open long(s)")
             for p, bid in strength:
-                print(f"  {p['ticker']}: {p['qty']:.0f}x, best bid {bid}c"
-                      f"{'  <-- SELL-INTO-STRENGTH' if bid >= threshold else ''}")
+                real = bid >= threshold and p["bid_depth"] >= MIN_ALERT_DEPTH
+                print(f"  {p['ticker']}: {p['qty']:.0f}x, best bid {bid}c "
+                      f"(depth {p['bid_depth']:.0f})"
+                      f"{'  <-- SELL-INTO-STRENGTH' if real else ''}")
             return
 
         for f in fresh:
@@ -160,10 +177,12 @@ async def run(threshold: int, dry_run: bool) -> None:
                 state = json.loads(STATE_FILE.read_text())
             except (json.JSONDecodeError, OSError):
                 state = {}
-        pings = [(p, bid) for p, bid in strength if should_alert_strength(state, p["ticker"], bid, threshold)]
+        pings = [(p, bid) for p, bid in strength
+                 if should_alert_strength(state, p["ticker"], bid, threshold, p["bid_depth"])]
         if pings:
             lines = [
-                f"**{p['ticker']}** — {p['qty']:.0f} contracts, best bid **{bid}¢**\n"
+                f"**{p['ticker']}** — {p['qty']:.0f} contracts, best bid **{bid}¢** "
+                f"({p['bid_depth']:.0f} within {DEPTH_BAND_C}¢)\n"
                 f"  Your playbook: sell into strength (90¢ now beats $1 tomorrow)."
                 for p, bid in pings
             ]

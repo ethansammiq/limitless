@@ -45,6 +45,15 @@ class TestStrengthAlert:
         state = {"T": {"bid": 85}}
         assert lw.should_alert_strength(state, "T", 88, 85)
 
+    def test_phantom_thin_bid_suppressed(self):
+        # 2026-07-04: a 1-lot 99c flicker on an 18c market must not ping
+        assert not lw.should_alert_strength({}, "T", 99, 85, depth=1)
+
+    def test_depth_near_best(self):
+        bids = [[99, 1], [97, 3], [90, 500]]
+        assert lw.bid_depth_near_best(bids) == 4
+        assert lw.bid_depth_near_best([]) == 0
+
 
 class TestJournalReads:
     def test_known_ids_from_file(self, tmp_path, monkeypatch):
