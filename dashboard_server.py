@@ -109,6 +109,11 @@ _temps_meta = {
     "last_error": None,
 }
 
+# city -> {updated, brackets: [{ticker,label,lo,hi,bid,ask,volume}]} — the FULL
+# today-ladder for the opportunity radar (unlike _prices, which keeps only the
+# top-N by volume: dead tails are exactly the low-volume contracts that drops).
+_radar: dict = {}
+
 # ticker -> {city, date, label, bid, ask, last, mid, volume, updated, points: deque}
 _prices: dict = {}
 _prices_meta = {
@@ -217,6 +222,44 @@ def _ingest(city: str, markets: list, now_iso: str, held: set | None = None) -> 
         rec["points"].append({"t": now_iso, "mid": mid, "bid": bid, "ask": ask})
 
 
+def _radar_ingest(city: str, markets: list, now_iso: str) -> None:
+    """Full today-ladder snapshot from a get_markets response (no extra API
+    calls — piggybacks on the price poller's fetch)."""
+    code = _today_ticker_code(city)
+    if not code:
+        return
+    rows = []
+    for m in markets or []:
+        t = m.get("ticker") or ""
+        if f"-{code}-" not in t:
+            continue
+        bid, ask, last, vol = _market_quote(m)
+        label = (m.get("yes_sub_title") or m.get("subtitle") or "").strip()
+        lo, hi = _bracket_bounds(label, t)
+        rows.append({"ticker": t, "label": label, "lo": lo, "hi": hi,
+                     "bid": bid, "ask": ask, "volume": vol})
+    rows.sort(key=lambda r: r["lo"] if r["lo"] is not None else -999.0)
+    _radar[city] = {"updated": now_iso, "brackets": rows}
+
+
+def _radar_status(lo, hi, certain) -> str:
+    """Classify a bracket against the certain CLI settle bound.
+      dead   — ceiling below what the station already observed; any bid is free money
+      leader — contains the minimum certain settle (raw running max)
+      target — contains certain+1, the ~+0.8°F CLI-vs-METAR offset bracket
+      open   — still reachable, no observation verdict yet
+    """
+    if certain is None:
+        return "open"
+    if hi is not None and hi < certain:
+        return "dead"
+    if (lo is None or lo <= certain) and (hi is None or certain <= hi):
+        return "leader"
+    if (lo is None or lo <= certain + 1) and (hi is None or certain + 1 <= hi):
+        return "target"
+    return "open"
+
+
 def _held_tickers() -> set:
     """Tickers we currently hold a position in (open / pending_sell / resting)."""
     positions, _ = _read_json(POSITIONS_FILE)
@@ -289,6 +332,7 @@ async def poll_prices_once() -> None:
             except Exception:
                 continue
             _ingest(city, mk, now_iso, held)
+            _radar_ingest(city, mk, now_iso)
     finally:
         await client.stop()
     _evict()
@@ -703,6 +747,37 @@ async def handle_temps(_request: web.Request) -> web.Response:
     return web.json_response({**_temps_meta, "cities": cities}, headers={"Cache-Control": "no-store"})
 
 
+async def handle_radar(_request: web.Request) -> web.Response:
+    """Opportunity radar: today's full ladder per city classified against the
+    settlement station's observed running max (the 2026-07-02 dead-bracket
+    find, as a live panel instead of a Discord ping)."""
+    from core.obs import certain_min_settle, corroborated_extreme
+
+    cities = {}
+    for city, ladder in _radar.items():
+        rec = _temps.get(city) or {}
+        temps = [p.get("temp") for p in rec.get("series") or [] if p.get("temp") is not None]
+        extreme = corroborated_extreme(temps, "high")
+        certain = certain_min_settle(extreme) if extreme is not None else None
+        brackets = []
+        for b in ladder["brackets"]:
+            status = _radar_status(b["lo"], b["hi"], certain)
+            alert = status == "dead" and (b["bid"] or 0) >= 5
+            brackets.append({**b, "status": status, "alert": alert})
+        cities[city] = {
+            "running_max": round(extreme, 1) if extreme is not None else None,
+            "certain_settle": certain,
+            "obs_count": len(temps),
+            "obs_updated": rec.get("updated"),
+            "prices_updated": ladder["updated"],
+            "brackets": brackets,
+            "alert_count": sum(1 for b in brackets if b["alert"]),
+        }
+    return web.json_response(
+        {"enabled": PRICES_ENABLED and TEMPS_ENABLED, "cities": cities},
+        headers={"Cache-Control": "no-store"})
+
+
 async def handle_health(_request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "mode": "PAPER" if PAPER_MODE else "LIVE"})
 
@@ -714,6 +789,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/scan", handle_scan)
     app.router.add_get("/api/prices", handle_prices)
     app.router.add_get("/api/temps", handle_temps)
+    app.router.add_get("/api/radar", handle_radar)
     app.router.add_get("/healthz", handle_health)
     if PRICES_ENABLED or TEMPS_ENABLED:
         app.on_startup.append(_start_poller)

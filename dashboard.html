@@ -705,6 +705,21 @@ body::before {
 .temp-peak{stroke:var(--red);stroke-width:1.2;stroke-dasharray:6 3;opacity:0.7;vector-effect:non-scaling-stroke;}
 .temp-peak-lab{fill:var(--red);font-family:var(--mono);font-size:10.5px;font-weight:600;}
 
+.rd-row{display:flex;align-items:flex-start;gap:12px;margin:10px 0;}
+.rd-city{min-width:170px;line-height:1.5;}
+.rd-city b{font-size:13px;letter-spacing:.5px;}
+.rd-city span{display:block;color:var(--text-dim);font-family:var(--mono);font-size:11px;}
+.rd-strip{display:flex;flex-wrap:wrap;gap:6px;flex:1;}
+.rd-chip{border:1px solid var(--border);border-radius:6px;padding:4px 9px;text-align:center;}
+.rd-dead{opacity:.35;}
+.rd-leader{border-color:var(--cyan);}
+.rd-target{border-color:var(--amber);}
+.rd-alert{opacity:1;border-color:var(--red);animation:rd-pulse 1.2s ease-in-out infinite alternate;}
+@keyframes rd-pulse{from{box-shadow:0 0 2px var(--red);}to{box-shadow:0 0 10px var(--red);}}
+.rd-tag{color:var(--red);font-weight:700;font-size:10px;letter-spacing:.5px;}
+.rd-lab{font-size:11px;color:var(--text-dim);white-space:nowrap;}
+.rd-px{font-family:var(--mono);font-size:12px;}
+.rd-alert-badge{background:var(--red);color:#fff;border-radius:10px;padding:1px 9px;font-size:11px;font-weight:700;margin-left:8px;vertical-align:2px;}
 </style>
 </head>
 <body>
@@ -717,6 +732,7 @@ body::before {
 </div>
 <div id="prices"></div>
 <div id="temps"></div>
+<div id="radar"></div>
 <div id="app"></div>
 
 <script>
@@ -1460,6 +1476,45 @@ function renderTemps(data){
   </div>`;
 }
 
+function renderRadar(data){
+  const el = document.getElementById('radar');
+  if (!el) return;
+  if (!data || data.enabled===false){ el.innerHTML=''; return; }
+  const cities = data.cities || {};
+  const keys = Object.keys(cities).sort();
+  if (!keys.length){
+    el.innerHTML = `<div class="live-section"><div class="ls-title">Opportunity radar</div>
+      <div class="price-empty">Waiting for first ladder poll…</div></div>`;
+    return;
+  }
+  let totalAlerts = 0;
+  const rows = keys.map(city => {
+    const c = cities[city];
+    totalAlerts += (c.alert_count||0);
+    const rm = c.running_max!=null ? c.running_max.toFixed(1)+'°' : '—';
+    const cs = c.certain_settle!=null ? 'settles ≥'+c.certain_settle+'°' : 'no obs verdict yet';
+    const chips = (c.brackets||[]).map(b => {
+      const bid = b.bid!=null ? b.bid : '–';
+      const ask = b.ask!=null ? b.ask : '–';
+      const cls = 'rd-chip rd-'+b.status + (b.alert?' rd-alert':'');
+      const tag = b.alert ? `<div class="rd-tag">DEAD BID ${b.bid}¢</div>` : '';
+      return `<div class="${cls}" title="${esc(b.ticker)} — ${b.status}">${tag}
+        <div class="rd-lab">${esc(b.label||b.ticker)}</div>
+        <div class="rd-px">${bid}/${ask}¢</div></div>`;
+    }).join('');
+    return `<div class="rd-row">
+      <div class="rd-city"><b>${esc(city)}</b><span>obs max ${rm}</span><span>${cs}</span></div>
+      <div class="rd-strip">${chips}</div></div>`;
+  }).join('');
+  const badge = totalAlerts ? `<span class="rd-alert-badge">${totalAlerts} dead-bracket bid${totalAlerts>1?'s':''} — free money</span>` : '';
+  el.innerHTML = `<div class="live-section">
+    <div class="price-head">
+      <div class="ls-title" style="margin:0">Opportunity radar${badge}</div>
+      <div class="sb-meta">dead = obs-killed · leader = holds running max · target = +1° CLI offset</div>
+    </div>
+    ${rows}</div>`;
+}
+
 function setConn(ok){
   const el = document.getElementById('conn');
   if (el){ el.className = ok ? 'sb-meta ok' : 'sb-meta bad'; el.textContent = ok ? '● connected' : '● disconnected'; }
@@ -1491,6 +1546,11 @@ async function tick(){
       const tr = await fetch('/api/temps', { cache: 'no-store' });
       if (tr.ok) renderTemps(await tr.json());
     } catch (_) { /* keep last chart */ }
+    // Opportunity radar (obs-vs-bracket join; independent of the charts)
+    try {
+      const rr = await fetch('/api/radar', { cache: 'no-store' });
+      if (rr.ok) renderRadar(await rr.json());
+    } catch (_) { /* keep last radar */ }
   } catch (err) {
     setConn(false);
     if (!document.querySelector('#live .status-banner')){
