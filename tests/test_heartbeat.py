@@ -84,65 +84,18 @@ class TestReadHeartbeats:
         assert read_heartbeats() == {}
 
 
-class TestCheckHeartbeats:
-    """check_heartbeats() staleness detection."""
+class TestSingleChecker:
+    """Staleness checking lives in watchdog.py only (folded 2026-07)."""
 
-    def test_all_healthy(self):
-        """All services recently reported → no problems."""
-        from heartbeat import write_heartbeat, check_heartbeats
-        # Write heartbeats for all expected services
-        write_heartbeat("auto_scan")
-        write_heartbeat("position_monitor")
-        write_heartbeat("backtest_collector")
-        write_heartbeat("morning_check")
-        problems = check_heartbeats()
-        assert problems == []
+    def test_heartbeat_has_no_checker(self):
+        import heartbeat
+        assert not hasattr(heartbeat, "check_heartbeats")
+        assert not hasattr(heartbeat, "EXPECTED_SERVICES")
 
-    def test_missing_service(self):
-        """Service never reported → flagged as never_seen."""
-        from heartbeat import check_heartbeats
-        # Empty file → all services are never_seen
-        problems = check_heartbeats()
-        assert len(problems) > 0
-        services = [p[0] for p in problems]
-        assert "auto_scan" in services
-        statuses = {p[0]: p[1] for p in problems}
-        assert statuses["auto_scan"] == "never_seen"
-
-    def test_stale_service(self, monkeypatch):
-        """Service last reported 2 hours ago with 90-min threshold → stale."""
-        from heartbeat import write_heartbeat, check_heartbeats, ET
-        from datetime import datetime, timedelta
-
-        write_heartbeat("auto_scan")
-        write_heartbeat("position_monitor")
-        write_heartbeat("backtest_collector")
-        write_heartbeat("morning_check")
-
-        # Manually backdate auto_scan by 2 hours
-        data = json.loads(_test_heartbeat.read_text())
-        old_time = datetime.now(ET) - timedelta(hours=2)
-        data["auto_scan"]["timestamp"] = old_time.isoformat()
-        _test_heartbeat.write_text(json.dumps(data))
-
-        problems = check_heartbeats()
-        stale = [p for p in problems if p[0] == "auto_scan"]
-        assert len(stale) == 1
-        assert stale[0][1] == "stale"
-        assert stale[0][2] > 90  # More than 90 minutes old
-
-    def test_partial_health(self):
-        """Some services healthy, others missing."""
-        from heartbeat import write_heartbeat, check_heartbeats
-        write_heartbeat("auto_scan")
-        write_heartbeat("position_monitor")
-        # backtest_collector and morning_check NOT written
-        problems = check_heartbeats()
-        problem_services = {p[0] for p in problems}
-        assert "auto_scan" not in problem_services
-        assert "position_monitor" not in problem_services
-        assert "backtest_collector" in problem_services
-        assert "morning_check" in problem_services
+    def test_watchdog_is_the_checker(self):
+        import watchdog
+        assert hasattr(watchdog, "check_heartbeats")
+        assert "position_monitor" in watchdog.EXPECTED_INTERVALS
 
 
 class TestWatchdogCatchup:
