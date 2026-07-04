@@ -38,9 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import re
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -50,6 +48,12 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from config import STATIONS  # noqa: E402
+from core.obs import (  # noqa: E402
+    certain_max_settle,
+    certain_min_settle,
+    corroborated_extreme,
+    fetch_day_obs,
+)
 from dutch_book import kalshi_taker_fee_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from log_setup import get_logger  # noqa: E402
@@ -59,13 +63,7 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATE_FILE = PROJECT_ROOT / "dead_bracket_state.json"
-NWS_OBS_URL = "https://api.weather.gov/stations/{sid}/observations?start={start}&limit=500"
-
 MIN_BID_C = 5              # ignore 1-4¢ dust bids
-CORROBORATION_F = 5.0      # 2nd-most-extreme ob must be within this of the extreme
-                           # (hourly stations gap 3-4°F on fast warm-ups — KDEN
-                           # 2026-07-02; real sensor glitches run ~13°F)
-ROUNDING_BACKOFF_F = 0.1   # ob precision margin before integer rounding
 REALERT_GROWTH = 1.25      # re-alert a known ticker only if net grew 25%
 STATE_MAX_AGE_H = 48
 DEFAULT_MIN_NET_DOLLARS = 10.0
@@ -95,32 +93,11 @@ def parse_subtitle(subtitle: str | None) -> tuple[float | None, float | None] | 
     return None
 
 
-def certain_min_settle(runmax_f: float) -> int:
-    """Lowest integer the CLI max can settle at, given the observed running max."""
-    return math.floor(runmax_f - ROUNDING_BACKOFF_F + 0.5)
-
-
-def certain_max_settle(runmin_f: float) -> int:
-    """Highest integer the CLI min can settle at, given the observed running min."""
-    return math.ceil(runmin_f + ROUNDING_BACKOFF_F - 0.5)
-
-
 def is_dead(kind: str, lo: float | None, hi: float | None, certain: int) -> bool:
     """Can this bracket no longer win, given the certain settle bound?"""
     if kind == "high":
         return hi is not None and hi < certain
     return lo is not None and lo > certain
-
-
-def corroborated_extreme(values: list[float], kind: str) -> float | None:
-    """Running max/min, or None when a lone spike could be sensor error."""
-    if len(values) < 2:
-        return None
-    ordered = sorted(values, reverse=(kind == "high"))
-    extreme, second = ordered[0], ordered[1]
-    if abs(extreme - second) > CORROBORATION_F:
-        return None
-    return extreme
 
 
 def bid_proceeds_cents(yes_bids: list, min_bid: int = MIN_BID_C) -> tuple[int, int, list]:
@@ -134,22 +111,6 @@ def bid_proceeds_cents(yes_bids: list, min_bid: int = MIN_BID_C) -> tuple[int, i
         contracts += qty
         levels.append([price, qty])
     return net, contracts, sorted(levels, reverse=True)
-
-
-def fetch_day_obs(station_id: str, tz: ZoneInfo) -> list[float]:
-    """All valid temps (°F) for the station-local calendar day, via NWS API."""
-    midnight_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = midnight_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = NWS_OBS_URL.format(sid=station_id, start=start)
-    req = urllib.request.Request(url, headers={"User-Agent": "WeatherEdgeDeadBracket/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read())
-    temps = []
-    for feat in payload.get("features", []):
-        val = (feat.get("properties", {}).get("temperature") or {}).get("value")
-        if val is not None:
-            temps.append(val * 9 / 5 + 32)
-    return temps
 
 
 def load_state() -> dict:
