@@ -157,6 +157,7 @@ def analyze(max_entry: float, slippage: float) -> dict:
             resolved[(city, day)] = (winner, station, brackets)
 
     fills: list[dict] = []
+    pinned: list[dict] = []
     skips: dict[str, int] = {}
     for (city, day), snaps in sorted(snapshots.items()):
         info = resolved.get((city, day))
@@ -187,20 +188,29 @@ def analyze(max_entry: float, slippage: float) -> dict:
             row = snap[fav_token]
             ask = row.get("yes_ask")
             depth = row.get("ask_cum5c") or 0
-            if ask is None or not 0 < ask <= max_entry:
+            if ask is None or not 0 < ask < 100:
                 continue
             won = fav_token == winner_token
-            fills.append({
+            record = {
                 "city": city, "day": day, "cutoff": cutoff, "runmax": runmax,
                 "ask": ask, "won": won,
                 "ev_cents": entry_ev_cents(ask, won, slippage),
                 "depth_dollars": depth_dollars(depth, ask),
-            })
+            }
+            # Pinned favorites (ask > max_entry) are NOT skipped — they're the
+            # cases the old 5-95 capture band hid. Bucketing them lets the
+            # report show "favorite already priced, no cheap entry" explicitly
+            # rather than as a blind no-snapshot skip.
+            (pinned if ask > max_entry else fills).append(record)
 
     by_cutoff = {str(c): gate_verdict([f for f in fills if f["cutoff"] == c])
                  for c in CUTOFFS}
+    pinned_win = sum(1 for p in pinned if p["won"]) / len(pinned) if pinned else 0.0
     return {"fills": fills, "overall": gate_verdict(fills),
             "by_cutoff": by_cutoff, "skips": skips,
+            "pinned": {"n": len(pinned), "win_rate": round(pinned_win, 3),
+                       "median_ask": round(statistics.median(p["ask"] for p in pinned), 1)
+                       if pinned else 0.0},
             "params": {"max_entry": max_entry, "slippage": slippage},
             "days_covered": days}
 
@@ -218,6 +228,11 @@ def format_report(result: dict) -> str:
     for c, v in result["by_cutoff"].items():
         lines.append(f"  {c}:00 — EV {v['mean_ev_cents']:+.1f}¢, {v['n_fills']} fills, "
                      f"${v['median_depth_dollars']:.0f} depth, win {v['win_rate']:.0%}")
+    pin = result.get("pinned", {})
+    if pin.get("n"):
+        lines.append(f"pinned favorites (ask>{result['params']['max_entry']:.0f}¢, no cheap "
+                     f"entry): {pin['n']} at median {pin['median_ask']:.0f}¢, "
+                     f"win {pin['win_rate']:.0%} — edge already priced out")
     if result.get("skips"):
         lines.append("skips: " + ", ".join(f"{k}={v}" for k, v in result["skips"].items()))
     lines.append(f"gate: EV≥{GATE_MIN_EV_C}¢ AND ≥{GATE_MIN_FILLS} fills AND "

@@ -66,10 +66,16 @@ OUT_DIR = PROJECT_ROOT / "logs" / "shadow_books"
 GAMMA_URL = "https://gamma-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
 
-# Live-priced band: brackets worth a book fetch. Pinned (>95c) and dead (<5c)
-# quotes carry no capacity information for the sweep.
-LIVE_ASK_MIN_C = 5
-LIVE_ASK_MAX_C = 95
+# Capture band: brackets worth a book fetch. Widened to 1-99c on 2026-07-05
+# for the Poly gate — the favorite-so-far bracket at the 4-6pm cutoff is
+# usually ALREADY PINNED (96-99c), so a 5-95 band silently dropped exactly
+# the entries the gate must measure. Capturing them lets the analyzer confirm
+# "no edge, favorite already priced" instead of a blind no-snapshot skip. The
+# `live` flag on each row still marks the tradeable 5-95 core for the sweep.
+LIVE_ASK_MIN_C = 1
+LIVE_ASK_MAX_C = 99
+TRADEABLE_ASK_MIN_C = 5   # the sweep's actionable core, flagged per row
+TRADEABLE_ASK_MAX_C = 95
 BOOK_LEVELS = 5          # top-of-book levels persisted per side
 DEPTH_BAND_C = 5         # cumulative-depth band above the best ask, cents
 
@@ -189,7 +195,13 @@ def poly_book_metrics(book: dict) -> dict | None:
 
 
 def is_live_priced(yes_ask_cents) -> bool:
+    """Worth capturing a book for (wide band — includes pinned favorites)."""
     return yes_ask_cents is not None and LIVE_ASK_MIN_C <= yes_ask_cents <= LIVE_ASK_MAX_C
+
+
+def is_tradeable(yes_ask_cents) -> bool:
+    """The sweep's actionable core (5-95c) — flagged per row, not a fetch gate."""
+    return yes_ask_cents is not None and TRADEABLE_ASK_MIN_C <= yes_ask_cents <= TRADEABLE_ASK_MAX_C
 
 
 def _gamma_cents(price) -> float | None:
@@ -246,7 +258,7 @@ async def capture_kalshi(now_utc: datetime, force: bool) -> list[dict]:
                     continue
                 if metrics is None:
                     continue
-                rows.append({**base, "live": True, **metrics})
+                rows.append({**base, "live": is_tradeable(metrics["yes_ask"]), **metrics})
     finally:
         await client.stop()
     return rows
@@ -334,7 +346,7 @@ def capture_poly(now_utc: datetime, force: bool) -> list[dict]:
                 continue
             if metrics is None:
                 continue
-            rows.append({**base, "live": is_live_priced(metrics["yes_ask"]), **metrics})
+            rows.append({**base, "live": is_tradeable(metrics["yes_ask"]), **metrics})
             time.sleep(0.1)
     return rows
 

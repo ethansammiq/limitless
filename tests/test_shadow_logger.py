@@ -22,11 +22,19 @@ class TestWindows:
 
 class TestLivePriced:
     def test_band(self):
-        assert sl.is_live_priced(5)
-        assert sl.is_live_priced(95)
-        assert not sl.is_live_priced(4)
-        assert not sl.is_live_priced(96)
+        # capture band widened to 1-99 (pinned favorites for the Poly gate)
+        assert sl.is_live_priced(1)
+        assert sl.is_live_priced(99)
+        assert sl.is_live_priced(97)          # pinned favorite — now captured
+        assert not sl.is_live_priced(0)
+        assert not sl.is_live_priced(100)
         assert not sl.is_live_priced(None)
+
+    def test_tradeable_core(self):
+        # the sweep's actionable band, flagged per row (not a fetch gate)
+        assert sl.is_tradeable(5) and sl.is_tradeable(95)
+        assert not sl.is_tradeable(4) and not sl.is_tradeable(96)
+        assert not sl.is_tradeable(None)
 
 
 class TestKalshiBookMetrics:
