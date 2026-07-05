@@ -3,9 +3,12 @@
 Tests for Kalshi API client.
 """
 
+import asyncio
+import uuid
+
 import pytest
 
-from kalshi_client import KalshiClient, KalshiAPIError, KalshiRateLimitError
+from kalshi_client import KalshiClient, KalshiAPIError, KalshiRateLimitError, normalize_order
 
 
 # =============================================================================
@@ -94,6 +97,201 @@ class TestMonotonicTimestamp:
         now_ms = int(time.time() * 1000)
         # Should be within 1 second of real time
         assert abs(ts - now_ms) < 1000
+
+
+# =============================================================================
+# V2 ORDER ENDPOINT TESTS
+# =============================================================================
+
+def _capture_requests(client, response):
+    """Replace client._req_safe with a stub that records calls."""
+    calls = []
+
+    async def fake_req_safe(method, path, data=None, auth=False):
+        calls.append({"method": method, "path": path, "data": data, "auth": auth})
+        return response
+
+    client._req_safe = fake_req_safe
+    return calls
+
+
+class TestPlaceOrderV2:
+    """place_order translates the V1 signature to the V2 single-book schema."""
+
+    def test_buy_yes_translates_to_bid(self, client):
+        calls = _capture_requests(client, {"order_id": "o1", "remaining_count": "10.00"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 10, 12))
+        call = calls[0]
+        assert call["method"] == "POST"
+        assert call["path"] == "/portfolio/events/orders"
+        assert call["auth"] is True
+        assert call["data"]["side"] == "bid"
+        assert call["data"]["price"] == "0.1200"
+        assert call["data"]["count"] == "10.00"
+        assert call["data"]["time_in_force"] == "good_till_canceled"
+        assert call["data"]["self_trade_prevention_type"] == "taker_at_cross"
+        # V1-only fields must not leak into the V2 payload
+        assert "action" not in call["data"]
+        assert "yes_price" not in call["data"]
+        assert "type" not in call["data"]
+
+    def test_sell_yes_translates_to_ask(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "sell", 5, 90))
+        assert calls[0]["data"]["side"] == "ask"
+        assert calls[0]["data"]["price"] == "0.9000"
+
+    def test_buy_no_translates_to_ask_at_complement(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "no", "buy", 5, 88))
+        assert calls[0]["data"]["side"] == "ask"
+        assert calls[0]["data"]["price"] == "0.1200"
+
+    def test_sell_no_translates_to_bid_at_complement(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "no", "sell", 5, 88))
+        assert calls[0]["data"]["side"] == "bid"
+        assert calls[0]["data"]["price"] == "0.1200"
+
+    def test_invalid_side_raises_before_any_request(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        with pytest.raises(ValueError):
+            asyncio.run(client.place_order("KXHIGHNY-T1", "bid", "buy", 5, 12))
+        assert calls == []
+
+    def test_client_order_id_passes_through_verbatim(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        cid = "11111111-2222-3333-4444-555555555555"
+        result = asyncio.run(
+            client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12, client_order_id=cid)
+        )
+        assert calls[0]["data"]["client_order_id"] == cid
+        assert result["order"]["client_order_id"] == cid
+
+    def test_client_order_id_generated_when_absent(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        # Must be a valid UUID for Kalshi's 24h dedup window
+        uuid.UUID(calls[0]["data"]["client_order_id"])
+
+    def test_expiration_time_included_when_set(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(
+            client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12, expiration_time=1783200900)
+        )
+        assert calls[0]["data"]["expiration_time"] == 1783200900
+
+    def test_expiration_time_omitted_by_default(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        assert "expiration_time" not in calls[0]["data"]
+
+    def test_market_order_maps_to_immediate_or_cancel(self, client):
+        calls = _capture_requests(client, {"order_id": "o1"})
+        asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12, order_type="market"))
+        assert calls[0]["data"]["time_in_force"] == "immediate_or_cancel"
+
+    def test_result_wrapped_with_synthesized_resting_status(self, client):
+        _capture_requests(client, {"order_id": "o1", "fill_count": "0.00", "remaining_count": "5.00"})
+        result = asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        order = result["order"]
+        assert order["order_id"] == "o1"
+        assert order["status"] == "resting"
+        assert order["side"] == "yes"
+        assert order["action"] == "buy"
+
+    def test_result_executed_when_fully_filled(self, client):
+        _capture_requests(client, {"order_id": "o1", "fill_count": "5.00", "remaining_count": "0.00"})
+        result = asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        assert result["order"]["status"] == "executed"
+
+    def test_explicit_status_preserved(self, client):
+        _capture_requests(client, {"order": {"order_id": "o1", "status": "canceled"}})
+        result = asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        assert result["order"]["status"] == "canceled"
+
+    def test_empty_response_returns_empty_dict(self, client):
+        _capture_requests(client, {})
+        result = asyncio.run(client.place_order("KXHIGHNY-T1", "yes", "buy", 5, 12))
+        assert result == {}
+
+
+class TestGetOrdersV2:
+    """get_orders stays on GET /portfolio/orders and normalizes V2 objects."""
+
+    def test_path_and_params(self, client):
+        calls = _capture_requests(client, {"orders": []})
+        asyncio.run(client.get_orders(ticker="KXHIGHNY-T1", status="resting"))
+        assert calls[0]["method"] == "GET"
+        assert calls[0]["path"] == "/portfolio/orders?status=resting&ticker=KXHIGHNY-T1"
+        assert calls[0]["auth"] is True
+
+    def test_orders_are_normalized(self, client):
+        _capture_requests(client, {"orders": [{
+            "order_id": "o1",
+            "ticker": "KXHIGHNY-T1",
+            "outcome_side": "yes",
+            "book_side": "bid",
+            "yes_price_dollars": "0.1200",
+            "remaining_count_fp": "5.00",
+        }]})
+        orders = asyncio.run(client.get_orders())
+        assert orders[0]["action"] == "buy"
+        assert orders[0]["side"] == "yes"
+        assert orders[0]["yes_price"] == 12
+        assert orders[0]["remaining_count"] == 5
+
+
+class TestCancelOrderV2:
+    """cancel_order uses the V2 events path."""
+
+    def test_delete_v2_path(self, client):
+        calls = _capture_requests(client, {"order_id": "o1", "reduced_by": "5.00"})
+        result = asyncio.run(client.cancel_order("o1"))
+        assert calls[0]["method"] == "DELETE"
+        assert calls[0]["path"] == "/portfolio/events/orders/o1"
+        assert calls[0]["auth"] is True
+        assert result["order_id"] == "o1"
+
+
+class TestNormalizeOrder:
+    """normalize_order backfills legacy V1 fields from the V2 order schema."""
+
+    @pytest.mark.parametrize("outcome, book, action", [
+        ("yes", "bid", "buy"),
+        ("yes", "ask", "sell"),
+        ("no", "ask", "buy"),
+        ("no", "bid", "sell"),
+    ])
+    def test_action_backfill(self, outcome, book, action):
+        order = normalize_order({"outcome_side": outcome, "book_side": book})
+        assert order["action"] == action
+        assert order["side"] == outcome
+
+    def test_prices_and_counts_backfilled(self):
+        order = normalize_order({
+            "outcome_side": "no",
+            "book_side": "ask",
+            "no_price_dollars": "0.8800",
+            "fill_count_fp": "3.00",
+            "remaining_count_fp": "2.00",
+            "initial_count_fp": "5.00",
+        })
+        assert order["no_price"] == 88
+        assert order["fill_count"] == 3
+        assert order["remaining_count"] == 2
+        assert order["initial_count"] == 5
+
+    def test_legacy_paper_order_untouched(self):
+        paper = {"order_id": "paper_1", "side": "yes", "action": "buy",
+                 "count": 5, "price": 12, "status": "RESTING"}
+        assert normalize_order(dict(paper)) == paper
+
+    def test_existing_legacy_fields_not_overwritten(self):
+        order = normalize_order({"side": "no", "action": "sell",
+                                 "outcome_side": "yes", "book_side": "bid"})
+        assert order["side"] == "no"
+        assert order["action"] == "sell"
 
 
 # =============================================================================

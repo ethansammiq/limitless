@@ -163,7 +163,7 @@ RECOMMENDATION: [BUY / PASS]
 - **Base:** `https://api.elections.kalshi.com/trade-api/v2`
 - **Auth:** RSA-PSS signature (key in `.env`)
 - **Rate limit:** 10 req/sec, 0.1s min between requests
-- **Key endpoints:** `/markets`, `/portfolio/positions`, `/portfolio/balance`, `/portfolio/orders`
+- **Key endpoints:** `/markets`, `/portfolio/positions`, `/portfolio/balance`, `/portfolio/orders` (reads only — order create/cancel moved to `/portfolio/events/orders`, V2 single-book schema; the V1 POST/DELETE 410 since 2026-07)
 
 ### Open-Meteo Ensemble (free, no auth)
 - **Base:** `https://ensemble-api.open-meteo.com/v1/ensemble`
