@@ -44,6 +44,9 @@ POSITIONS_FILE = PROJECT_ROOT / "positions_paper.json"
 FILLS_LOG = PROJECT_ROOT / "logs" / "live_fills.jsonl"
 BALANCE_LOG = PROJECT_ROOT / "logs" / "live_balance.jsonl"
 DEAD_DIR = PROJECT_ROOT / "logs" / "dead_brackets"
+# Written by backtest/sniper_scorecard.py (its own cron); read here so the
+# digest stays network-free (no settlement lookups from this job).
+SCORECARD_VERDICT = PROJECT_ROOT / "backtest" / "sniper_scorecard_verdict.json"
 
 
 def _parse_ts(value) -> datetime | None:
@@ -157,7 +160,27 @@ def build_digest(days: int) -> tuple[str, str]:
     lines.append(f"• {sw['findings']} finding(s) on {sw['distinct_brackets']} bracket(s), "
                  f"${sw['total_net_dollars']:.2f} total capturable")
 
+    lines.append("\n**CLI sniper scorecard:**")
+    lines.append("• " + sniper_scorecard_line())
+
     return f"📊 Weather Edge weekly digest — last {days}d", "\n".join(lines)
+
+
+def sniper_scorecard_line() -> str:
+    """One-line headline from the scorecard's verdict artifact (network-free)."""
+    try:
+        v = json.loads(SCORECARD_VERDICT.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "no scorecard verdict yet — schedule backtest/sniper_scorecard.py"
+    o = v.get("overall") or {}
+    if not o.get("n"):
+        return f"no settled findings yet ({v.get('pending', 0)} pending)"
+    cert = v.get("by_certainty") or {}
+    cert_str = ", ".join(f"{k} {c['mean_per_contract_cents']:+.0f}¢×{c['n']}"
+                         for k, c in cert.items())
+    return (f"{o['n']} settled: hit {o['hit_rate']:.0%}, "
+            f"{o['mean_per_contract_cents']:+.1f}¢/contract, "
+            f"${o['total_dollars']:+.2f} realized ({cert_str})")
 
 
 def main() -> None:
