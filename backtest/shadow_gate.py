@@ -155,7 +155,11 @@ def resolve_event(cache: dict, city: str, day: str) -> dict | None:
                 break
         if station and winner:
             result = {"station": station, "winner": list(winner)}
-    events_cache[key] = result
+    # Cache only resolved events: an unresolved lookup is a statement about
+    # NOW (markets settle the next morning), and caching it would freeze
+    # yesterday's "not yet" into every future re-run.
+    if result:
+        events_cache[key] = result
     return result
 
 
