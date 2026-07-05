@@ -19,6 +19,8 @@ CRON (ET)
   morning_check       → 6:30 — pre-settlement position evaluation
   backtest_collector  → 8:00 — settlement data collection
   bias_collector      → 8:30 — model bias rows (needs backtest row first)
+  audit_coverage      → Sun 17:30 — series-drift / parse-health self-audit
+  sniper_scorecard    → Sun 17:45 — sniper journal → settlement scorecard
   weekly_digest       → Sun 18:00 — per-strategy P&L + base-rate report
 ```
 
@@ -34,9 +36,13 @@ always-on VPS is the fix for the entire sleep-related incident class
 
 ## Provider choice (minmax)
 
-This workload is tiny — ~11 cron jobs that fire and exit, one small dashboard,
-peak RAM a few hundred MB. The floor is **1 GB RAM / 1 shared vCPU / ~10 GB /
-US-East**. Anything more is headroom, not need.
+This workload is tiny — 13 cron services that fire and exit, one small
+dashboard, peak RAM a few hundred MB. The floor is **1 GB RAM / 1 shared vCPU
+/ ~10 GB**. US-East is a nice-to-have, not a need: the VPS is alert-only
+(orders are human-run from the Mac via take.py), so ~90ms EU latency is
+irrelevant next to the ~10-min repricing windows it races. Deployed reality
+(2026-07-05): Hetzner CX23 Helsinki, $7.09/mo — CAX/CX stock was EU-only and
+Hetzner's US tier started at $23.59.
 
 | Provider | ~$/mo | specs | login user | note |
 |----------|-------|-------|------------|------|
@@ -101,7 +107,7 @@ tail -f /var/log/weather-edge/*.log
 Then from the Mac, tunnel to the dashboard:
 
 ```bash
-ssh -L 8787:127.0.0.1:8787 ubuntu@<ip>
+ssh -L 8787:127.0.0.1:8787 <user>@<ip>    # root@ on Hetzner/DO/Vultr
 # open http://127.0.0.1:8787 — radar + heartbeats should be live
 ```
 

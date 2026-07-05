@@ -86,7 +86,11 @@ upload_secrets() {
 
     if [ -f "$LOCAL_DIR/.env" ]; then
         $SCP_CMD "$LOCAL_DIR/.env" "$REMOTE_USER@$SERVER:$REMOTE_DIR/.env"
-        echo "  ✅ .env uploaded"
+        # The Mac .env carries a Mac-absolute key path; rewrite it for the
+        # server or every authenticated call silently 401s (live_watch then
+        # journals balance $0.00 and position_monitor preflight-fails).
+        $SSH_CMD "$REMOTE_USER@$SERVER" "sed -i 's|^KALSHI_PRIVATE_KEY_PATH=.*|KALSHI_PRIVATE_KEY_PATH=$REMOTE_DIR/kalshi_private_key.pem|' $REMOTE_DIR/.env"
+        echo "  ✅ .env uploaded (key path rewritten for $REMOTE_DIR)"
     else
         echo "  ⚠ .env not found at $LOCAL_DIR/.env"
     fi
@@ -147,10 +151,10 @@ upload_state() {
         fi
     done
     rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/backtest/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/backtest/"
-    for d in shadow_books dead_brackets; do
+    for d in shadow_books dead_brackets cli_sniper; do
         [ -d "$LOCAL_DIR/logs/$d" ] && rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/logs/$d/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$d/"
     done
-    for f in live_fills.jsonl live_positions.jsonl live_balance.jsonl; do
+    for f in live_fills.jsonl live_positions.jsonl live_balance.jsonl trade_events.jsonl; do
         [ -f "$LOCAL_DIR/logs/$f" ] && $SCP_CMD "$LOCAL_DIR/logs/$f" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$f"
     done
     echo "  ✅ backtest data + journals synced"
