@@ -48,7 +48,13 @@ class TestWindows:
         assert cs.window_kind(18.5) is None
 
     def test_morning(self):
-        assert cs.window_kind(5.5) == "morning"
+        # Window measured from real issuance times (01:13-04:51 local across
+        # 16 offices, backtest/cli_timing.py 2026-07-05).
+        assert cs.window_kind(1.0) == "morning"
+        assert cs.window_kind(1.5) == "morning"   # LOX/SEW finals ~01:30
+        assert cs.window_kind(4.9) == "morning"   # FFC straggler 04:51
+        assert cs.window_kind(0.9) is None
+        assert cs.window_kind(5.5) is None        # old window start — now closed
         assert cs.window_kind(8.6) is None
 
     def test_midday_closed(self):

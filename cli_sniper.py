@@ -75,7 +75,10 @@ PRODUCT_URL = ("https://forecast.weather.gov/product.php?site={wfo}"
 USER_AGENT = "WeatherEdgeCLISniper/1.0"
 
 AFTERNOON_WINDOW = (15.5, 18.5)   # local fractional hours
-MORNING_WINDOW = (5.5, 8.5)
+# Morning finals actually issue 01:13-04:51 local (measured across 16 offices
+# by backtest/cli_timing.py on the journal, 2026-07-05); the old (5.5, 8.5)
+# window missed every one by ~4h, ceding the reprice to settlement bots.
+MORNING_WINDOW = (1.0, 5.5)
 SEEN_MAX_AGE_H = 72
 ALERTED_MAX_AGE_H = 48
 BUY_MAX_ASK_FINAL_C = 85          # certain winner: buy up to this ask
