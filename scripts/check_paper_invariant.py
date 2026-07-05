@@ -53,7 +53,7 @@ async def main() -> int:
             await send_discord_alert(
                 title="⚠ Paper balance drift (manual check)",
                 description=f"Persisted ${loaded:.2f} vs ledger ${ledger:.2f} (drift ${drift:+.2f}).",
-                color=0xFF6600, context="balance_invariant_cli",
+                color=0xFF6600, context="balance_invariant_cli", ledger="paper",
             )
             print("  Discord alert sent")
         except Exception as e:  # noqa: BLE001

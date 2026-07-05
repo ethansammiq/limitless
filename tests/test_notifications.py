@@ -239,3 +239,35 @@ class TestSendWithReplay:
         asyncio.run(send_discord_embeds([{"title": "X"}]))
         assert notifications.FALLBACK_FILE.exists()
         assert "X" in notifications.FALLBACK_FILE.read_text()
+
+
+class TestLedgerTags:
+    """Paper vs real-money tagging (2026-07-05: a PAPER position warning
+    read exactly like a live loss on the user's phone)."""
+
+    def test_explicit_paper(self):
+        assert notifications.tag_title("POSITION WARNING", ledger="paper") \
+            == "🧪 SIM · POSITION WARNING"
+
+    def test_explicit_live(self):
+        assert notifications.tag_title("Fill detected", ledger="live") \
+            == "💰 REAL · Fill detected"
+
+    def test_context_map_real_money_surfaces(self):
+        for ctx in ("live_watch", "cli_sniper", "dead_bracket_sweeper"):
+            assert notifications.tag_title("t", context=ctx).startswith("💰 REAL")
+
+    def test_context_map_paper_engine(self):
+        assert notifications.tag_title("t", context="auto_trader").startswith("🧪 SIM")
+
+    def test_system_alerts_untagged(self):
+        for ctx in ("watchdog", "weekly_digest", "audit_coverage", ""):
+            assert notifications.tag_title("WATCHDOG ALERT", context=ctx) == "WATCHDOG ALERT"
+
+    def test_explicit_ledger_beats_context(self):
+        assert notifications.tag_title("t", context="auto_trader", ledger="live") \
+            == "💰 REAL · t"
+
+    def test_idempotent(self):
+        once = notifications.tag_title("t", ledger="paper")
+        assert notifications.tag_title(once, ledger="paper") == once

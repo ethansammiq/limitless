@@ -41,6 +41,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from log_setup import get_logger
+from functools import partial
+
 from kalshi_client import KalshiClient
 from position_store import register_position
 from notifications import send_discord_alert
@@ -52,6 +54,12 @@ ET = ZoneInfo("America/New_York")
 
 # Risk limits (single source of truth: config.py)
 from config import MAX_ENTRY_PRICE_CENTS as MAX_ENTRY_PRICE, MAX_POSITION_PCT
+from config import PAPER_TRADING_MODE
+
+# Trade confirmations from this executor concern whichever ledger the broker
+# runs — tag them so simulation fills can never read like real money.
+send_discord_alert = partial(
+    send_discord_alert, ledger="paper" if PAPER_TRADING_MODE else "live")
 
 
 async def send_discord_confirmation(ticker: str, side: str, price: int, qty: int, cost: float, status: str):

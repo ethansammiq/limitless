@@ -222,20 +222,47 @@ def _chunk_embeds(embeds: list[dict]) -> list[list[dict]]:
 
 UTC = ZoneInfo("UTC")
 
+# Ledger tags — a phone-glance must tell simulation from real money
+# (2026-07-05: a PAPER position warning read exactly like a live loss).
+# Explicit `ledger` wins; otherwise the sending context implies it.
+LEDGER_TAGS = {"paper": "🧪 SIM", "live": "💰 REAL"}
+_CONTEXT_LEDGER = {
+    # Real-money surfaces: the live-account watcher, and the opportunity
+    # alerts whose embedded take.py commands place real orders.
+    "live_watch": "live",
+    "cli_sniper": "live",
+    "dead_bracket_sweeper": "live",
+    # The KDE/auto engine trades only the paper ledger.
+    "auto_trader": "paper",
+}
+
+
+def tag_title(title: str, context: str = "", ledger: str | None = None) -> str:
+    """Prefix the embed title with the ledger tag; idempotent, system
+    alerts (watchdog/digest/audit) stay untagged."""
+    tag = LEDGER_TAGS.get(ledger or _CONTEXT_LEDGER.get(context, ""))
+    if not tag or title.startswith(tag):
+        return title
+    return f"{tag} · {title}"
+
 
 async def send_discord_alert(
     title: str,
     description: str,
     color: int = 0xFF6600,
     context: str = "",
+    ledger: str | None = None,
 ):
     """
     Send a single Discord embed alert with retry and fallback.
 
     Used by position_monitor.py and execute_trade.py for simple alerts.
+    `ledger` ("paper"|"live") tags the title so simulation noise can never
+    be mistaken for real money; contexts with an unambiguous ledger are
+    tagged automatically.
     """
     embed = {
-        "title": title,
+        "title": tag_title(title, context, ledger),
         "description": description,
         "color": color,
         # Discord expects UTC ISO 8601 timestamps for embed timestamps.

@@ -37,10 +37,19 @@ from paper_accounting import settle_position_record, rebuild_balance, balance_dr
 # proceeds within a cycle; only alert when drift exceeds this (the corruption
 # we saw was $2,000+). The per-cycle sync auto-corrects regardless.
 BALANCE_DRIFT_ALERT_USD = 1.00
+from functools import partial
+
+from config import PAPER_TRADING_MODE
 from notifications import send_discord_alert
 from preflight import preflight_check
 from log_setup import get_logger
 from trade_events import log_event, TradeEvent
+
+# Every alert from this module concerns whichever ledger the broker runs —
+# tag them all so a PAPER position warning can never read like real money
+# (it did on 2026-07-05).
+send_discord_alert = partial(
+    send_discord_alert, ledger="paper" if PAPER_TRADING_MODE else "live")
 
 logger = get_logger(__name__)
 
