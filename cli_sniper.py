@@ -130,6 +130,36 @@ def parse_product(text: str) -> ParsedCLI | None:
     )
 
 
+# Same-day products issued before mid-afternoon (e.g. a 07:31 local "so far"
+# report) carry no daily-extreme information — the real floor is the ~16:30
+# issue. 2026-07-05: three such products alerted false 1¢ "certain winners"
+# (AUS/SAT/DEN) because the AS-OF regex missed them; finality now comes from
+# the calendar, not the regex.
+INTRADAY_CLASSIFY_MIN_LOCAL_H = 15.0
+
+
+def effective_finality(parsed: ParsedCLI, tz: str, now_utc: datetime) -> str:
+    """'final' | 'floor' | 'skip' — trust the calendar over the AS-OF regex.
+
+    A CLI product can only FINALIZE the day BEFORE its station-local
+    issuance date. A same-day product is an intraday snapshot: meaningful
+    as a floor only from mid-afternoon on; earlier issues must not classify.
+    """
+    from backtest.cli_timing import stamp_to_utc
+
+    issued = stamp_to_utc(parsed.stamp, now_utc)
+    if issued is None:
+        return "skip"
+    local = issued.astimezone(ZoneInfo(tz))
+    issue_date = local.date().isoformat()
+    if parsed.summary_date < issue_date:
+        return "final"
+    if (parsed.summary_date == issue_date
+            and local.hour + local.minute / 60 >= INTRADAY_CLASSIFY_MIN_LOCAL_H):
+        return "floor"
+    return "skip"
+
+
 def window_kind(local_hour_frac: float) -> str | None:
     if AFTERNOON_WINDOW[0] <= local_hour_frac < AFTERNOON_WINDOW[1]:
         return "afternoon"
@@ -323,6 +353,16 @@ async def run(dry_run: bool, replay: str | None) -> None:
     await client.start()
     try:
         for parsed, group in new_parses:
+            finality = effective_finality(parsed, group[0].tz, now_utc)
+            if finality == "skip":
+                logger.info(f"{parsed.awips}: same-day pre-afternoon product "
+                            f"({parsed.summary_date}) — not classifiable")
+                if not dry_run:
+                    _journal({"ts": now_utc.isoformat(timespec="seconds"),
+                              **asdict(parsed), "skipped": "intraday",
+                              "findings": []}, now_utc)
+                continue
+            parsed.is_final = finality == "final"
             journal_entry = {"ts": now_utc.isoformat(timespec="seconds"),
                              **asdict(parsed), "findings": []}
             for ladder in group:

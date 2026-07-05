@@ -130,3 +130,43 @@ class TestFormatAlert:
         assert "1 winner buy" in title
         assert "take.py KXHIGHCHI-26JUL04-B84.5 buy yes 40 16" in body
         assert "floor" in body and "warming" in body
+
+
+class TestEffectiveFinality:
+    """Regression for 2026-07-05: 07:31-local 'so far' products (AUS/SAT/DEN)
+    were regex-marked final and alerted false 1c certain-winners."""
+
+    NOW = datetime(2026, 7, 5, 20, 30, tzinfo=timezone.utc)
+
+    def _p(self, stamp, summary, is_final=True):
+        return cs.ParsedCLI(awips="AUS", stamp=stamp, summary_date=summary,
+                            is_final=is_final, max_f=80, min_f=74)
+
+    def test_same_day_morning_product_skips(self):
+        # AUS stamp 051231 = 07:31 CDT Jul 5, summary Jul 5 -> intraday junk
+        assert cs.effective_finality(
+            self._p("051231", "2026-07-05"), "America/Chicago", self.NOW) == "skip"
+
+    def test_same_day_mountain_morning_skips(self):
+        # DEN stamp 051229 = 06:29 MDT Jul 5, summary Jul 5
+        assert cs.effective_finality(
+            self._p("051229", "2026-07-05"), "America/Denver", self.NOW) == "skip"
+
+    def test_same_day_afternoon_is_floor_even_if_regex_said_final(self):
+        # NOLA stamp 052150 = 16:50 CDT Jul 5, summary Jul 5 -> floor
+        assert cs.effective_finality(
+            self._p("052150", "2026-07-05"), "America/Chicago", self.NOW) == "floor"
+
+    def test_yesterday_summary_is_final(self):
+        # 06:31 CDT Jul 5 product summarizing Jul 4 -> genuine morning final
+        assert cs.effective_finality(
+            self._p("051131", "2026-07-04"), "America/Chicago", self.NOW) == "final"
+
+    def test_final_even_if_regex_said_floor(self):
+        assert cs.effective_finality(
+            self._p("051131", "2026-07-04", is_final=False),
+            "America/Chicago", self.NOW) == "final"
+
+    def test_bad_stamp_skips(self):
+        assert cs.effective_finality(
+            self._p("9999xx", "2026-07-05"), "America/Chicago", self.NOW) == "skip"
