@@ -44,11 +44,24 @@ logger = get_logger(__name__)
 SNIPER_JOURNAL = PROJECT_ROOT / "logs" / "cli_sniper"
 WEATHER_PREFIXES = ("KXHIGH", "KXLOWT")
 
+# Live Kalshi weather series deliberately NOT in ladders.json (verified
+# against /series metadata 2026-07-05). Aliases are dormant duplicate shells
+# (settlement URL byte-identical to an existing ladder, zero open markets);
+# the rest settle on something other than a per-station NWS CLI product, so
+# obs-based deadness logic cannot apply. Re-check if Kalshi opens markets.
+IGNORED_SERIES = {
+    "KXHIGHHOU": "alias of KXHIGHTHOU (same HGX/HOU CLI source, no markets)",
+    "KXHIGHOU": "alias of KXHIGHTHOU (same HGX/HOU CLI source, no markets)",
+    "KXHIGHTEMPDEN": "alias of KXHIGHDEN (same BOU/DEN CLI source, no markets)",
+    "KXHIGHNYD": "hourly directional NYC, AccuWeather METAR settlement",
+    "KXHIGHUS": "national US high, WPC discussion settlement — not per-station",
+}
+
 
 def missing_series(live_tickers: set[str], laddered: set[str]) -> list[str]:
     """Weather series live on Kalshi but not in ladders.json."""
     live_wx = {t for t in live_tickers if t.startswith(WEATHER_PREFIXES)}
-    return sorted(live_wx - laddered)
+    return sorted(live_wx - laddered - set(IGNORED_SERIES))
 
 
 def load_journal_products(journal_dir: Path, since: datetime) -> list[dict]:

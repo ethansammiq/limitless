@@ -9,15 +9,22 @@ from scripts.audit_coverage import (
 
 class TestMissingSeries:
     def test_finds_live_not_laddered(self):
-        live = {"KXHIGHCHI", "KXHIGHHOU", "KXLOWTNYC", "SOMEOTHER"}
+        live = {"KXHIGHCHI", "KXHIGHBUF", "KXLOWTNYC", "SOMEOTHER"}
         laddered = {"KXHIGHCHI", "KXLOWTNYC"}
-        assert missing_series(live, laddered) == ["KXHIGHHOU"]
+        assert missing_series(live, laddered) == ["KXHIGHBUF"]
 
     def test_ignores_non_weather(self):
         assert missing_series({"KXBTC", "MLBGAME"}, set()) == []
 
     def test_none_missing(self):
         assert missing_series({"KXHIGHCHI"}, {"KXHIGHCHI"}) == []
+
+    def test_known_aliases_and_incompatibles_not_flagged(self):
+        # Dormant alias shells + structurally different series (verified
+        # 2026-07-05) must not re-alarm every Sunday audit.
+        from scripts.audit_coverage import IGNORED_SERIES
+        live = set(IGNORED_SERIES) | {"KXHIGHCHI"}
+        assert missing_series(live, {"KXHIGHCHI"}) == []
 
 
 class TestParseHealth:

@@ -5,6 +5,9 @@
 # Async HTTP client for API calls (Open-Meteo, NWS, Kalshi, Discord)
 aiohttp~=3.9
 
+# Direct import in proxy_arb_engine (also an aiohttp transitive — pin it)
+yarl~=1.9
+
 # Environment variable management (.env files)
 python-dotenv~=1.0
 
@@ -17,12 +20,8 @@ numpy~=1.26
 # Retry logic with exponential backoff (Kalshi API)
 tenacity~=8.2
 
-# Structured logging
-structlog~=24.1
+# Anthropic SDK (LLM doc synthesis)
+anthropic~=0.116
 
-# Terminal formatting
-rich~=13.7
-
-# Anthropic SDK for Claude Opus 4.7 (LLM doc synthesis)
-anthropic~=0.39
-
+# Test suite (931 tests; deploy.sh runs them remotely after every sync)
+pytest~=9.1
