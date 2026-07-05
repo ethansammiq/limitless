@@ -158,21 +158,40 @@ def _append(path: Path, obj: dict) -> None:
         fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
 
 
+def reads_degraded(fills_resp) -> bool:
+    """True when the authenticated fills read failed — a real response always
+    carries a 'fills' key, while kalshi_client._req_safe degrades errors
+    (e.g. 401 from a bad key path) to {}/None. Writing a snapshot from a
+    degraded read would show a false $0.00 balance on the dashboard
+    (happened live 2026-07-05 after the VPS migration)."""
+    return not isinstance(fills_resp, dict) or "fills" not in fills_resp
+
+
 async def run(threshold: int, dry_run: bool) -> None:
     import os
 
     from kalshi_client import KalshiClient
 
+    key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+    if not key_path or not Path(key_path).is_file():
+        logger.error(f"private key missing at {key_path!r} — refusing a "
+                     "credential-less run (would journal a false $0 snapshot)")
+        return
+
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     client = KalshiClient(
         api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
-        private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
+        private_key_path=key_path,
         demo_mode=False,
     )
     await client.start()
     try:
         balance = await client.get_balance()
         fills_resp = await client._req_safe("GET", "/portfolio/fills?limit=100", auth=True)
+        if reads_degraded(fills_resp):
+            logger.error("authenticated reads degraded (auth failure?) — "
+                         "skipping journal/snapshot writes to protect live_account.json")
+            return
         fresh = new_fills((fills_resp or {}).get("fills"), known_fill_ids())
         positions = await client.get_positions()
         longs = open_long_positions(positions)

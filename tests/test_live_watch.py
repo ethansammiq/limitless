@@ -101,3 +101,14 @@ class TestJournalReads:
         monkeypatch.setattr(lw, "BALANCE_LOG", tmp_path / "none2.jsonl")
         assert lw.known_fill_ids() == set()
         assert lw.last_logged_balance() is None
+
+
+class TestReadsDegraded:
+    def test_error_degraded_shapes_are_degraded(self):
+        assert lw.reads_degraded(None) is True
+        assert lw.reads_degraded({}) is True          # _req_safe swallowed a 401
+        assert lw.reads_degraded("not a dict") is True
+
+    def test_real_responses_are_not_degraded(self):
+        assert lw.reads_degraded({"fills": []}) is False
+        assert lw.reads_degraded({"fills": [{"fill_id": "a"}]}) is False
