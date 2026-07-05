@@ -149,13 +149,27 @@ RECOMMENDATION: [BUY / PASS]
 
 | File | Purpose |
 |------|---------|
-| `edge_scanner_v2.py` | **PRIMARY** — Multi-city scanner with AIFS ensemble, KDE, model weighting, confidence scoring, risk management |
-| `sniper.py` | Legacy strategy bot (Wind Penalty + Midnight High). Being replaced by v2. |
-| `kalshi_client.py` | Kalshi API client — RSA-PSS auth, order placement, balance/position queries |
-| `morning_check.py` | Pre-settlement position monitor (runs via cron at 6 AM ET) |
-| `config.py` | Centralized configuration (station configs, trading params) |
-| `edge_scanner.py` | v1 scanner (superseded by v2) |
+| `edge_scanner_v2.py` | KDE ensemble scanner (forecasting — measured -EV vs market; auto_trader is scan-only) |
+| `kalshi_client.py` | Kalshi API client — RSA-PSS auth, V2 order placement, balance/position queries |
+| `config.py` | Legacy 5-city station configs + trading params |
 | `.env` | API credentials (NEVER commit to git) |
+
+### Settlement-source edge (the working strategies — 2026-07)
+| File | Purpose |
+|------|---------|
+| `ladders.py` / `ladders.json` | All 40 weather ladders + validated settlement stations (gen: `scripts/build_ladder_config.py`) |
+| `core/obs.py` | Station-day obs + settlement-certainty bounds (climate-day = midnight LST; drops integer-°C obs) |
+| `core/brackets.py` | Bracket subtitle parsing + deadness/contains logic |
+| `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
+| `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
+| `live_watch.py` | Read-only live-account journal + sell-into-strength alert (cron */10) |
+| `shadow_logger.py` | Dual-venue L2 depth capture for the Poly gate (cron */30) |
+| `backtest/poly_gate_analyzer.py` | Poly go/no-go verdict from shadow books (ad-hoc) |
+| `scripts/take.py` | The ONLY order-placing entry point — human-run; alerts print the exact command |
+| `weekly_digest.py` | Per-strategy P&L + dead-bracket base rate + scorecard line (cron Sun 18:00) |
+| `backtest/sniper_scorecard.py` | Joins sniper journal → Kalshi settlement: does the alert win, by how much (cron Sun 17:45) |
+| `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
+| `scripts/audit_coverage.py` | Series-drift / parse-health / office-silence self-audit (cron Sun 17:30) |
 
 ## 8. API REFERENCE
 
