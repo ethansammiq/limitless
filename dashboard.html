@@ -1092,85 +1092,33 @@ function fmtAge(s){
   return Math.floor(s/86400) + 'd';
 }
 function ageClass(s, warn, bad){ if (s==null) return 'hot'; if (s<warn) return 'ok'; if (s<bad) return 'warm'; return 'hot'; }
-function vital(label, val, cls){
-  return `<div class="vital-card"><div class="vital-num ${cls}">${val}</div><div class="vital-label">${label}</div></div>`;
-}
-
-function signCls(n){ return n==null ? '' : (n>0?'success':(n<0?'danger':'')); }
-function fmtPct(n, dp){ if(n==null) return ''; dp = (dp==null)?1:dp; return (n>=0?'+':'')+n.toFixed(dp)+'%'; }
 function kpiCell(label, val, cls){
   return `<div class="kpi-cell"><div class="kpi-val ${cls||''}">${val}</div><div class="kpi-lab">${label}</div></div>`;
 }
 function kpiGroup(title, cells){
   return `<div class="kpi-group"><div class="kpi-gtitle">${title}</div><div class="kpi-cells">${cells.join('')}</div></div>`;
 }
-function shortTicker(t){ if(!t) return '—'; const seg=String(t).split('-'); return esc(seg[seg.length-1]||t); }
 
-function renderKpis(state, fb){
+function renderHealthKpis(state){
   const k = state.kpis;
-  if (!k){  // older server without /api/state kpis — fall back to basic vitals
-    return `<div class="vitals-grid">
-      ${vital('Paper Balance', fmtMoney(fb.bal), (fb.bal!=null&&fb.init!=null)?(fb.bal>=fb.init?'success':'danger'):'')}
-      ${vital('Realized P&amp;L', fmtMoney(fb.pnl), signCls(fb.pnl))}
-      ${vital('Open Positions', fb.sum.open_count, fb.sum.open_count>0?'highlight':'')}
-      ${vital('Open Contracts', fb.sum.open_contracts, '')}
-      ${vital('Open Cost', fmtMoney(fb.sum.open_cost_basis), '')}
-      ${vital('Orders Logged', state.orders.total, '')}
-    </div>`;
-  }
-  const ep=k.equity_pnl, ex=k.exposure, pf=k.performance, hl=k.health;
-  const unreal = ep.unrealized_pnl;
-  const groups = [];
-
-  groups.push(kpiGroup('Equity &amp; P&amp;L', [
-    kpiCell('Equity', fmtMoney(ep.equity), signCls(ep.total_pnl)),
-    kpiCell('Total P&amp;L', (ep.total_pnl!=null?fmtMoney(ep.total_pnl):'—') + (ep.total_pnl_pct!=null?` <span class="kpi-sub">${fmtPct(ep.total_pnl_pct)}</span>`:''), signCls(ep.total_pnl)),
-    kpiCell('Today', ep.daily_pnl!=null?fmtMoney(ep.daily_pnl):'—', signCls(ep.daily_pnl)),
-    kpiCell('Unrealized', unreal!=null?fmtMoney(unreal):'<span class="kpi-off">marks off</span>', signCls(unreal)),
-    kpiCell('Realized', fmtMoney(ep.realized_pnl), signCls(ep.realized_pnl)),
-    kpiCell('Cash', fmtMoney(ep.cash), ''),
-  ]));
-
-  groups.push(kpiGroup('Exposure &amp; Positions', [
-    kpiCell('Open Cost', fmtMoney(ex.open_cost_basis), ''),
-    kpiCell('Deployed', ex.deployed_pct!=null?ex.deployed_pct.toFixed(0)+'%':'—', (ex.deployed_pct!=null&&ex.deployed_pct>=50)?'danger':((ex.deployed_pct!=null&&ex.deployed_pct>=25)?'warn':'')),
-    kpiCell('Positions', ex.open_count, ex.open_count>0?'highlight':''),
-    kpiCell('Contracts', ex.open_contracts, ''),
-  ]));
-
-  const bestTxt = pf.best?`${shortTicker(pf.best.ticker)} <span class="kpi-sub">${fmtPct(pf.best.roi_pct,0)}</span>`:'—';
-  const worstTxt = pf.worst?`${shortTicker(pf.worst.ticker)} <span class="kpi-sub">${fmtPct(pf.worst.roi_pct,0)}</span>`:'—';
-  groups.push(kpiGroup('Performance', [
-    kpiCell('Win Rate', pf.win_rate!=null?pf.win_rate.toFixed(0)+'%':'—', pf.win_rate==null?'':(pf.win_rate>=50?'success':'danger')),
-    kpiCell('Avg ROI', pf.avg_roi_pct!=null?fmtPct(pf.avg_roi_pct,0):'—', signCls(pf.avg_roi_pct)),
-    kpiCell('Settled', pf.settled_count, ''),
-    kpiCell('Best Open', bestTxt, pf.best?'success':''),
-    kpiCell('Worst Open', worstTxt, (pf.worst&&pf.worst.roi_pct<0)?'danger':''),
-  ]));
-
+  if (!k) return '';
+  const hl = k.health;
   const mon = ageClass(hl.position_monitor_age_seconds, 600, 1200);
   const monCls = mon==='ok'?'success':(mon==='warm'?'warn':'danger');
   const pricesTxt = hl.prices_enabled ? (hl.prices_ok===false?'error':(hl.prices_ok?'live':'…')) : 'off';
   const pricesCls = hl.prices_enabled ? (hl.prices_ok?'success':(hl.prices_ok===false?'danger':'')) : '';
   const nErr = (hl.errors&&hl.errors.length)||0;
-  groups.push(kpiGroup('Bot Health', [
+  return `<div class="kpi-feed">${kpiGroup('Bot Health', [
     kpiCell('Status', hl.alive?'LIVE':'STALLED', hl.alive?'success':'danger'),
     kpiCell('Monitor', fmtAge(hl.position_monitor_age_seconds), monCls),
     kpiCell('Last Scan', hl.scan_stale ? 'stale' : fmtAge(hl.scan_age_seconds), hl.scan_stale ? 'warm' : ''),
     kpiCell('Prices', pricesTxt, pricesCls),
     kpiCell('Errors', nErr, nErr?'danger':'success'),
-  ]));
-
-  return `<div class="kpi-feed">${groups.join('')}</div>`;
+  ])}</div>`;
 }
 
 function renderLive(state){
-  const b = state.balance || {};
-  const sum = state.positions.summary;
   const live = state.liveness;
-  const pnl = sum.total_realized_pnl;
-  const bal = b.balance, init = b.initial_balance;
-  const pnlPct = (init && init>0) ? (pnl/init*100) : null;
 
   let h = '';
 
@@ -1187,56 +1135,10 @@ function renderLive(state){
     </div>
   </div>`;
 
-  // KPI feed — PAPER simulation; the real account is the panel above.
-  h += `<div class="ls-title" style="margin:14px 0 6px">Paper ledger <span class="paper-tag">SIMULATION</span></div>`;
-  h += renderKpis(state, {bal, init, pnl, pnlPct, sum});
-
-  // Open positions
-  const open = state.positions.open || [];
-  if (open.length){
-    h += `<div class="live-section"><div class="ls-title">Open Positions <span class="count">${open.length}</span></div>
-      <table class="live-table"><thead><tr>
-        <th>Ticker</th><th>Side</th><th>Qty</th><th>Avg ¢</th><th>Realized</th><th>Peak ¢</th><th>Flags</th><th>Last note</th>
-      </tr></thead><tbody>`;
-    for (const p of open){
-      const note = (p.notes && p.notes.length) ? p.notes[p.notes.length-1] : '';
-      const pr = Number(p.pnl_realized||0);
-      h += `<tr>
-        <td class="mono-cell">${esc(p.ticker)}</td>
-        <td><span class="side-pill ${esc(p.side)}">${esc(String(p.side||'').toUpperCase())}</span></td>
-        <td>${esc(p.contracts)}</td>
-        <td>${esc(p.avg_price)}</td>
-        <td class="${pr>0?'pos':(pr<0?'neg':'')}">${fmtMoney(pr)}</td>
-        <td>${esc(p.peak_price)}</td>
-        <td>${p.freerolled?'<span class="flag">FREEROLL</span>':''}</td>
-        <td class="note-cell" title="${esc(note)}">${esc(note)}</td>
-      </tr>`;
-    }
-    h += `</tbody></table></div>`;
-  }
-
-  // Recent orders
-  const ords = state.orders.recent || [];
-  const counts = state.orders.counts || {};
-  const now = Date.now();
-  h += `<div class="live-section"><div class="ls-title">Recent Orders <span class="count">${state.orders.total}</span>`;
-  h += Object.entries(counts).map(([k,v]) => ` <span class="oc-pill">${esc(k)}: ${v}</span>`).join('');
-  h += `</div><table class="live-table"><thead><tr>
-      <th>Ticker</th><th>Act</th><th>Side</th><th>Qty</th><th>¢</th><th>Status</th><th>Age</th>
-    </tr></thead><tbody>`;
-  for (const o of ords){
-    const age = o.created_at ? (now - new Date(o.created_at).getTime())/1000 : null;
-    h += `<tr>
-      <td class="mono-cell">${esc(o.ticker)}</td>
-      <td class="dim">${esc(o.action)}</td>
-      <td><span class="side-pill ${esc(o.side)}">${esc(String(o.side||'').toUpperCase())}</span></td>
-      <td>${esc(o.count)}</td>
-      <td>${esc(o.price)}</td>
-      <td><span class="ostatus ${esc(String(o.status||'').toLowerCase())}">${esc(o.status)}</span></td>
-      <td class="dim">${fmtAge(age)}</td>
-    </tr>`;
-  }
-  h += `</tbody></table></div>`;
+  // Bot health only — the paper simulation ledger (KPIs, open positions,
+  // recent orders) was removed 2026-07-05: the KDE paper loop is demoted
+  // (measured -EV) and real money is the panel above.
+  h += renderHealthKpis(state);
 
   // Service heartbeats
   h += `<div class="live-section"><div class="ls-title">Service Heartbeats</div><div class="health-strip">`;
