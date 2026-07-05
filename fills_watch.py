@@ -118,9 +118,10 @@ def snapshot() -> tuple[str, int]:
 
     # Positions are the source of truth for fills: a real market fill shows up as an
     # open/closed position at a real price, and the position store can LEAD the order
-    # ledger (paper_orders.json sometimes lacks the EXECUTED record — the DEN-T88
-    # case). Unify EXECUTED orders with filled positions, deduped by order_id, so a
-    # fill is never missed just because the order ledger lagged.
+    # ledger. (Instant-crossing fills written before the 2026-07-01 broker fix never
+    # reached paper_orders.json — the DEN-T88 case.) Unify EXECUTED orders with filled
+    # positions, deduped by order_id, so a fill is never missed just because the order
+    # ledger lagged.
     fill_events: dict[str, dict] = {}
     for o in (x for x in real if x.get("status") == "EXECUTED"):
         key = o.get("order_id") or f"ord:{o.get('ticker')}:{o.get('filled_at')}"

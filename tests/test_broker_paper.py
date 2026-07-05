@@ -78,6 +78,33 @@ class TestFillModes:
 
         asyncio.run(go())
 
+    def test_instant_fill_persists_to_ledger(self):
+        """Regression: immediately-crossing fills must land in paper_orders.json.
+
+        They used to be returned to the caller but never appended to _orders,
+        so get_fills() missed them and fills_watch had to reconstruct fills
+        from positions_paper.json (the DEN-T88 case).
+        """
+        from core.broker import PaperBroker
+        books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
+        broker = PaperBroker(
+            initial_balance=1000.0, fill_mode="instant",
+            quote_client=_mock_quote_client(books),
+        )
+
+        async def go():
+            await broker.start()
+            resp = await broker.place_order("X", "yes", "buy", 10, 46)
+            order_id = resp["order"]["order_id"]
+            fills = await broker.get_fills(ticker="X")
+            assert [f["order_id"] for f in fills] == [order_id]
+            saved = json.loads(_test_orders.read_text())
+            assert saved[0]["order_id"] == order_id
+            assert saved[0]["status"] == "EXECUTED"
+            await broker.stop()
+
+        asyncio.run(go())
+
     def test_instant_rejects_when_not_crossing(self):
         from core.broker import PaperBroker
         books = {"X": {"yes": [[40, 100]], "no": [[55, 100]]}}
@@ -360,7 +387,6 @@ class TestStrategyAttribution:
         async def go():
             await broker.start()
             # 41c rests below the 45c ask — resting orders are persisted
-            # (instant-crossing fills never enter the ledger; known gap)
             resp = await broker.place_order(
                 "X", "yes", "buy", 10, 41, strategy="auto_trader",
             )

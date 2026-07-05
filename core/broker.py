@@ -312,7 +312,7 @@ class PaperBroker(BrokerInterface):
             if not self._simulate_fill(order):
                 order["status"] = "REJECTED"
                 order["reject_reason"] = "insufficient_balance"
-                self._orders.append(order)
+            self._orders.append(order)
         elif self._fill_mode == "instant":
             order["status"] = "REJECTED"
             order["reject_reason"] = (
