@@ -1,0 +1,36 @@
+"""Tests for scripts/take.py guards (no network, no orders)."""
+import argparse
+
+from scripts.take import order_cost_dollars, validate
+
+
+def _args(action="buy", side="yes", count=10, price_c=20):
+    return argparse.Namespace(action=action, side=side, count=count, price_c=price_c)
+
+
+class TestCostModel:
+    def test_buy_yes_costs_price(self):
+        assert order_cost_dollars("buy", "yes", 40, 16) == 6.40
+
+    def test_sell_collateralizes_complement(self):
+        # selling YES at 22c: worst case is the 78c complement per contract
+        assert order_cost_dollars("sell", "yes", 20, 22) == 15.60
+
+
+class TestValidate:
+    def test_ok_order_passes(self):
+        assert validate(_args(), 50.0) is None
+
+    def test_price_bounds(self):
+        assert "outside" in validate(_args(price_c=0), 50.0)
+        assert "outside" in validate(_args(price_c=100), 50.0)
+
+    def test_count_floor(self):
+        assert "count" in validate(_args(count=0), 50.0)
+
+    def test_notional_cap(self):
+        # 500 x 90c = $450 > $50 cap
+        assert "exceeds cap" in validate(_args(count=500, price_c=90), 50.0)
+
+    def test_cap_override(self):
+        assert validate(_args(count=500, price_c=90), 1000.0) is None

@@ -228,7 +228,9 @@ async def run(threshold: int, dry_run: bool) -> None:
             lines = [
                 f"**{p['ticker']}** — {p['qty']:.0f} contracts, best bid **{bid}¢** "
                 f"({p['bid_depth']:.0f} within {DEPTH_BAND_C}¢)\n"
-                f"  Your playbook: sell into strength (90¢ now beats $1 tomorrow)."
+                f"  Your playbook: sell into strength (90¢ now beats $1 tomorrow).\n"
+                f"  `.venv/bin/python scripts/take.py {p['ticker']} sell yes "
+                f"{p['qty']:.0f} {max(1, bid - 2)} --ioc`"
                 for p, bid in pings
             ]
             try:

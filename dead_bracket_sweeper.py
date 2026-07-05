@@ -209,11 +209,14 @@ def format_alert(findings: list[dict]) -> tuple[str, str]:
         word = "runmax" if f["kind"] == "high" else "runmin"
         bound = "≥" if f["kind"] == "high" else "≤"
         levels = ", ".join(f"{p}¢×{q}" for p, q in f["levels"])
+        floor_bid = f["levels"][-1][0] if f["levels"] else 0
         lines.append(
             f"**{f['ticker']}** ({f['subtitle']}) — {f['station']} {word} "
             f"{f['extreme_f']}°F → settles {bound}{f['certain_settle']}°\n"
             f"  bids: {levels} → sell YES, net ~${f['net_cents'] / 100:.2f} "
-            f"({f['contracts']} contracts)"
+            f"({f['contracts']} contracts)\n"
+            f"  `.venv/bin/python scripts/take.py {f['ticker']} sell yes "
+            f"{f['contracts']} {floor_bid} --ioc`"
         )
     lines.append("_Alert only — verify the obs trail before trading._")
     return title, "\n".join(lines)
