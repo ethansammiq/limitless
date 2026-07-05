@@ -48,6 +48,7 @@ EXPECTED_INTERVALS = {
     "dead_bracket_sweeper": 2,  # Runs every 15 min (beats even when nothing found). Allow 2h.
     "live_watch": 2,            # Runs every 10 min (read-only live journal). Allow 2h.
     "weekly_digest": 192,       # Runs Sundays 18:00. Allow 8 days.
+    "cli_sniper": 0.5,          # Runs every 2 min (beats even out of window). Allow 30 min.
 }
 
 # Daily cron jobs the watchdog can re-run when the Mac slept through the tick.

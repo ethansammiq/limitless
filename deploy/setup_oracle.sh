@@ -213,6 +213,9 @@ cat << EOF
 # Dead-Bracket Sweeper — obs-killed brackets still holding bids (riskless class)
 */15 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/dead_bracket_sweeper.py --once >> $LOG_DIR/dead_bracket_sweeper.log 2>&1
 
+# CLI Sniper — race the NWS climate report to its own repricing
+*/2 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/cli_sniper.py --once >> $LOG_DIR/cli_sniper.log 2>&1
+
 # Shadow Logger — dual-venue L2 depth capture (Poly gate data)
 */30 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/shadow_logger.py --once >> $LOG_DIR/shadow_logger.log 2>&1
 
