@@ -1,10 +1,4 @@
-# Weather Edge — Oracle Cloud Free Tier Deployment
-
-## Why Oracle Cloud?
-- **$0/month forever** (not a trial — truly always-free)
-- 4 ARM cores, 24 GB RAM, 200 GB storage
-- Ashburn, VA region: 5-15ms to Kalshi (same coast)
-- 99.9% uptime SLA
+# Weather Edge — VPS Deployment (provider-agnostic)
 
 ## What Gets Deployed
 
@@ -38,54 +32,39 @@ always-on VPS is the fix for the entire sleep-related incident class
 
 ---
 
+## Provider choice (minmax)
+
+This workload is tiny — ~11 cron jobs that fire and exit, one small dashboard,
+peak RAM a few hundred MB. The floor is **1 GB RAM / 1 shared vCPU / ~10 GB /
+US-East**. Anything more is headroom, not need.
+
+| Provider | ~$/mo | specs | login user | note |
+|----------|-------|-------|------------|------|
+| **Hetzner CAX11** (Ashburn) | ~4 | 2 ARM / 4 GB | `root` | **best value** — 4× RAM at the 1 GB price |
+| Oracle Always Free (Ashburn) | 0 | 4 ARM / 24 GB | `ubuntu` | free forever, but ARM capacity lottery |
+| DigitalOcean (NYC) | ~6 | 1 / 1 GB | `root` | cleanest one-click |
+| Vultr / Linode (NJ/Newark) | ~5 | 1 / 1 GB | `root` | fine |
+
+The deploy scripts are **provider-agnostic**: pass `REMOTE_USER=root` for
+Hetzner/DO/Vultr/Linode; omit it (defaults to `ubuntu`) for Oracle/Lightsail.
+`setup_oracle.sh` auto-detects user/home/sudo on the server.
+
 ## Step-by-Step Setup
 
-### 1. Create Oracle Cloud Account
+### 1. Create the instance (any provider above)
 
-1. Go to https://www.oracle.com/cloud/free/
-2. Sign up (credit card required for identity verification — never charged for free tier)
-3. Select **Home Region: US East (Ashburn)** — lowest latency to Kalshi
+- **Image:** Ubuntu 22.04 or 24.04
+- **Region:** US-East (Ashburn / NYC / NJ) — low Kalshi latency
+- **Size:** the cheapest tier (1 GB is plenty)
+- **SSH key:** paste `~/.ssh/id_ed25519_ethansammiq.pub`
 
-### 2. Create ARM Instance
+Oracle-specific (free tier): Home Region **US East (Ashburn)**, Shape
+**VM.Standard.A1.Flex** 1 OCPU / 6 GB; if "Out of host capacity," retry another
+Availability Domain. Managed providers open port 22 by default; on Oracle add
+an ingress rule (Source 0.0.0.0/0, TCP, port 22) to the VCN's default security
+list.
 
-In the Oracle Cloud Console:
-
-```
-Compute → Instances → Create Instance
-
-Name:           weather-edge
-Image:          Ubuntu 22.04 (or 24.04)
-Shape:          VM.Standard.A1.Flex (Ampere ARM)
-  OCPUs:        1 (free tier allows up to 4)
-  Memory:       6 GB (free tier allows up to 24 GB)
-Networking:     Create new VCN + public subnet
-  Public IP:    Yes
-Boot volume:    50 GB (free tier allows up to 200 GB)
-SSH key:        Paste your public key (~/.ssh/id_rsa.pub)
-```
-
-> **Tip:** If you get "Out of host capacity," try a different Availability Domain
-> or try again later (ARM instances are popular). Scripts exist to auto-retry.
-
-### 3. Open SSH Port
-
-```
-Networking → Virtual Cloud Networks → [your VCN]
-  → Security Lists → Default → Ingress Rules
-  → Add: Source 0.0.0.0/0, TCP, Port 22
-```
-
-### 4. SSH In & Run Setup
-
-```bash
-# From your Mac
-ssh ubuntu@<oracle-instance-ip>
-
-# On the server — one-time setup
-mkdir -p ~/limitless
-```
-
-### 5. Migrate — ORDER MATTERS (no dual writers)
+### 2. Migrate — ORDER MATTERS (no dual writers)
 
 The paper ledger is file-based state. Two machines running
 position_monitor against separate copies will diverge silently — the
@@ -100,7 +79,8 @@ pkill -f dashboard_server.py            # stop local dashboard
 
 # b. Ship everything (code + secrets + state + setup + tests)
 chmod +x deploy/deploy.sh
-./deploy/deploy.sh <instance-ip> --full
+REMOTE_USER=root ./deploy/deploy.sh <instance-ip> --full   # root: Hetzner/DO/Vultr
+#            ./deploy/deploy.sh <instance-ip> --full        # ubuntu: Oracle/Lightsail
 ```
 
 `--full` rsyncs code (state excluded), scps `.env` + key, runs the
@@ -108,10 +88,10 @@ one-time `--state` migration (ledger, heartbeats, backtest data, shadow
 books), executes `setup_oracle.sh` (Python, chrony, systemd, cron —
 jobs go live at this point), then runs the test suite remotely.
 
-### 6. Verify
+### 3. Verify
 
 ```bash
-ssh ubuntu@<ip>
+ssh <user>@<ip>
 crontab -l
 systemctl list-timers --all | grep weather
 cd ~/limitless && .venv/bin/python3 heartbeat.py --status   # all fresh within the hour
@@ -125,7 +105,7 @@ ssh -L 8787:127.0.0.1:8787 ubuntu@<ip>
 # open http://127.0.0.1:8787 — radar + heartbeats should be live
 ```
 
-### 7. New deploy model
+### 4. New deploy model
 
 Cron no longer runs from the Mac's working tree. Code changes flow:
 
@@ -213,20 +193,6 @@ ssh ubuntu@<ip> 'crontab -l'
 
 ---
 
-## Cost Comparison
-
-| Provider | Spec | Latency to Kalshi | Cost |
-|----------|------|-------------------|------|
-| **Oracle Cloud (Ashburn)** | 1 ARM core, 6 GB | 5-15ms | **$0/mo forever** |
-| AWS EC2 t3.micro | 2 vCPU, 1 GB | <5ms | $0 for 12mo, then $8/mo |
-| DigitalOcean (NYC) | 1 vCPU, 1 GB | 5-10ms | $6/mo |
-| Vultr (NJ) | 1 vCPU, 1 GB | 5-10ms | $5/mo |
-
-Oracle Ashburn is the best option: zero cost, sufficient specs, acceptable latency.
-Latency doesn't matter much for this system — we place limit orders at scan time
-(5x daily), not HFT. 10ms vs 5ms is irrelevant for a cron-based scanner.
-
----
 
 ## Troubleshooting
 

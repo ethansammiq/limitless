@@ -1,13 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# WEATHER EDGE — Oracle Cloud Free Tier Deployment
-# ARM64 (Ampere A1) instance with Ubuntu 22.04+
+# WEATHER EDGE — VPS provisioning (Ubuntu 22.04+, any provider)
+# Runs ON the server as whoever logged in (root on Hetzner/DO/Vultr,
+# ubuntu on Oracle/Lightsail) — user/home/sudo are all auto-detected.
 # =============================================================================
 set -euo pipefail
 
-DEPLOY_DIR="/home/ubuntu/limitless"
+RUN_USER="$(id -un)"
+DEPLOY_DIR="$HOME/limitless"
 VENV_DIR="$DEPLOY_DIR/.venv"
 LOG_DIR="/var/log/weather-edge"
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"   # root needs no sudo
 
 echo "═══════════════════════════════════════════"
 echo "  Weather Edge — Oracle Cloud Setup"
@@ -17,8 +20,8 @@ echo "════════════════════════�
 # 1. SYSTEM UPDATES & DEPENDENCIES
 # ─────────────────────────────────────────────
 echo "[1/7] System packages..."
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y \
+$SUDO apt update && $SUDO apt upgrade -y
+$SUDO apt install -y \
     python3 python3-pip python3-venv \
     chrony curl git \
     logrotate
@@ -27,12 +30,12 @@ sudo apt install -y \
 # 2. TIME SYNCHRONIZATION (critical for API signing)
 # ─────────────────────────────────────────────
 echo "[2/7] Time sync (chrony)..."
-sudo systemctl enable chrony
-sudo systemctl start chrony
-sudo chronyc makestep 2>/dev/null || true
+$SUDO systemctl enable chrony
+$SUDO systemctl start chrony
+$SUDO chronyc makestep 2>/dev/null || true
 
 # Set timezone to ET for readable logs (cron still uses ET times)
-sudo timedatectl set-timezone America/New_York
+$SUDO timedatectl set-timezone America/New_York
 echo "  Timezone: $(timedatectl show --value -p Timezone)"
 echo "  Time sync: $(chronyc tracking 2>/dev/null | grep 'System time' || echo 'OK')"
 
@@ -40,7 +43,7 @@ echo "  Time sync: $(chronyc tracking 2>/dev/null | grep 'System time' || echo '
 # 3. NETWORK TUNING
 # ─────────────────────────────────────────────
 echo "[3/7] Network optimizations..."
-sudo tee /etc/sysctl.d/99-weather-edge.conf > /dev/null << 'EOF'
+$SUDO tee /etc/sysctl.d/99-weather-edge.conf > /dev/null << 'EOF'
 # Weather Edge — network tuning for API latency
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -49,21 +52,21 @@ net.ipv4.tcp_fastopen=3
 net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 EOF
-sudo sysctl --system > /dev/null 2>&1
+$SUDO sysctl --system > /dev/null 2>&1
 
 # ─────────────────────────────────────────────
 # 4. CREATE PROJECT STRUCTURE
 # ─────────────────────────────────────────────
 echo "[4/7] Project structure..."
-sudo mkdir -p "$LOG_DIR"
-sudo chown ubuntu:ubuntu "$LOG_DIR"
+$SUDO mkdir -p "$LOG_DIR"
+$SUDO chown $RUN_USER:$RUN_USER "$LOG_DIR"
 mkdir -p "$DEPLOY_DIR"
 
 if [ ! -d "$DEPLOY_DIR/.git" ] && [ ! -f "$DEPLOY_DIR/config.py" ]; then
     echo ""
     echo "  ⚠ No code found at $DEPLOY_DIR"
     echo "  Upload your code first with deploy.sh, then re-run this script."
-    echo "  Or: scp -r /path/to/limitless/* ubuntu@<ip>:~/limitless/"
+    echo "  Or: scp -r /path/to/limitless/* $RUN_USER@<ip>:~/limitless/"
     echo ""
 fi
 
@@ -90,7 +93,7 @@ fi
 echo "[6/7] Installing systemd services..."
 
 # Position Monitor — persistent service (every 5 min via timer)
-sudo tee /etc/systemd/system/weather-edge-monitor.service > /dev/null << EOF
+$SUDO tee /etc/systemd/system/weather-edge-monitor.service > /dev/null << EOF
 [Unit]
 Description=Weather Edge Position Monitor
 After=network-online.target
@@ -98,7 +101,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=ubuntu
+User=$RUN_USER
 WorkingDirectory=$DEPLOY_DIR
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python3 $DEPLOY_DIR/position_monitor.py --once
@@ -107,7 +110,7 @@ StandardError=append:$LOG_DIR/position_monitor.log
 TimeoutStartSec=120
 EOF
 
-sudo tee /etc/systemd/system/weather-edge-monitor.timer > /dev/null << EOF
+$SUDO tee /etc/systemd/system/weather-edge-monitor.timer > /dev/null << EOF
 [Unit]
 Description=Weather Edge Position Monitor Timer (every 5 min)
 
@@ -121,14 +124,14 @@ WantedBy=timers.target
 EOF
 
 # Watchdog — persistent health check (every 15 min via timer)
-sudo tee /etc/systemd/system/weather-edge-watchdog.service > /dev/null << EOF
+$SUDO tee /etc/systemd/system/weather-edge-watchdog.service > /dev/null << EOF
 [Unit]
 Description=Weather Edge Watchdog
 After=network-online.target
 
 [Service]
 Type=oneshot
-User=ubuntu
+User=$RUN_USER
 WorkingDirectory=$DEPLOY_DIR
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python3 $DEPLOY_DIR/watchdog.py
@@ -137,7 +140,7 @@ StandardError=append:$LOG_DIR/watchdog.log
 TimeoutStartSec=60
 EOF
 
-sudo tee /etc/systemd/system/weather-edge-watchdog.timer > /dev/null << EOF
+$SUDO tee /etc/systemd/system/weather-edge-watchdog.timer > /dev/null << EOF
 [Unit]
 Description=Weather Edge Watchdog Timer (every 15 min)
 
@@ -151,8 +154,8 @@ WantedBy=timers.target
 EOF
 
 # Dashboard — always-on, localhost only (reach it via ssh tunnel:
-#   ssh -L 8787:127.0.0.1:8787 ubuntu@<ip>  then open http://127.0.0.1:8787)
-sudo tee /etc/systemd/system/weather-edge-dashboard.service > /dev/null << EOF
+#   ssh -L 8787:127.0.0.1:8787 $RUN_USER@<ip>  then open http://127.0.0.1:8787)
+$SUDO tee /etc/systemd/system/weather-edge-dashboard.service > /dev/null << EOF
 [Unit]
 Description=Weather Edge Dashboard (localhost:8787)
 After=network-online.target
@@ -160,7 +163,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
+User=$RUN_USER
 WorkingDirectory=$DEPLOY_DIR
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python3 $DEPLOY_DIR/dashboard_server.py
@@ -173,10 +176,10 @@ StandardError=append:$LOG_DIR/dashboard.log
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable weather-edge-monitor.timer
-sudo systemctl enable weather-edge-watchdog.timer
-sudo systemctl enable weather-edge-dashboard.service
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable weather-edge-monitor.timer
+$SUDO systemctl enable weather-edge-watchdog.timer
+$SUDO systemctl enable weather-edge-dashboard.service
 
 # ─────────────────────────────────────────────
 # 7. CRON JOBS (for scheduled scans)
@@ -241,7 +244,7 @@ echo "  ✅ Cron jobs installed (auto_trader is scan-only by default)"
 # ─────────────────────────────────────────────
 # LOG ROTATION
 # ─────────────────────────────────────────────
-sudo tee /etc/logrotate.d/weather-edge > /dev/null << EOF
+$SUDO tee /etc/logrotate.d/weather-edge > /dev/null << EOF
 $LOG_DIR/*.log {
     daily
     rotate 14
@@ -249,7 +252,7 @@ $LOG_DIR/*.log {
     delaycompress
     missingok
     notifempty
-    create 644 ubuntu ubuntu
+    create 644 $RUN_USER $RUN_USER
 }
 EOF
 
@@ -283,13 +286,13 @@ echo ""
 echo "  NEXT STEPS:"
 echo "  ─────────────────────────────────────────"
 echo "  1. Upload code:      ./deploy/deploy.sh <server-ip>"
-echo "  2. Verify dry-run:   ssh ubuntu@<ip> '$VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run'"
-echo "  3. Start monitors:   ssh ubuntu@<ip> 'sudo systemctl start weather-edge-monitor.timer weather-edge-watchdog.timer'"
-echo "  4. Watch logs:       ssh ubuntu@<ip> 'tail -f $LOG_DIR/*.log'"
+echo "  2. Verify dry-run:   ssh $RUN_USER@<ip> '$VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run'"
+echo "  3. Start monitors:   ssh $RUN_USER@<ip> 'sudo systemctl start weather-edge-monitor.timer weather-edge-watchdog.timer'"
+echo "  4. Watch logs:       ssh $RUN_USER@<ip> 'tail -f $LOG_DIR/*.log'"
 echo "  5. Go live:          Edit cron, remove --dry-run flags"
 echo ""
 echo "  EMERGENCY STOP:"
-echo "  ssh ubuntu@<ip> 'touch $DEPLOY_DIR/PAUSE_TRADING'"
+echo "  ssh $RUN_USER@<ip> 'touch $DEPLOY_DIR/PAUSE_TRADING'"
 echo ""
 echo "  VIEW STATUS:"
 echo "  systemctl list-timers --all | grep weather"

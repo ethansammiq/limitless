@@ -8,15 +8,21 @@
 #   ./deploy/deploy.sh <server-ip> --secrets     # Upload .env + key only
 #
 # Requirements:
-#   - SSH key-based auth configured for ubuntu@<server-ip>
+#   - SSH key-based auth to <server-ip> (REMOTE_USER=ubuntu default, or root)
 #   - Server already provisioned with setup_oracle.sh (or setup manually)
 # =============================================================================
 set -euo pipefail
 
 # ─── Config ─────────────────────────────────
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # Project root
-REMOTE_USER="ubuntu"
-REMOTE_DIR="/home/ubuntu/limitless"
+# REMOTE_USER: Oracle/Lightsail log in as 'ubuntu'; Hetzner/DO/Vultr/Linode as
+# 'root'. Override with REMOTE_USER=root ./deploy/deploy.sh <ip> --full
+REMOTE_USER="${REMOTE_USER:-ubuntu}"
+if [ "$REMOTE_USER" = "root" ]; then
+    REMOTE_DIR="/root/limitless"
+else
+    REMOTE_DIR="/home/$REMOTE_USER/limitless"
+fi
 
 # SSH key: honor $SSH_KEY, else id_rsa, else the first ed25519 key present
 # (this Mac has only ed25519 keys, so the old id_rsa default always missed).
@@ -235,7 +241,7 @@ echo "  ✅ Deploy complete"
 echo "═══════════════════════════════════════════"
 echo ""
 echo "  Quick commands:"
-echo "  ssh ubuntu@$SERVER 'tail -f /var/log/weather-edge/*.log'"
-echo "  ssh ubuntu@$SERVER '$REMOTE_DIR/.venv/bin/python3 $REMOTE_DIR/auto_trader.py --dry-run'"
-echo "  ssh ubuntu@$SERVER 'touch $REMOTE_DIR/PAUSE_TRADING'  # Emergency stop"
+echo "  ssh $REMOTE_USER@$SERVER 'tail -f /var/log/weather-edge/*.log'"
+echo "  ssh $REMOTE_USER@$SERVER 'cd $REMOTE_DIR && .venv/bin/python3 heartbeat.py --status'"
+echo "  ssh $REMOTE_USER@$SERVER 'touch $REMOTE_DIR/PAUSE_TRADING'  # Emergency stop"
 echo ""
