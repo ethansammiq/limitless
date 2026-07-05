@@ -8,11 +8,12 @@ never below a valid spot observation, so once the running max clears a
 bracket's ceiling the bracket is dead; any bid on it is free money until
 cancelled. Lows are the mirror image (CLI min ≤ any spot ob).
 
-Detection, per city in config.STATIONS (verified settlement stations only —
-the low series are assumed to settle on the same CLI station as the highs):
+Detection, per station in ladders.json (all ~40 Kalshi weather ladders;
+settlement stations derived from Kalshi's own series metadata and validated
+against the NWS stations API by scripts/build_ladder_config.py):
   1. NWS obs → station-local calendar-day running max and min.
   2. Lone-spike guard: the extreme must be corroborated by a second ob within
-     CORROBORATION_F, else the city is skipped (bad-sensor protection).
+     CORROBORATION_F, else the station is skipped (bad-sensor protection).
   3. Rounding safety: back the extreme off ROUNDING_BACKOFF_F before rounding
      (METAR T-group is 0.1°C; CLI reports integer °F) so a 99.5°F ob never
      claims a certain 100° settle.
@@ -46,7 +47,6 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from config import STATIONS  # noqa: E402
 from core.brackets import is_dead, parse_subtitle  # noqa: E402
 from core.obs import (  # noqa: E402
     certain_max_settle,
@@ -56,6 +56,7 @@ from core.obs import (  # noqa: E402
 )
 from dutch_book import kalshi_taker_fee_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
+from ladders import by_station  # noqa: E402
 from log_setup import get_logger  # noqa: E402
 from market_timeseries import extract_target_date_from_ticker  # noqa: E402
 
@@ -68,12 +69,6 @@ MIN_BID_C = 5              # ignore 1-4¢ dust bids
 REALERT_GROWTH = 1.25      # re-alert a known ticker only if net grew 25%
 STATE_MAX_AGE_H = 48
 DEFAULT_MIN_NET_DOLLARS = 10.0
-
-# Kalshi overnight-low ladders for the five verified stations.
-LOW_SERIES = {
-    "NYC": "KXLOWTNYC", "CHI": "KXLOWTCHI", "DEN": "KXLOWTDEN",
-    "MIA": "KXLOWTMIA", "LAX": "KXLOWTLAX",
-}
 
 def bid_proceeds_cents(yes_bids: list, min_bid: int = MIN_BID_C) -> tuple[int, int, list]:
     """(net_cents, contracts, levels) selling YES into all bids ≥ min_bid."""
@@ -151,18 +146,19 @@ async def sweep() -> list[dict]:
     findings: list[dict] = []
     await client.start()
     try:
-        for city, scfg in STATIONS.items():
-            tz = ZoneInfo(scfg.timezone)
+        for icao, group in by_station().items():
+            tz = ZoneInfo(group[0].tz)
             local_today = datetime.now(tz).strftime("%Y-%m-%d")
             try:
-                temps = fetch_day_obs(scfg.station_id, tz)
+                temps = fetch_day_obs(icao, tz)
             except Exception as exc:  # noqa: BLE001 — one station must not kill the run
-                logger.warning(f"{city}: obs fetch failed: {exc}")
+                logger.warning(f"{icao}: obs fetch failed: {exc}")
                 continue
-            for kind, series in (("high", scfg.series_ticker), ("low", LOW_SERIES[city])):
+            for ladder in group:
+                kind, series = ladder.kind, ladder.series
                 extreme = corroborated_extreme(temps, kind)
                 if extreme is None:
-                    logger.info(f"{city} {kind}: no corroborated extreme yet")
+                    logger.info(f"{icao} {kind}: no corroborated extreme yet")
                     continue
                 certain = certain_min_settle(extreme) if kind == "high" else certain_max_settle(extreme)
                 try:
@@ -192,7 +188,7 @@ async def sweep() -> list[dict]:
                     findings.append({
                         "ticker": ticker,
                         "subtitle": mkt.get("subtitle") or mkt.get("yes_sub_title"),
-                        "kind": kind, "city": city, "station": scfg.station_id,
+                        "kind": kind, "city": ladder.awips, "station": icao,
                         "extreme_f": round(extreme, 1), "certain_settle": certain,
                         "net_cents": net, "contracts": contracts, "levels": levels,
                     })
