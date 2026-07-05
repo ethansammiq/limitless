@@ -17,7 +17,21 @@ set -euo pipefail
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # Project root
 REMOTE_USER="ubuntu"
 REMOTE_DIR="/home/ubuntu/limitless"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"  # Override with SSH_KEY env var
+
+# SSH key: honor $SSH_KEY, else id_rsa, else the first ed25519 key present
+# (this Mac has only ed25519 keys, so the old id_rsa default always missed).
+if [ -n "${SSH_KEY:-}" ]; then
+    :
+elif [ -f "$HOME/.ssh/id_rsa" ]; then
+    SSH_KEY="$HOME/.ssh/id_rsa"
+else
+    SSH_KEY="$(ls "$HOME"/.ssh/id_ed25519* 2>/dev/null | grep -v '\.pub$' | head -1)"
+fi
+if [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ]; then
+    echo "No SSH private key found. Set SSH_KEY=/path/to/key and retry." >&2
+    exit 1
+fi
+echo "Using SSH key: $SSH_KEY"
 
 # ─── Args ───────────────────────────────────
 if [ $# -lt 1 ]; then
@@ -41,7 +55,7 @@ STATE_FILES=(
     positions_paper.json paper_balance.json paper_orders.json
     heartbeats.json peak_state.json stale_price_state.json
     alert_state.json dead_bracket_state.json watchdog_catchup.json
-    live_watch_state.json
+    live_watch_state.json cli_sniper_state.json
     price_history.json temp_history.json dashboard_day_anchor.json
     weather_edge.db model_bias_corrections.json
 )
