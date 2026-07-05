@@ -1,0 +1,322 @@
+[
+ {
+  "series": "KXHIGHAUS",
+  "kind": "high",
+  "awips": "AUS",
+  "wfo": "EWX",
+  "station_icao": "KAUS",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHCHI",
+  "kind": "high",
+  "awips": "MDW",
+  "wfo": "LOT",
+  "station_icao": "KMDW",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHDEN",
+  "kind": "high",
+  "awips": "DEN",
+  "wfo": "BOU",
+  "station_icao": "KDEN",
+  "tz": "America/Denver"
+ },
+ {
+  "series": "KXHIGHLAX",
+  "kind": "high",
+  "awips": "LAX",
+  "wfo": "LOX",
+  "station_icao": "KLAX",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXHIGHMIA",
+  "kind": "high",
+  "awips": "MIA",
+  "wfo": "MFL",
+  "station_icao": "KMIA",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHNY",
+  "kind": "high",
+  "awips": "NYC",
+  "wfo": "OKX",
+  "station_icao": "KNYC",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHPHIL",
+  "kind": "high",
+  "awips": "PHL",
+  "wfo": "PHI",
+  "station_icao": "KPHL",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHTATL",
+  "kind": "high",
+  "awips": "ATL",
+  "wfo": "FFC",
+  "station_icao": "KATL",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHTBOS",
+  "kind": "high",
+  "awips": "BOS",
+  "wfo": "BOX",
+  "station_icao": "KBOS",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHTDAL",
+  "kind": "high",
+  "awips": "DFW",
+  "wfo": "FWD",
+  "station_icao": "KDFW",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTDC",
+  "kind": "high",
+  "awips": "DCA",
+  "wfo": "LWX",
+  "station_icao": "KDCA",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXHIGHTHOU",
+  "kind": "high",
+  "awips": "HOU",
+  "wfo": "HGX",
+  "station_icao": "KHOU",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTLV",
+  "kind": "high",
+  "awips": "LAS",
+  "wfo": "VEF",
+  "station_icao": "KLAS",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXHIGHTMIN",
+  "kind": "high",
+  "awips": "MSP",
+  "wfo": "MPX",
+  "station_icao": "KMSP",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTNOLA",
+  "kind": "high",
+  "awips": "MSY",
+  "wfo": "LIX",
+  "station_icao": "KMSY",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTOKC",
+  "kind": "high",
+  "awips": "OKC",
+  "wfo": "OUN",
+  "station_icao": "KOKC",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTPHX",
+  "kind": "high",
+  "awips": "PHX",
+  "wfo": "PSR",
+  "station_icao": "KPHX",
+  "tz": "America/Phoenix"
+ },
+ {
+  "series": "KXHIGHTSATX",
+  "kind": "high",
+  "awips": "SAT",
+  "wfo": "EWX",
+  "station_icao": "KSAT",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXHIGHTSEA",
+  "kind": "high",
+  "awips": "SEA",
+  "wfo": "SEW",
+  "station_icao": "KSEA",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXHIGHTSFO",
+  "kind": "high",
+  "awips": "SFO",
+  "wfo": "MTR",
+  "station_icao": "KSFO",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXLOWTATL",
+  "kind": "low",
+  "awips": "ATL",
+  "wfo": "FFC",
+  "station_icao": "KATL",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTAUS",
+  "kind": "low",
+  "awips": "AUS",
+  "wfo": "EWX",
+  "station_icao": "KAUS",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTBOS",
+  "kind": "low",
+  "awips": "BOS",
+  "wfo": "BOX",
+  "station_icao": "KBOS",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTCHI",
+  "kind": "low",
+  "awips": "MDW",
+  "wfo": "LOT",
+  "station_icao": "KMDW",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTDAL",
+  "kind": "low",
+  "awips": "DFW",
+  "wfo": "FWD",
+  "station_icao": "KDFW",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTDC",
+  "kind": "low",
+  "awips": "DCA",
+  "wfo": "LWX",
+  "station_icao": "KDCA",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTDEN",
+  "kind": "low",
+  "awips": "DEN",
+  "wfo": "BOU",
+  "station_icao": "KDEN",
+  "tz": "America/Denver"
+ },
+ {
+  "series": "KXLOWTHOU",
+  "kind": "low",
+  "awips": "HOU",
+  "wfo": "HGX",
+  "station_icao": "KHOU",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTLAX",
+  "kind": "low",
+  "awips": "LAX",
+  "wfo": "LOX",
+  "station_icao": "KLAX",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXLOWTLV",
+  "kind": "low",
+  "awips": "LAS",
+  "wfo": "VEF",
+  "station_icao": "KLAS",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXLOWTMIA",
+  "kind": "low",
+  "awips": "MIA",
+  "wfo": "MFL",
+  "station_icao": "KMIA",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTMIN",
+  "kind": "low",
+  "awips": "MSP",
+  "wfo": "MPX",
+  "station_icao": "KMSP",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTNOLA",
+  "kind": "low",
+  "awips": "MSY",
+  "wfo": "LIX",
+  "station_icao": "KMSY",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTNYC",
+  "kind": "low",
+  "awips": "NYC",
+  "wfo": "OKX",
+  "station_icao": "KNYC",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTOKC",
+  "kind": "low",
+  "awips": "OKC",
+  "wfo": "OUN",
+  "station_icao": "KOKC",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTPHIL",
+  "kind": "low",
+  "awips": "PHL",
+  "wfo": "PHI",
+  "station_icao": "KPHL",
+  "tz": "America/New_York"
+ },
+ {
+  "series": "KXLOWTPHX",
+  "kind": "low",
+  "awips": "PHX",
+  "wfo": "PSR",
+  "station_icao": "KPHX",
+  "tz": "America/Phoenix"
+ },
+ {
+  "series": "KXLOWTSATX",
+  "kind": "low",
+  "awips": "SAT",
+  "wfo": "EWX",
+  "station_icao": "KSAT",
+  "tz": "America/Chicago"
+ },
+ {
+  "series": "KXLOWTSEA",
+  "kind": "low",
+  "awips": "SEA",
+  "wfo": "SEW",
+  "station_icao": "KSEA",
+  "tz": "America/Los_Angeles"
+ },
+ {
+  "series": "KXLOWTSFO",
+  "kind": "low",
+  "awips": "SFO",
+  "wfo": "MTR",
+  "station_icao": "KSFO",
+  "tz": "America/Los_Angeles"
+ }
+]
