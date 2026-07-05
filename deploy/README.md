@@ -18,12 +18,19 @@ CRON (ET)
   auto_trader         → 6/8/10/15/16/23 — SCAN-ONLY by default (exec opt-in)
   auto_scan --quiet   → 22:00 — evening Discord scan
   peak_monitor        → */10, 13-22 — peak formation tracking
-  dead_bracket_sweeper→ */15 — obs-killed brackets still holding bids
+  cli_sniper          → */2 — race the NWS climate report to its repricing
+  dead_bracket_sweeper→ */15 — obs-killed brackets (all 40 ladders)
   shadow_logger       → */30 — dual-venue L2 depth capture
+  live_watch          → */10 — live-account journal + sell-into-strength ping
   morning_check       → 6:30 — pre-settlement position evaluation
   backtest_collector  → 8:00 — settlement data collection
   bias_collector      → 8:30 — model bias rows (needs backtest row first)
+  weekly_digest       → Sun 18:00 — per-strategy P&L + base-rate report
 ```
+
+Ad-hoc (human-run, not cron): `scripts/take.py` (the only order-placing
+entry point — alerts print the exact command) and
+`backtest/poly_gate_analyzer.py` (the Polymarket go/no-go verdict).
 
 **The whole bot moves — the Mac becomes a dev machine.** Cron on an
 always-on VPS is the fix for the entire sleep-related incident class
