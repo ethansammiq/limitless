@@ -79,6 +79,18 @@ class TestPolyBookMetrics:
         assert sl.poly_book_metrics({"bids": [], "asks": []}) is None
 
 
+class TestGammaCents:
+    def test_number_and_string_dollars(self):
+        assert sl._gamma_cents(0.45) == 45.0
+        assert sl._gamma_cents("0.995") == 99.5
+        assert sl._gamma_cents(0) == 0.0
+
+    def test_absent_or_malformed_is_none(self):
+        assert sl._gamma_cents(None) is None
+        assert sl._gamma_cents("") is None
+        assert sl._gamma_cents("n/a") is None
+
+
 class TestConfig:
     def test_all_series_have_known_tz_and_kind(self):
         for series, cfg in sl.KALSHI_SERIES.items():
@@ -90,6 +102,14 @@ class TestConfig:
         lows = [s for s, c in sl.KALSHI_SERIES.items() if c["kind"] == "low"]
         assert len(highs) == 20
         assert len(lows) == 20
+
+    def test_poly_cities_have_known_tz_and_distinct_titles(self):
+        titles = set()
+        for city, cfg in sl.POLY_CITIES.items():
+            assert cfg["tz"] in sl._TZ, city
+            assert cfg["title"].startswith("Highest temperature in "), city
+            titles.add(cfg["title"])
+        assert len(titles) == len(sl.POLY_CITIES)
 
 
 class TestWriteRows(object):

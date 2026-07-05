@@ -9,12 +9,22 @@ logger captures exactly that, live, with zero capital:
   Kalshi     all ~40 weather ladders (20 KXHIGH* + 20 KXLOWT*), L2 book via the
              authenticated client for every bracket whose ask is in the live
              5-95c range.
-  Polymarket the 4 US daily-high events, CLOB book per bracket (public API).
+  Polymarket the US daily-high events, CLOB book per bracket (public API).
 
 Capture is signal-agnostic on purpose: books are logged for every live-priced
 bracket, and the offline join (IEM METAR archive -> running max/min bracket)
 decides after the fact which quotes the sweep would have crossed. Windows are
 city-LOCAL: highs 13:00-19:00 (peak forms), lows 04:00-10:00 (overnight min).
+
+Rows carry "live": full-book rows are live=true; brackets outside the 5-95c
+band get a quote-only row (live=false, summary quote, no levels) so pinned
+ladders stay visible to the offline join — 2026-07-04 CHI pinned at 99c by
+mid-window and simply vanished from the record. Quote-only rows are context,
+not execution data (Kalshi summary quotes lag the book — the 2026-07-02
+sweeper lesson). Poly runs BEFORE Kalshi: a post-wake DNS storm once burned
+31 minutes of Kalshi retries and captured Poly's books half an hour stale
+under a stamp from the start of the run; rows are now also timestamped at
+fetch time, not run start.
 
 Output:    logs/shadow_books/YYYY-MM-DD.jsonl   (UTC date, append-only)
 Heartbeat: "shadow_logger" on every clean exit, in or out of window
@@ -36,7 +46,7 @@ import json
 import re
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -102,11 +112,20 @@ KALSHI_SERIES: dict[str, dict[str, str]] = {
 }
 
 # Polymarket daily-high events (settle on Wunderground airport stations).
+# Every US city gamma listed as of 2026-07-04; one page of the date-filtered
+# events query covers them all, so extra cities cost only their CLOB fetches.
 POLY_CITIES: dict[str, dict[str, str]] = {
     "NYC": {"title": "Highest temperature in NYC on", "tz": "ET"},
     "CHI": {"title": "Highest temperature in Chicago on", "tz": "CT"},
     "DAL": {"title": "Highest temperature in Dallas on", "tz": "CT"},
     "SFO": {"title": "Highest temperature in San Francisco on", "tz": "PT"},
+    "MIA": {"title": "Highest temperature in Miami on", "tz": "ET"},
+    "ATL": {"title": "Highest temperature in Atlanta on", "tz": "ET"},
+    "AUS": {"title": "Highest temperature in Austin on", "tz": "CT"},
+    "HOU": {"title": "Highest temperature in Houston on", "tz": "CT"},
+    "DEN": {"title": "Highest temperature in Denver on", "tz": "MT"},
+    "LAX": {"title": "Highest temperature in Los Angeles on", "tz": "PT"},
+    "SEA": {"title": "Highest temperature in Seattle on", "tz": "PT"},
 }
 
 _TITLE_DATE = re.compile(
@@ -173,6 +192,14 @@ def is_live_priced(yes_ask_cents) -> bool:
     return yes_ask_cents is not None and LIVE_ASK_MIN_C <= yes_ask_cents <= LIVE_ASK_MAX_C
 
 
+def _gamma_cents(price) -> float | None:
+    """Gamma quote (0-1 dollars, number or string) -> cents, None if absent."""
+    try:
+        return round(float(price) * 100, 1)
+    except (TypeError, ValueError):
+        return None
+
+
 async def capture_kalshi(now_utc: datetime, force: bool) -> list[dict]:
     import os
 
@@ -201,9 +228,17 @@ async def capture_kalshi(now_utc: datetime, force: bool) -> list[dict]:
                 logger.warning(f"{series}: market fetch failed: {exc}")
                 continue
             for mkt in markets:
-                if not is_live_priced(mkt.get("yes_ask")):
-                    continue
                 ticker = mkt.get("ticker", "")
+                base = {
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "venue": "kalshi", "series": series, "ticker": ticker,
+                    "target_date": extract_target_date_from_ticker(ticker),
+                    "quote_bid": mkt.get("yes_bid"), "quote_ask": mkt.get("yes_ask"),
+                    "vol24": mkt.get("volume_24h"), "oi": mkt.get("open_interest"),
+                }
+                if not is_live_priced(mkt.get("yes_ask")):
+                    rows.append({**base, "live": False})
+                    continue
                 try:
                     metrics = kalshi_book_metrics(await client.get_orderbook(ticker))
                 except Exception as exc:  # noqa: BLE001
@@ -211,14 +246,7 @@ async def capture_kalshi(now_utc: datetime, force: bool) -> list[dict]:
                     continue
                 if metrics is None:
                     continue
-                rows.append({
-                    "ts": now_utc.isoformat(timespec="seconds"),
-                    "venue": "kalshi", "series": series, "ticker": ticker,
-                    "target_date": extract_target_date_from_ticker(ticker),
-                    "quote_bid": mkt.get("yes_bid"), "quote_ask": mkt.get("yes_ask"),
-                    "vol24": mkt.get("volume_24h"), "oi": mkt.get("open_interest"),
-                    **metrics,
-                })
+                rows.append({**base, "live": True, **metrics})
     finally:
         await client.stop()
     return rows
@@ -248,10 +276,17 @@ def capture_poly(now_utc: datetime, force: bool) -> list[dict]:
 
     rows: list[dict] = []
     events: list[dict] = []
+    # Date-filter server-side: the unfiltered closed=false weather list is
+    # polluted with hundreds of stale never-resolved markets, so today's
+    # events can drift past any fixed offset walk.
+    date_min = (now_utc - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    date_max = (now_utc + timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
     for offset in (0, 100, 200):
         try:
             batch = _get_json(
-                f"{GAMMA_URL}/events?closed=false&tag_slug=weather&limit=100&offset={offset}")
+                f"{GAMMA_URL}/events?closed=false&tag_slug=weather"
+                f"&end_date_min={date_min}&end_date_max={date_max}"
+                f"&limit=100&offset={offset}")
         except RuntimeError as exc:
             logger.warning(f"gamma events fetch failed: {exc}")
             break
@@ -278,21 +313,28 @@ def capture_poly(now_utc: datetime, force: bool) -> list[dict]:
                 token = json.loads(mkt.get("clobTokenIds") or "[]")[0]
             except (IndexError, json.JSONDecodeError):
                 continue
+            base = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "venue": "poly", "series": f"POLY_{city}",
+                "ticker": mkt.get("question", "")[:80], "token_id": token,
+                "target_date": local_day,
+                "vol24": round(float(mkt.get("volume24hr") or 0)),
+            }
+            quote_ask = _gamma_cents(mkt.get("bestAsk"))
+            if not is_live_priced(quote_ask):
+                rows.append({
+                    **base, "live": False,
+                    "yes_bid": _gamma_cents(mkt.get("bestBid")), "yes_ask": quote_ask,
+                })
+                continue
             try:
                 metrics = poly_book_metrics(_get_json(f"{CLOB_URL}/book?token_id={token}"))
             except RuntimeError as exc:
                 logger.warning(f"poly {city} book fetch failed: {exc}")
                 continue
-            if metrics is None or not is_live_priced(metrics["yes_ask"]):
+            if metrics is None:
                 continue
-            rows.append({
-                "ts": now_utc.isoformat(timespec="seconds"),
-                "venue": "poly", "series": f"POLY_{city}",
-                "ticker": mkt.get("question", "")[:80], "token_id": token,
-                "target_date": local_day,
-                "vol24": round(float(mkt.get("volume24hr") or 0)),
-                **metrics,
-            })
+            rows.append({**base, "live": is_live_priced(metrics["yes_ask"]), **metrics})
             time.sleep(0.1)
     return rows
 
@@ -340,10 +382,13 @@ def main() -> None:
     venues = {v.strip() for v in args.venues.split(",")}
     now_utc = datetime.now(timezone.utc)
     rows: list[dict] = []
-    if "kalshi" in venues:
-        rows += asyncio.run(capture_kalshi(now_utc, args.force))
+    # Poly first: it is a handful of fast public fetches, while the Kalshi
+    # pass can burn half an hour in post-wake DNS retries and push Poly's
+    # books out of their capture window.
     if "poly" in venues:
         rows += capture_poly(now_utc, args.force)
+    if "kalshi" in venues:
+        rows += asyncio.run(capture_kalshi(now_utc, args.force))
 
     if args.dry_run:
         for row in rows:
