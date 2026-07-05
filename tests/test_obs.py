@@ -72,3 +72,15 @@ class TestClimateDayStart:
         tz = ZoneInfo("America/Phoenix")
         now = datetime(2026, 7, 4, 12, 0, tzinfo=tz)
         assert obs.climate_day_start(tz, now).hour == 0
+
+
+class TestPreciseCelsius:
+    """Integer-°C readings (±0.9°F) can't support certainty math (KAUS 2026-07-04)."""
+
+    def test_integer_celsius_rejected(self):
+        assert not obs.is_precise_celsius(24.0)   # the 75.2°F=24.0°C false min
+        assert not obs.is_precise_celsius(-3.0)
+
+    def test_tenth_celsius_accepted(self):
+        assert obs.is_precise_celsius(24.4)       # 11:53Z METAR 75.9°F
+        assert obs.is_precise_celsius(23.9)
