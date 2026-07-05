@@ -3,10 +3,10 @@
 Watchdog — Alert if cron jobs stop running, and self-heal missed daily jobs.
 
 Checks heartbeats.json for stale services and sends Discord alerts.
-If a daily job (morning_check, backtest_collector, bias_collector) is stale
-and its cron window has already passed — typically because the Mac slept
-through the tick — the watchdog re-spawns it via the venv python, at most
-once per service per day.
+If backtest_collector is stale and its cron window has already passed —
+typically because the host slept/was down through the tick — the watchdog
+re-spawns it via the venv python (pinned to the missed date), at most once
+per service per day.
 
 Runs every 15 minutes via cron. Anti-spam: alerts at most once per hour.
 
@@ -35,15 +35,17 @@ VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python3"
 LOGS_DIR = PROJECT_ROOT / "logs"
 CATCHUP_STATE_FILE = PROJECT_ROOT / "watchdog_catchup.json"
 
-# Expected heartbeat intervals per service (hours)
+# Expected heartbeat intervals per service (hours).
+# 2026-07-05 KDE-stack consolidation: auto_scan / morning_check /
+# bias_collector retired (KDE forecasting measured -EV in June; the
+# corrections and advisory pings served only that path), and auto_trader
+# reduced to one daily 15:00 ET scan feeding the dashboard's opportunities
+# panel.
 EXPECTED_INTERVALS = {
-    "auto_scan": 7,            # Beat written by auto_trader's run_scan (6,8,10,15,16,23). Allow 7h.
-    "auto_trader": 7,          # Runs 6x daily, max gap 23→6 = 7h.
+    "auto_trader": 26,         # Runs once daily at 15:00 ET. Allow 26h.
     "position_monitor": 0.25,  # Runs every 5 min. Allow 15 min.
     "peak_monitor": 16,        # Runs every 10 min, 13-22 ET. Overnight gap ~14h. Allow 16h.
     "backtest_collector": 25,  # Runs daily at 8 AM. Allow 25h.
-    "morning_check": 25,       # Runs daily at 6:30 AM. Allow 25h.
-    "bias_collector": 25,      # Runs daily at 8:30 AM. Allow 25h.
     "shadow_logger": 2,        # Runs every 30 min (beats even out of window). Allow 2h.
     "dead_bracket_sweeper": 2,  # Runs every 15 min (beats even when nothing found). Allow 2h.
     "live_watch": 2,            # Runs every 10 min (read-only live journal). Allow 2h.
@@ -53,12 +55,11 @@ EXPECTED_INTERVALS = {
     "audit_coverage": 192,      # Runs Sundays 17:30. Allow 8 days.
 }
 
-# Daily cron jobs the watchdog can re-run when the Mac slept through the tick.
-# service -> (script name, cron window start as fractional hour ET)
+# Daily cron jobs the watchdog can re-run when the host slept through the
+# tick (Mac-era failure class; kept only for backtest_collector because the
+# daily_data.jsonl settlement ground truth must not gap).
 CATCHUP_JOBS: dict[str, tuple[str, float]] = {
-    "morning_check": ("morning_check.py", 6.5),             # cron: 30 6 * * *
     "backtest_collector": ("backtest_collector.py", 8.0),   # cron: 0 8 * * *
-    "bias_collector": ("bias_collector.py", 8.5),           # cron: 30 8 * * *
 }
 
 # Don't spam Discord — alert at most once per hour
@@ -101,49 +102,6 @@ def _spawn_job(service: str, script: str, now: datetime, target_date: str | None
         return False
 
 
-def _daily_data_has(target_date: str) -> bool:
-    """True if backtest/daily_data.jsonl holds a usable settlement row (actual_high
-    present) for target_date — the exact condition bias_collector gates on."""
-    f = PROJECT_ROOT / "backtest" / "daily_data.jsonl"
-    if not f.exists():
-        return False
-    try:
-        with open(f) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or f'"{target_date}"' not in line:
-                    continue
-                try:
-                    r = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if r.get("date") == target_date and r.get("actual_high") is not None:
-                    return True
-    except OSError:
-        pass
-    return False
-
-
-def _run_sync(script: str, target_date: str, now: datetime, timeout: int = 240) -> bool:
-    """Run a daily job synchronously for a specific date to satisfy a dependency
-    before spawning a dependent job. Bounded by timeout so a hung run can't stall
-    the every-15-min watchdog tick."""
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOGS_DIR / f"catchup_{Path(script).stem}_{now.strftime('%Y-%m-%d')}.log"
-    try:
-        with open(log_path, "a") as log_file:
-            subprocess.run(
-                [str(VENV_PYTHON), str(PROJECT_ROOT / script), "--date", target_date],
-                stdout=log_file, stderr=subprocess.STDOUT,
-                cwd=str(PROJECT_ROOT), timeout=timeout, check=False,
-            )
-        print(f"  Ran dependency {script} --date {target_date} (sync)")
-        return True
-    except (OSError, subprocess.TimeoutExpired) as e:
-        print(f"  Dependency run {script} failed: {e}")
-        return False
-
-
 def attempt_catchup(stale_services: list[str], now: datetime) -> list[str]:
     """Re-spawn sleep-missed daily jobs, at most once per service per day.
 
@@ -165,20 +123,9 @@ def attempt_catchup(stale_services: list[str], now: datetime) -> list[str]:
         if state.get(service) == today:
             continue  # per-day guard: already retriggered
 
-        # Collectors target a specific date; pin it so a drifted catch-up still
-        # backfills the actually-missed day. morning_check takes no --date.
-        target = missed_date if service in ("backtest_collector", "bias_collector") else None
-
-        # Dependency ordering: bias_collector needs yesterday's settlement row.
-        # backtest_collector's own catch-up only fires once it crosses 25h stale —
-        # which, after a late prior-day run, lands in the evening, AFTER bias's
-        # morning catch-up has already run and given up. So if the row is missing,
-        # collect it synchronously here first rather than waste bias's once-a-day
-        # catch-up on a no-data exit.
-        if service == "bias_collector" and not _daily_data_has(missed_date):
-            _run_sync("backtest_collector.py", missed_date, now)
-
-        if _spawn_job(service, script, now, target):
+        # Pin the collector to the actually-missed date so a drifted catch-up
+        # still backfills the right day.
+        if _spawn_job(service, script, now, missed_date):
             state[service] = today
             spawned.append(service)
 

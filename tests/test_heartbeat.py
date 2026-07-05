@@ -136,9 +136,16 @@ class TestWatchdogCatchup:
     def _now(self, hour, minute=0):
         return datetime(2026, 6, 12, hour, minute, tzinfo=self.watchdog.ET)
 
-    def test_bias_collector_monitored(self):
-        assert "bias_collector" in self.watchdog.EXPECTED_INTERVALS
-        assert self.watchdog.EXPECTED_INTERVALS["bias_collector"] == 25
+    def test_kde_stack_consolidation_contract(self):
+        # 2026-07-05: auto_scan / morning_check / bias_collector retired;
+        # auto_trader reduced to one daily scan. The watchdog must neither
+        # expect nor try to respawn the retired services.
+        for retired in ("auto_scan", "morning_check", "bias_collector"):
+            assert retired not in self.watchdog.EXPECTED_INTERVALS
+            assert retired not in self.watchdog.CATCHUP_JOBS
+        assert self.watchdog.EXPECTED_INTERVALS["auto_trader"] == 26
+        assert self.watchdog.EXPECTED_INTERVALS["backtest_collector"] == 25
+        assert "backtest_collector" in self.watchdog.CATCHUP_JOBS
 
     def test_spawns_missed_job_after_window(self):
         spawned = self.watchdog.attempt_catchup(["backtest_collector"], self._now(9, 30))
@@ -158,14 +165,14 @@ class TestWatchdogCatchup:
 
     def test_per_day_guard_blocks_second_spawn(self):
         now = self._now(10, 0)
-        assert self.watchdog.attempt_catchup(["morning_check"], now) == ["morning_check"]
-        assert self.watchdog.attempt_catchup(["morning_check"], now) == []
+        assert self.watchdog.attempt_catchup(["backtest_collector"], now) == ["backtest_collector"]
+        assert self.watchdog.attempt_catchup(["backtest_collector"], now) == []
         assert len(self.popen_calls) == 1
 
     def test_guard_resets_next_day(self):
-        assert self.watchdog.attempt_catchup(["morning_check"], self._now(10, 0)) == ["morning_check"]
+        assert self.watchdog.attempt_catchup(["backtest_collector"], self._now(10, 0)) == ["backtest_collector"]
         next_day = datetime(2026, 6, 13, 10, 0, tzinfo=self.watchdog.ET)
-        assert self.watchdog.attempt_catchup(["morning_check"], next_day) == ["morning_check"]
+        assert self.watchdog.attempt_catchup(["backtest_collector"], next_day) == ["backtest_collector"]
         assert len(self.popen_calls) == 2
 
     def test_non_catchup_services_ignored(self):
@@ -175,17 +182,15 @@ class TestWatchdogCatchup:
         assert spawned == []
         assert self.popen_calls == []
 
-    def test_spawns_multiple_missed_jobs(self):
+    def test_retired_services_never_respawned(self):
+        # Even if stale heartbeats for the retired KDE stack linger in
+        # heartbeats.json, catch-up must only act on backtest_collector.
         spawned = self.watchdog.attempt_catchup(
             ["morning_check", "backtest_collector", "bias_collector"], self._now(9, 0)
         )
-        assert set(spawned) == {"morning_check", "backtest_collector", "bias_collector"}
-        assert len(self.popen_calls) == 3
-        # bias_collector's upstream row is absent in the temp project, so its
-        # catch-up first runs backtest_collector synchronously for the missed date.
-        assert len(self.run_calls) == 1
-        assert self.run_calls[0]["cmd"][1].endswith("backtest_collector.py")
-        assert "--date" in self.run_calls[0]["cmd"]
+        assert spawned == ["backtest_collector"]
+        assert len(self.popen_calls) == 1
+        assert len(self.run_calls) == 0  # bias dependency machinery is gone
 
     def test_collector_catchup_passes_target_date(self):
         """Catch-up pins collectors to the missed date so a drifted run still
@@ -195,21 +200,12 @@ class TestWatchdogCatchup:
         assert "--date" in cmd
         assert cmd[cmd.index("--date") + 1] == "2026-06-11"  # day before the 06-12 run
 
-    def test_bias_skips_dependency_when_upstream_present(self, monkeypatch):
-        """When yesterday's settlement row already exists, no synchronous
-        backtest dependency run is needed — bias is spawned directly."""
-        monkeypatch.setattr(self.watchdog, "_daily_data_has", lambda d: True)
-        spawned = self.watchdog.attempt_catchup(["bias_collector"], self._now(9, 30))
-        assert spawned == ["bias_collector"]
-        assert len(self.run_calls) == 0
-        assert len(self.popen_calls) == 1
-
     def test_spawn_failure_not_marked_done(self, monkeypatch):
         def boom(*args, **kwargs):
             raise OSError("no venv")
 
         monkeypatch.setattr(self.watchdog.subprocess, "Popen", boom)
-        assert self.watchdog.attempt_catchup(["bias_collector"], self._now(9, 0)) == []
+        assert self.watchdog.attempt_catchup(["backtest_collector"], self._now(9, 0)) == []
         # Guard not persisted → next watchdog cycle can retry
         assert not self.watchdog.CATCHUP_STATE_FILE.exists()
 
@@ -262,7 +258,7 @@ class TestWatchdogCatchup:
 
         monkeypatch.setattr(watchdog, "datetime", FakeDateTime)
         watchdog.HEARTBEAT_FILE.write_text(
-            json.dumps(self._seed_heartbeats(now, "bias_collector"))
+            json.dumps(self._seed_heartbeats(now, "backtest_collector"))
         )
 
         alerts = []
@@ -277,5 +273,5 @@ class TestWatchdogCatchup:
         assert len(self.popen_calls) == 1
         assert len(alerts) == 1
         description = alerts[0][0][1]
-        assert "bias_collector" in description
+        assert "backtest_collector" in description
         assert "Auto-respawned" in description

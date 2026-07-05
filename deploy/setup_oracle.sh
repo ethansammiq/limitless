@@ -198,17 +198,11 @@ cat << EOF
 # All times are ET (server timezone set to America/New_York)
 # ═══════════════════════════════════════════════════
 
-# Auto Trader at scan windows (scan-only by default since 2026-07 —
-# order placement needs --execute or AUTO_TRADER_EXECUTE=true in .env)
-0 6 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
-0 8 * * *  $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
-0 10 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+# Auto Trader — ONE daily scan at the 15:00 post-HRRR window (scan-only;
+# KDE forecasting measured -EV 2026-06, kept only to feed the dashboard's
+# opportunities panel). auto_scan / bias_collector / morning_check retired
+# in the 2026-07-05 KDE-stack consolidation.
 0 15 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
-0 16 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
-0 23 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
-
-# Evening scan with Discord alert
-0 22 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_scan.py --quiet >> $LOG_DIR/auto_scan.log 2>&1
 
 # Peak Monitor — every 10 min during peak-formation hours
 */10 13-22 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/peak_monitor.py --once >> $LOG_DIR/peak_monitor.log 2>&1
@@ -234,14 +228,8 @@ cat << EOF
 # Weekly Digest — per-strategy P&L + live summary + dead-bracket base rate + scorecard
 0 18 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/weekly_digest.py >> $LOG_DIR/weekly_digest.log 2>&1
 
-# Morning Check — 6:30 AM (position evaluation)
-30 6 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/morning_check.py >> $LOG_DIR/morning_check.log 2>&1
-
-# Backtest Collector — 8:00 AM (after settlement)
+# Backtest Collector — 8:00 AM (settlement ground truth for daily_data.jsonl)
 0 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest_collector.py >> $LOG_DIR/backtest_collector.log 2>&1
-
-# Bias Collector — 8:30 AM (needs backtest_collector's row first)
-30 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/bias_collector.py >> $LOG_DIR/bias_collector.log 2>&1
 EOF
 ) | crontab -
 

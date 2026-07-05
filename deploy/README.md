@@ -9,19 +9,20 @@ SYSTEMD TIMERS / SERVICES
   dashboard_server    → Always on, localhost:8787 (reach via ssh tunnel)
 
 CRON (ET)
-  auto_trader         → 6/8/10/15/16/23 — SCAN-ONLY by default (exec opt-in)
-  auto_scan --quiet   → 22:00 — evening Discord scan
+  auto_trader         → 15:00 — ONE daily scan (KDE measured -EV; feeds the
+                        dashboard opportunities panel only; exec opt-in)
   peak_monitor        → */10, 13-22 — peak formation tracking
   cli_sniper          → */2 — race the NWS climate report to its repricing
   dead_bracket_sweeper→ */15 — obs-killed brackets (all 40 ladders)
   shadow_logger       → */30 — dual-venue L2 depth capture
   live_watch          → */10 — live-account journal + sell-into-strength ping
-  morning_check       → 6:30 — pre-settlement position evaluation
-  backtest_collector  → 8:00 — settlement data collection
-  bias_collector      → 8:30 — model bias rows (needs backtest row first)
+  backtest_collector  → 8:00 — settlement ground truth (daily_data.jsonl)
   audit_coverage      → Sun 17:30 — series-drift / parse-health self-audit
   sniper_scorecard    → Sun 17:45 — sniper journal → settlement scorecard
   weekly_digest       → Sun 18:00 — per-strategy P&L + base-rate report
+
+  (2026-07-05 consolidation: auto_scan / morning_check / bias_collector
+  retired with the demoted KDE forecasting path.)
 ```
 
 Ad-hoc (human-run, not cron): `scripts/take.py` (the only order-placing
