@@ -38,7 +38,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,6 +47,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from config import STATIONS  # noqa: E402
+from core.brackets import is_dead, parse_subtitle  # noqa: E402
 from core.obs import (  # noqa: E402
     certain_max_settle,
     certain_min_settle,
@@ -74,32 +74,6 @@ LOW_SERIES = {
     "NYC": "KXLOWTNYC", "CHI": "KXLOWTCHI", "DEN": "KXLOWTDEN",
     "MIA": "KXLOWTMIA", "LAX": "KXLOWTLAX",
 }
-
-_SUB_BELOW = re.compile(r"^(-?\d+)° or below$")
-_SUB_RANGE = re.compile(r"^(-?\d+)° to (-?\d+)°$")
-_SUB_ABOVE = re.compile(r"^(-?\d+)° or above$")
-
-
-def parse_subtitle(subtitle: str | None) -> tuple[float | None, float | None] | None:
-    """Inclusive (lo, hi) bounds from a Kalshi bracket subtitle; None ends open."""
-    if not subtitle:
-        return None
-    sub = subtitle.strip()
-    if m := _SUB_BELOW.match(sub):
-        return None, float(m.group(1))
-    if m := _SUB_RANGE.match(sub):
-        return float(m.group(1)), float(m.group(2))
-    if m := _SUB_ABOVE.match(sub):
-        return float(m.group(1)), None
-    return None
-
-
-def is_dead(kind: str, lo: float | None, hi: float | None, certain: int) -> bool:
-    """Can this bracket no longer win, given the certain settle bound?"""
-    if kind == "high":
-        return hi is not None and hi < certain
-    return lo is not None and lo > certain
-
 
 def bid_proceeds_cents(yes_bids: list, min_bid: int = MIN_BID_C) -> tuple[int, int, list]:
     """(net_cents, contracts, levels) selling YES into all bids ≥ min_bid."""
