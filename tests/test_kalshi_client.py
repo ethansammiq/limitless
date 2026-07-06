@@ -300,3 +300,31 @@ class TestNormalizeOrder:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestCheckedReads:
+    """Degraded reads must be distinguishable from real empty results
+    (2026-07-06 review: false $0.00 balance + sniper silent-loss)."""
+
+    def test_get_balance_checked_real(self, client):
+        _capture_requests(client, {"balance": 11759})
+        assert asyncio.run(client.get_balance_checked()) == 117.59
+
+    def test_get_balance_checked_degraded_is_none(self, client):
+        _capture_requests(client, {})          # _req_safe swallowed an error
+        assert asyncio.run(client.get_balance_checked()) is None
+
+    def test_get_balance_still_collapses_to_zero(self, client):
+        # legacy float contract preserved for the 12 other callers
+        _capture_requests(client, {})
+        assert asyncio.run(client.get_balance()) == 0.0
+
+    def test_get_markets_checked_real_empty(self, client):
+        _capture_requests(client, {"markets": []})
+        markets, ok = asyncio.run(client.get_markets_checked(series_ticker="KXHIGHCHI"))
+        assert markets == [] and ok is True     # series genuinely has no markets
+
+    def test_get_markets_checked_degraded(self, client):
+        _capture_requests(client, {})
+        markets, ok = asyncio.run(client.get_markets_checked(series_ticker="KXHIGHCHI"))
+        assert markets == [] and ok is False    # request failed — caller must not trust []

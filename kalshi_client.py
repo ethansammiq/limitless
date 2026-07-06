@@ -381,10 +381,43 @@ class KalshiClient:
         result = await self._req_safe("GET", "/portfolio/balance", auth=True)
         return result.get("balance", 0) / 100.0
 
+    async def get_balance_checked(self) -> float | None:
+        """Balance in dollars, or None when the read was degraded.
+
+        get_balance() collapses a failed read to 0.0, which once got
+        journaled as a false $0.00 and published to the public equity curve
+        (2026-07-05). A live /portfolio/balance response always carries a
+        'balance' key; its absence means _req_safe swallowed an error.
+        """
+        result = await self._req_safe("GET", "/portfolio/balance", auth=True)
+        if not isinstance(result, dict) or "balance" not in result:
+            return None
+        return result["balance"] / 100.0
+
     async def get_positions(self) -> list:
         """Get all open positions."""
         result = await self._req_safe("GET", "/portfolio/positions", auth=True)
         return result.get("market_positions", [])
+
+    async def get_markets_checked(self, series_ticker: str = None,
+                                  status: str = "open", limit: int = 100) -> tuple[list, bool]:
+        """(markets, ok) — ok is False when the read was degraded.
+
+        get_markets() cannot distinguish 'series has no open markets' from
+        'the request failed'; the CLI sniper needs that difference so a
+        transient failure doesn't mark a live product permanently seen and
+        discard a real winner (2026-07-06 review). A real response always
+        has a 'markets' key.
+        """
+        params = [f"limit={limit}"]
+        if series_ticker:
+            params.append(f"series_ticker={series_ticker}")
+        if status:
+            params.append(f"status={status}")
+        result = await self._req_safe("GET", f"/markets?{'&'.join(params)}")
+        if not isinstance(result, dict) or "markets" not in result:
+            return [], False
+        return [normalize_market(m) for m in result["markets"]], True
 
     async def get_fills(self, ticker: str = None, limit: int = 200) -> list:
         """Get fill history."""

@@ -333,7 +333,9 @@ async def run(dry_run: bool, replay: str | None) -> None:
         key = f"{parsed.awips}:{parsed.stamp}"
         if not replay and key in state["seen"]:
             continue
-        state["seen"][key] = now_utc.isoformat(timespec="seconds")
+        # NOTE: 'seen' is marked AFTER a clean market read (below), not here —
+        # a transient API failure during a live product must not permanently
+        # discard it (2026-07-06 review: the sniper's top money path).
         new_parses.append((parsed, group))
         logger.info(f"{awips}: new CLI {parsed.summary_date} "
                     f"{'FINAL' if parsed.is_final else 'floor'} "
@@ -353,10 +355,13 @@ async def run(dry_run: bool, replay: str | None) -> None:
     await client.start()
     try:
         for parsed, group in new_parses:
+            key = f"{parsed.awips}:{parsed.stamp}"
             finality = effective_finality(parsed, group[0].tz, now_utc)
             if finality == "skip":
                 logger.info(f"{parsed.awips}: same-day pre-afternoon product "
                             f"({parsed.summary_date}) — not classifiable")
+                if not replay:
+                    state["seen"][key] = now_utc.isoformat(timespec="seconds")
                 if not dry_run:
                     _journal({"ts": now_utc.isoformat(timespec="seconds"),
                               **asdict(parsed), "skipped": "intraday",
@@ -365,17 +370,23 @@ async def run(dry_run: bool, replay: str | None) -> None:
             parsed.is_final = finality == "final"
             journal_entry = {"ts": now_utc.isoformat(timespec="seconds"),
                              **asdict(parsed), "findings": []}
+            read_ok = True
             for ladder in group:
-                try:
-                    markets = await client.get_markets(series_ticker=ladder.series)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"{ladder.series}: market fetch failed: {exc}")
+                markets, ok = await client.get_markets_checked(series_ticker=ladder.series)
+                if not ok:
+                    read_ok = False
+                    logger.warning(f"{ladder.series}: market read degraded — "
+                                   f"{parsed.awips} left unseen for retry")
                     continue
                 findings = classify(parsed, ladder, markets)
                 priced = await _price_findings(client, findings)
                 journal_entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += priced
+            # Mark seen only on a clean sweep — a degraded read leaves the
+            # product for the next */2 cron to retry.
+            if read_ok and not replay:
+                state["seen"][key] = now_utc.isoformat(timespec="seconds")
             if not dry_run:
                 _journal(journal_entry, now_utc)
     finally:

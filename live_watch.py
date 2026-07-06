@@ -186,9 +186,12 @@ async def run(threshold: int, dry_run: bool) -> None:
     )
     await client.start()
     try:
-        balance = await client.get_balance()
+        # None (not 0.0) on a degraded read — a false $0.00 once reached the
+        # public equity curve (2026-07-05). The balance endpoint can fail
+        # independently of fills, so it needs its own guard.
+        balance = await client.get_balance_checked()
         fills_resp = await client._req_safe("GET", "/portfolio/fills?limit=100", auth=True)
-        if reads_degraded(fills_resp):
+        if reads_degraded(fills_resp) or balance is None:
             logger.error("authenticated reads degraded (auth failure?) — "
                          "skipping journal/snapshot writes to protect live_account.json")
             return

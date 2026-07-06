@@ -1,4 +1,5 @@
 """Tests for cli_sniper pure helpers — real product fixtures, no network."""
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -170,3 +171,59 @@ class TestEffectiveFinality:
     def test_bad_stamp_skips(self):
         assert cs.effective_finality(
             self._p("9999xx", "2026-07-05"), "America/Chicago", self.NOW) == "skip"
+
+
+class TestRunSeenMarking:
+    """End-to-end run() test of the 2026-07-06 fix: a degraded market read
+    must NOT mark a live CLI product 'seen' (which would discard a real
+    winner forever); a clean read marks it seen so it isn't reprocessed."""
+
+    import asyncio as _asyncio
+
+    class _FakeClient:
+        def __init__(self, ok):
+            self._ok = ok
+            self.stopped = False
+
+        def __call__(self, *a, **k):   # stand in for KalshiClient(...)
+            return self
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            self.stopped = True
+
+        async def get_markets_checked(self, series_ticker=None, status="open", limit=100):
+            return ([], self._ok)
+
+    def _run(self, monkeypatch, tmp_path, ok):
+        import asyncio
+        from datetime import datetime, timezone
+        import cli_sniper as csm
+        import kalshi_client
+
+        fixed = datetime(2026, 7, 4, 21, 38, tzinfo=timezone.utc)
+
+        class FakeDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed
+
+        monkeypatch.setattr(csm, "datetime", FakeDT)
+        monkeypatch.setattr(csm, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(csm, "JOURNAL_DIR", tmp_path / "journal")
+        monkeypatch.setattr(csm, "_fetch_product", lambda wfo, awips, version=1: AFTERNOON)
+        monkeypatch.setattr(csm, "stations_in_window", lambda now, groups: ["MDW"])
+        monkeypatch.setattr(kalshi_client, "KalshiClient", self._FakeClient(ok))
+
+        asyncio.run(csm.run(dry_run=False, replay=None))
+        return json.loads((tmp_path / "state.json").read_text())
+
+    def test_degraded_read_leaves_unseen(self, monkeypatch, tmp_path):
+        state = self._run(monkeypatch, tmp_path, ok=False)
+        assert "MDW:042136" not in state["seen"]   # will retry next cron
+
+    def test_clean_read_marks_seen(self, monkeypatch, tmp_path):
+        state = self._run(monkeypatch, tmp_path, ok=True)
+        assert "MDW:042136" in state["seen"]
