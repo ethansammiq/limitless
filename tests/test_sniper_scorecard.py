@@ -101,3 +101,46 @@ class TestBuildAndLoad:
         assert len(out) == 1
         assert out[0]["awips"] == "MDW" and out[0]["is_final"] is False
         assert out[0]["ticker"] == "T1"
+
+
+class TestBugEraExclusion:
+    """The 2026-07-05 finality bug journaled 3 false 'certain winner'
+    findings from same-day 07:31-local products. Scoring them would pollute
+    the pivot-gate sample — load_findings must exclude them by recomputing
+    finality from the calendar (real journal rows as fixtures)."""
+
+    AUS_BUG_ROW = ('{"ts":"2026-07-05T20:30:02+00:00","awips":"AUS",'
+                   '"stamp":"051231","summary_date":"2026-07-05",'
+                   '"is_final":true,"max_f":80,"min_f":74,"findings":'
+                   '[{"ticker":"KXHIGHAUS-26JUL05-T94","series":"KXHIGHAUS",'
+                   '"kind":"buy_winner","ask":1,"ask_depth":155437}]}')
+    NOLA_FLOOR_ROW = ('{"ts":"2026-07-05T22:02:01+00:00","awips":"MSY",'
+                      '"stamp":"052150","summary_date":"2026-07-05",'
+                      '"is_final":false,"max_f":93,"min_f":74,"findings":'
+                      '[{"ticker":"KXLOWTNOLA-26JUL05-B74.5","series":"KXLOWTNOLA",'
+                      '"kind":"buy_winner","ask":45,"ask_depth":9}]}')
+
+    def test_bug_era_intraday_row_excluded(self, tmp_path):
+        d = tmp_path / "j"
+        d.mkdir()
+        (d / "2026-07-05.jsonl").write_text(self.AUS_BUG_ROW + "\n")
+        assert sc.load_findings(d) == []
+
+    def test_legit_afternoon_floor_kept(self, tmp_path):
+        d = tmp_path / "j"
+        d.mkdir()
+        (d / "2026-07-05.jsonl").write_text(self.NOLA_FLOOR_ROW + "\n")
+        out = sc.load_findings(d)
+        assert len(out) == 1
+        assert out[0]["ticker"] == "KXLOWTNOLA-26JUL05-B74.5"
+        assert out[0]["is_final"] is False   # calendar says floor
+
+    def test_rows_without_stamp_trusted_as_journaled(self, tmp_path):
+        d = tmp_path / "j"
+        d.mkdir()
+        (d / "x.jsonl").write_text(
+            '{"ts":"2026-07-04T21:00:00+00:00","awips":"MDW",'
+            '"summary_date":"2026-07-04","is_final":false,"findings":'
+            '[{"ticker":"T1","series":"KXHIGHCHI","kind":"buy_winner","ask":10}]}\n')
+        out = sc.load_findings(d)
+        assert len(out) == 1 and out[0]["is_final"] is False

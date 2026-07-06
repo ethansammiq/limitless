@@ -46,8 +46,40 @@ JOURNAL_DIR = PROJECT_ROOT / "logs" / "cli_sniper"
 VERDICT_FILE = HERE / "sniper_scorecard_verdict.json"
 
 
+def _row_finality(row: dict, tz_by_awips: dict[str, str]) -> str | None:
+    """Recompute the product's finality from the calendar — the same rule
+    cli_sniper enforces live since the 2026-07-05 fix. Three bug-era rows
+    (same-day 07:31-local products regex-marked FINAL) alerted false 1¢
+    certain-winners; scoring them would pollute the pivot-gate sample, so
+    history is judged by the corrected rule. None = insufficient fields,
+    trust the row as journaled."""
+    from cli_sniper import ParsedCLI, effective_finality
+
+    tz = tz_by_awips.get(row.get("awips", ""))
+    stamp, ts = row.get("stamp"), row.get("ts", "")
+    if not tz or not stamp:
+        return None
+    try:
+        ref = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    parsed = ParsedCLI(awips=row["awips"], stamp=stamp,
+                       summary_date=row.get("summary_date", ""),
+                       is_final=bool(row.get("is_final")),
+                       max_f=row.get("max_f"), min_f=row.get("min_f"))
+    return effective_finality(parsed, tz, ref)
+
+
 def load_findings(journal_dir: Path = JOURNAL_DIR, since: datetime | None = None) -> list[dict]:
-    """Flatten journal rows to one dict per finding, carrying parent context."""
+    """Flatten journal rows to one dict per finding, carrying parent context.
+
+    Rows whose product cannot legitimately classify (same-day pre-afternoon
+    issues) are EXCLUDED, and floor/final is recomputed from the calendar,
+    so the scorecard judges history by the same rule as live code.
+    """
+    from ladders import by_awips
+
+    tz_by_awips = {a: g[0].tz for a, g in by_awips().items()}
     out: list[dict] = []
     if not journal_dir.exists():
         return out
@@ -64,12 +96,18 @@ def load_findings(journal_dir: Path = JOURNAL_DIR, since: datetime | None = None
                         continue
                 except ValueError:
                     pass
+            if not row.get("findings"):
+                continue
+            finality = _row_finality(row, tz_by_awips)
+            if finality == "skip":
+                continue  # bug-era intraday product — never classifiable
+            is_final = (finality == "final") if finality else bool(row.get("is_final"))
             for f in row.get("findings") or []:
                 out.append({
                     "ts": ts, "awips": row.get("awips"),
                     "summary_date": row.get("summary_date"),
-                    "is_final": bool(row.get("is_final")),
-                    **f,
+                    "is_final": is_final,
+                    **{**f, "final": is_final},
                 })
     return out
 

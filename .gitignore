@@ -68,3 +68,4 @@ model_bias_corrections.json
 backtest/sniper_scorecard_verdict.json
 cli_sniper_state.json
 .claude/
+backtest/alert_decay_cache.json
