@@ -63,3 +63,16 @@ class TestBuildReport:
         text, gaps = build_report([], [], [], 8, 7)
         assert gaps is False
         assert text.count("✓") == 3
+
+
+class TestSeriesCheckFailClosed:
+    def test_failed_series_check_is_a_gap_not_clean(self):
+        text, gaps = build_report([], [], [], 8, 7, series_check_failed=True)
+        assert gaps is True                       # alerts instead of false ✓
+        assert "COULD NOT CHECK" in text
+        assert text.count("✓") == 2               # parse + office still clean
+
+    def test_clean_check_unchanged(self):
+        text, gaps = build_report([], [], [], 8, 7, series_check_failed=False)
+        assert gaps is False
+        assert text.count("✓") == 3

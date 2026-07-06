@@ -116,11 +116,16 @@ async def fetch_live_weather_series() -> set[str]:
 
 
 def build_report(missing: list[str], parse_gaps: list[str],
-                 silent: list[str], product_count: int, days: int) -> tuple[str, bool]:
-    gaps = bool(missing or parse_gaps or silent)
+                 silent: list[str], product_count: int, days: int,
+                 series_check_failed: bool = False) -> tuple[str, bool]:
+    gaps = bool(missing or parse_gaps or silent or series_check_failed)
     lines = [f"Coverage audit — {product_count} products over {days}d"]
-    lines.append(f"• series drift: {len(missing)} live weather series NOT in ladders.json"
-                 + (f" → {', '.join(missing)} (review + re-run build_ladder_config.py)" if missing else " ✓"))
+    if series_check_failed:
+        lines.append("• series drift: ⚠ COULD NOT CHECK (live series listing failed) "
+                     "— drift status unknown, not verified clean")
+    else:
+        lines.append(f"• series drift: {len(missing)} live weather series NOT in ladders.json"
+                     + (f" → {', '.join(missing)} (review + re-run build_ladder_config.py)" if missing else " ✓"))
     lines.append(f"• parse health: {len(parse_gaps)} office(s) with no-temp parses"
                  + (f" → {', '.join(parse_gaps)}" if parse_gaps else " ✓"))
     lines.append(f"• office silence: {len(silent)} laddered WFO(s) produced nothing"
@@ -135,18 +140,21 @@ async def main_async(days: int, report: str) -> None:
     laddered_wfos = {lad.wfo for lad in ladders}
     awips_to_wfo = {lad.awips: lad.wfo for lad in ladders}
 
+    series_check_failed = False
+    missing: list[str] = []
     try:
         live = await fetch_live_weather_series()
         missing = missing_series(live, laddered)
-    except Exception as exc:  # noqa: BLE001 — network; report as unknown, don't crash
+    except Exception as exc:  # noqa: BLE001 — network; report as UNKNOWN (fail closed), don't crash
         logger.warning(f"series listing failed: {exc}")
-        missing = []
+        series_check_failed = True
 
     products = load_journal_products(SNIPER_JOURNAL, since)
     parse_gaps = parse_health_gaps(products)
     silent = silent_offices(products, laddered_wfos, awips_to_wfo)
 
-    text, has_gaps = build_report(missing, parse_gaps, silent, len(products), days)
+    text, has_gaps = build_report(missing, parse_gaps, silent, len(products), days,
+                                  series_check_failed)
     print(text)
     if report == "discord" and has_gaps:
         try:

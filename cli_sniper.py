@@ -57,6 +57,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
+from core.io import atomic_write_json  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_awips  # noqa: E402
@@ -231,7 +232,7 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=1))
+    atomic_write_json(STATE_FILE, state, indent=1)
 
 
 def _journal(entry: dict, now_utc: datetime) -> None:

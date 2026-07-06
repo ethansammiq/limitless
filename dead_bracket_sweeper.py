@@ -48,6 +48,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from core.brackets import is_dead, parse_subtitle  # noqa: E402
+from core.io import atomic_write_json  # noqa: E402
 from core.obs import (  # noqa: E402
     certain_max_settle,
     certain_min_settle,
@@ -129,7 +130,7 @@ def record_alert(state: dict, ticker: str, net_cents: int) -> None:
         "net_cents": net_cents,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    atomic_write_json(STATE_FILE, state)
 
 
 async def sweep() -> list[dict]:

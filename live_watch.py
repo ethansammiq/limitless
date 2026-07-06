@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from core.io import atomic_write_json  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from log_setup import get_logger  # noqa: E402
 
@@ -234,9 +235,7 @@ async def run(threshold: int, dry_run: bool) -> None:
         # Latest full snapshot for the dashboard (atomic overwrite).
         LOGS.mkdir(parents=True, exist_ok=True)
         snap = account_snapshot(balance, positions, (fills_resp or {}).get("fills"), now)
-        tmp = ACCOUNT_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(snap, indent=2))
-        tmp.replace(ACCOUNT_FILE)
+        atomic_write_json(ACCOUNT_FILE, snap)
 
         state = {}
         if STATE_FILE.exists():
@@ -268,7 +267,7 @@ async def run(threshold: int, dry_run: bool) -> None:
                 logger.warning(f"discord alert failed: {exc}")
             for p, bid in pings:
                 state[p["ticker"]] = {"bid": bid, "ts": now}
-            STATE_FILE.write_text(json.dumps(state, indent=2))
+            atomic_write_json(STATE_FILE, state)
             logger.info(f"strength alert sent for {len(pings)} position(s)")
     finally:
         await client.stop()
