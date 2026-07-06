@@ -169,7 +169,9 @@ RECOMMENDATION: [BUY / PASS]
 | `weekly_digest.py` | Per-strategy P&L + dead-bracket base rate + scorecard line (cron Sun 18:00) |
 | `backtest/sniper_scorecard.py` | Joins sniper journal → Kalshi settlement: does the alert win, by how much (cron Sun 17:45) |
 | `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
+| `backtest/alert_decay.py` | Edge half-life after an alert via 1-min candles — the daemon go/no-go evidence (ad-hoc) |
 | `scripts/audit_coverage.py` | Series-drift / parse-health / office-silence self-audit (cron Sun 17:30) |
+| `scripts/export_public_stats.py` | Sanitized public snapshot for ethansam.io (cron */30; whitelist + secret-assertions) |
 
 ## 8. API REFERENCE
 

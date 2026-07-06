@@ -177,13 +177,11 @@ ssh ubuntu@<ip> 'crontab -l'
 ├── auto_trader.py          # Main scan+trade loop (cron)
 ├── position_monitor.py     # Exit rules (systemd timer)
 ├── watchdog.py             # Health checks (systemd timer)
-├── morning_check.py        # Pre-settlement (cron)
-├── backtest_collector.py   # Data collection (cron)
-├── edge_scanner_v2.py      # KDE + ensemble scanner
+├── backtest_collector.py   # Settlement ground truth (cron)
+├── cli_sniper.py           # NWS CLI race — the live edge (cron */2)
+├── dead_bracket_sweeper.py # Obs-killed brackets (cron */15)
+├── live_watch.py           # Live-account journal (cron */10)
 ├── kalshi_client.py        # API client
-├── execute_trade.py        # Order execution
-├── position_store.py       # Atomic file store
-├── trading_guards.py       # Safety checks
 ├── notifications.py        # Discord alerts
 └── deploy/
     ├── setup_oracle.sh     # One-time server setup
@@ -195,7 +193,7 @@ ssh ubuntu@<ip> 'crontab -l'
 ├── position_monitor.log
 ├── watchdog.log
 ├── backtest_collector.log
-└── morning_check.log       # 14-day rotation
+└── cli_sniper.log
 ```
 
 ---
