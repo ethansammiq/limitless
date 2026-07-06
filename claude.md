@@ -168,6 +168,7 @@ RECOMMENDATION: [BUY / PASS]
 | `scripts/take.py` | The ONLY order-placing entry point — human-run; alerts print the exact command |
 | `weekly_digest.py` | Per-strategy P&L + dead-bracket base rate + scorecard line (cron Sun 18:00) |
 | `backtest/sniper_scorecard.py` | Joins sniper journal → Kalshi settlement: does the alert win, by how much (cron Sun 17:45) |
+| `trade_autopsy.py` | Reconstructs ONE real position (fills → settlement → the sniper alert that flagged it) into a how/why-it-won writeup — the win-side mirror of `postmortem_2026-01-20.md` (ad-hoc) |
 | `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
 | `scripts/audit_coverage.py` | Series-drift / parse-health / office-silence self-audit (cron Sun 17:30) |
 
