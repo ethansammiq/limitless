@@ -22,13 +22,19 @@ jobs:
       - name: Fetch snapshot over cat-only SSH key
         env:
           KEY: ${{ secrets.STATS_SSH_KEY }}
+          # Target (user@host) and pinned host key live in secrets so this
+          # PUBLIC file doesn't advertise the box holding the trading key,
+          # and so the connection is host-key-pinned rather than TOFU.
+          TARGET: ${{ secrets.VPS_SSH_TARGET }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/stats_key
           chmod 600 ~/.ssh/stats_key
-          ssh-keyscan -T 10 37.27.241.140 >> ~/.ssh/known_hosts 2>/dev/null
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           ssh -i ~/.ssh/stats_key -o BatchMode=yes -o ConnectTimeout=15 \
-            root@37.27.241.140 snapshot > public_stats.json
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$TARGET" snapshot > public_stats.json
           python3 -m json.tool public_stats.json > /dev/null  # valid-JSON gate
 
       - name: Force-push single-commit stats branch
