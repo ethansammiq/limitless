@@ -36,8 +36,17 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from config import STATIONS
 from log_setup import get_logger
-from edge_scanner_v2 import CITIES
+
+# Settlement collection needs only the obs URL and series per city — built
+# straight from config.STATIONS (this used to import edge_scanner_v2.CITIES,
+# which welded the collector to the retired KDE stack).
+CITIES = {
+    code: {"name": s.city_name, "series": s.series_ticker,
+           "nws_obs": s.nws_observation_url}
+    for code, s in STATIONS.items()
+}
 
 logger = get_logger(__name__)
 
@@ -291,34 +300,8 @@ async def collect_daily_data(target_date: datetime = None):
     # Enrich any records that have snapshots but missing per_model_means
     enrich_daily_data()
 
-    # Enrich calibration records with settlement data
-    try:
-        from calibration_tracker import enrich_with_settlement
-        enriched_cal = 0
-        for r in records:
-            if r.get("actual_high") is not None:
-                result = enrich_with_settlement(
-                    r["date"], r["city"], r["actual_high"]
-                )
-                if result:
-                    enriched_cal += 1
-        if enriched_cal:
-            print(f"  Enriched {enriched_cal} calibration records with settlement data")
-    except Exception as cal_err:
-        logger.warning(f"Calibration enrichment failed: {cal_err}")
-
-    # Enrich signal tracker records with settlement data
-    try:
-        from signal_tracker import enrich_signals
-        enriched_sig = 0
-        for r in records:
-            if r.get("actual_high") is not None:
-                n = enrich_signals(r["date"], r["city"], r["actual_high"])
-                enriched_sig += n
-        if enriched_sig:
-            print(f"  Enriched {enriched_sig} signal records with settlement data")
-    except Exception as sig_err:
-        logger.warning(f"Signal enrichment failed: {sig_err}")
+    # (KDE calibration/signal enrichment removed 2026-07-06 with the stack —
+    # this job's product is the daily_data.jsonl settlement ground truth.)
 
     # Record successful completion for watchdog
     from heartbeat import write_heartbeat

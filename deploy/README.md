@@ -4,25 +4,24 @@
 
 ```
 SYSTEMD TIMERS / SERVICES
-  position_monitor    → Every 5 min — exits, settlement, paper ledger
   watchdog            → Every 15 min — health checks + self-healing
   dashboard_server    → Always on, localhost:8787 (reach via ssh tunnel)
 
 CRON (ET)
-  auto_trader         → 15:00 — ONE daily scan (KDE measured -EV; feeds the
-                        dashboard opportunities panel only; exec opt-in)
   peak_monitor        → */10, 13-22 — peak formation tracking
   cli_sniper          → */2 — race the NWS climate report to its repricing
   dead_bracket_sweeper→ */15 — obs-killed brackets (all 40 ladders)
   shadow_logger       → */30 — dual-venue L2 depth capture
   live_watch          → */10 — live-account journal + sell-into-strength ping
+  export_public_stats → */30 — sanitized snapshot for ethansam.io
   backtest_collector  → 8:00 — settlement ground truth (daily_data.jsonl)
   audit_coverage      → Sun 17:30 — series-drift / parse-health self-audit
   sniper_scorecard    → Sun 17:45 — sniper journal → settlement scorecard
-  weekly_digest       → Sun 18:00 — per-strategy P&L + base-rate report
+  weekly_digest       → Sun 18:00 — live summary + base-rate report
 
-  (2026-07-05 consolidation: auto_scan / morning_check / bias_collector
-  retired with the demoted KDE forecasting path.)
+  (2026-07-06: the KDE stack — auto_trader / position_monitor / auto_scan /
+  morning_check / bias_collector and the paper ledger — was deleted;
+  KDE forecasting measured -EV in June.)
 ```
 
 Ad-hoc (human-run, not cron): `scripts/take.py` (the only order-placing
@@ -37,7 +36,7 @@ always-on VPS is the fix for the entire sleep-related incident class
 
 ## Provider choice (minmax)
 
-This workload is tiny — 13 cron services that fire and exit, one small
+This workload is tiny — ~10 cron services that fire and exit, one small
 dashboard, peak RAM a few hundred MB. The floor is **1 GB RAM / 1 shared vCPU
 / ~10 GB**. US-East is a nice-to-have, not a need: the VPS is alert-only
 (orders are human-run from the Mac via take.py), so ~90ms EU latency is
@@ -73,10 +72,10 @@ list.
 
 ### 2. Migrate — ORDER MATTERS (no dual writers)
 
-The paper ledger is file-based state. Two machines running
-position_monitor against separate copies will diverge silently — the
-exact corruption class the 2026-06-25 rebuild fixed. Migrate in this
-order:
+State (journals, heartbeats, dedup files) is file-based. Two machines
+running the same jobs against separate copies will diverge silently —
+the exact corruption class the 2026-06-25 rebuild fixed. Migrate in
+this order:
 
 ```bash
 # a. STOP the Mac's writers FIRST
@@ -91,9 +90,9 @@ REMOTE_USER=root ./deploy/deploy.sh <instance-ip> --full   # root: Hetzner/DO/Vu
 ```
 
 `--full` rsyncs code (state excluded), scps `.env` + key, runs the
-one-time `--state` migration (ledger, heartbeats, backtest data, shadow
-books), executes `setup_oracle.sh` (Python, chrony, systemd, cron —
-jobs go live at this point), then runs the test suite remotely.
+one-time `--state` migration (journals, heartbeats, backtest data,
+shadow books), executes `setup_oracle.sh` (Python, chrony, systemd,
+cron — jobs go live at this point), then runs the test suite remotely.
 
 ### 3. Verify
 
@@ -123,7 +122,7 @@ Cron no longer runs from the Mac's working tree. Code changes flow:
 ```
 
 Never run `--state` again once the server is live — it would overwrite
-the live ledger with stale Mac copies.
+the live journals with stale Mac copies.
 
 ---
 
@@ -131,14 +130,8 @@ the live ledger with stale Mac copies.
 
 ### View logs
 ```bash
-ssh ubuntu@<ip> 'tail -f /var/log/weather-edge/auto_trader.log'
-ssh ubuntu@<ip> 'tail -f /var/log/weather-edge/position_monitor.log'
-```
-
-### Emergency stop
-```bash
-ssh ubuntu@<ip> 'touch ~/limitless/PAUSE_TRADING'     # HALT
-ssh ubuntu@<ip> 'rm ~/limitless/PAUSE_TRADING'         # RESUME
+ssh ubuntu@<ip> 'tail -f /var/log/weather-edge/cli_sniper.log'
+ssh ubuntu@<ip> 'tail -f /var/log/weather-edge/live_watch.log'
 ```
 
 ### Push code updates
@@ -147,14 +140,14 @@ ssh ubuntu@<ip> 'rm ~/limitless/PAUSE_TRADING'         # RESUME
 ./deploy/deploy.sh <ip> --secrets  # Upload just .env + key
 ```
 
-### Check positions
+### Check the live account
 ```bash
-ssh ubuntu@<ip> 'cat ~/limitless/positions.json | python3 -m json.tool'
+ssh ubuntu@<ip> 'cat ~/limitless/logs/live_account.json | python3 -m json.tool'
 ```
 
-### Run a manual scan
+### Run a manual sweep
 ```bash
-ssh ubuntu@<ip> 'cd ~/limitless && source .venv/bin/activate && python3 auto_trader.py --dry-run --city NYC'
+ssh ubuntu@<ip> 'cd ~/limitless && .venv/bin/python3 dead_bracket_sweeper.py --once --dry-run'
 ```
 
 ### Service status
@@ -172,10 +165,7 @@ ssh ubuntu@<ip> 'crontab -l'
 ├── .env                    # Secrets (never rsync'd)
 ├── .venv/                  # Python venv
 ├── kalshi_private_key.pem  # RSA key (chmod 600)
-├── positions.json          # Live positions (auto-created)
-├── config.py               # All settings
-├── auto_trader.py          # Main scan+trade loop (cron)
-├── position_monitor.py     # Exit rules (systemd timer)
+├── ladders.json            # All 40 weather ladders + settlement stations
 ├── watchdog.py             # Health checks (systemd timer)
 ├── backtest_collector.py   # Settlement ground truth (cron)
 ├── cli_sniper.py           # NWS CLI race — the live edge (cron */2)
@@ -189,11 +179,11 @@ ssh ubuntu@<ip> 'crontab -l'
     └── .env.example        # Template
 
 /var/log/weather-edge/
-├── auto_trader.log
-├── position_monitor.log
+├── cli_sniper.log
+├── dead_bracket_sweeper.log
+├── live_watch.log
 ├── watchdog.log
-├── backtest_collector.log
-└── cli_sniper.log
+└── backtest_collector.log
 ```
 
 ---
@@ -226,9 +216,9 @@ ssh ubuntu@<ip> 'grep CRON /var/log/syslog | tail -20'
 ssh ubuntu@<ip> 'timedatectl'
 ```
 
-### Position monitor not running
+### Watchdog / dashboard not running
 ```bash
-ssh ubuntu@<ip> 'systemctl status weather-edge-monitor.timer'
-ssh ubuntu@<ip> 'systemctl status weather-edge-monitor.service'
-ssh ubuntu@<ip> 'journalctl -u weather-edge-monitor -n 20'
+ssh ubuntu@<ip> 'systemctl status weather-edge-watchdog.timer'
+ssh ubuntu@<ip> 'systemctl status weather-edge-dashboard.service'
+ssh ubuntu@<ip> 'journalctl -u weather-edge-watchdog -n 20'
 ```

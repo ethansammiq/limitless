@@ -9,25 +9,6 @@ OLD = (NOW - timedelta(days=30)).isoformat()
 SINCE = NOW - timedelta(days=7)
 
 
-class TestPaperByStrategy:
-    def test_groups_and_windows(self):
-        positions = [
-            {"strategy": "peak_trader", "entry_time": RECENT, "status": "settled", "pnl_realized": 2.0},
-            {"strategy": "peak_trader", "entry_time": RECENT, "status": "settled", "pnl_realized": -0.5},
-            {"strategy": None, "entry_time": RECENT, "status": "open", "pnl_realized": None},
-            {"strategy": "peak_trader", "entry_time": OLD, "status": "settled", "pnl_realized": 99.0},
-        ]
-        agg = wd.paper_by_strategy(positions, SINCE)
-        assert agg["peak_trader"]["n"] == 2
-        assert agg["peak_trader"]["wins"] == 1
-        assert agg["peak_trader"]["settled"] == 2
-        assert agg["peak_trader"]["pnl"] == 1.5
-        assert agg["unattributed"]["open"] == 1
-
-    def test_empty(self):
-        assert wd.paper_by_strategy([], SINCE) == {}
-
-
 class TestLiveSummary:
     def test_fees_notional_delta(self):
         fills = [
@@ -54,5 +35,6 @@ class TestDigestBuilds:
     def test_returns_title_and_body(self):
         title, body = wd.build_digest(7)
         assert "digest" in title.lower()
-        assert "Paper, per strategy" in body
+        assert "Paper" not in body      # KDE paper section retired 2026-07-06
+        assert "Live account" in body
         assert "Dead-bracket base rate" in body

@@ -132,9 +132,9 @@ def normalize_orderbook(raw: dict) -> dict:
     The 2026-03-12 fixed-point migration replaced the ``orderbook`` key
     (integer-cent prices, integer quantities) with ``orderbook_fp`` whose
     ``yes_dollars``/``no_dollars`` levels are ['0.4000', '35.15'] — dollar-string
-    price, fixed-point-string size. Every consumer (PaperBroker fill sim,
-    edge_scanner depth map, get_orderbook callers) still reads the old ``yes``/
-    ``no`` integer shape, so a raw response silently parsed to an EMPTY book —
+    price, fixed-point-string size. Every get_orderbook consumer still reads
+    the old ``yes``/``no`` integer shape, so a raw response silently parsed to
+    an EMPTY book —
     the root cause of the 0% fill rate. Idempotent across both shapes.
     """
     if not isinstance(raw, dict):
@@ -169,11 +169,10 @@ def normalize_order(order: dict) -> dict:
     ``outcome_side`` ("yes"/"no") + ``book_side`` ("bid"/"ask", YES-book
     perspective) — the legacy ``side``/``action`` pair is deprecated, slated
     for removal after 2026-05-14 — and money/size as ``_dollars``/``_fp``
-    strings. position_monitor filters resting orders on ``action == "buy"``,
-    so once Kalshi drops the legacy fields the bot-window protection would
-    silently skip every order without this. Idempotent: legacy keys are only
-    filled when absent, so PaperBroker orders (born with the V1 shape) pass
-    through untouched.
+    strings. Callers filter orders on the legacy ``action``/``side`` pair, so
+    once Kalshi drops the legacy fields those filters would silently match
+    nothing without this. Idempotent: legacy keys are only filled when absent,
+    so V1-shaped orders pass through untouched.
     """
     if not isinstance(order, dict):
         return order

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -53,7 +54,6 @@ from config import (
     PEAK_EARLIEST_HOUR,
     PEAK_LATEST_HOUR,
     PEAK_POLL_INTERVAL_SEC,
-    PEAK_TRADE_ENABLED,
 )
 from notifications import send_discord_embeds
 from heartbeat import write_heartbeat
@@ -72,10 +72,6 @@ STATE_FILE = PROJECT_ROOT / "peak_state.json"
 
 ET_TZ = ZoneInfo("America/New_York")
 
-# Max Strategy G execution attempts per city per day. Failed attempts can send
-# a Discord failure alert, so this bounds alert spam while still retrying
-# transient API errors on later polls.
-PEAK_TRADE_MAX_ATTEMPTS = 3
 
 # Max bracket-price fetch attempts after a peak is confirmed before we give up
 # and alert with "market may be closed" (the fetch can't distinguish an API
@@ -403,6 +399,46 @@ def detect_peak(
 
 
 # ─── Bracket Price Lookup ──────────────────────────────
+# (fetch/parse helpers moved in from edge_scanner_v2 when the KDE stack was
+# retired, 2026-07-06 — peak_monitor was their last live consumer.)
+
+_KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+
+
+async def _fetch_kalshi_brackets(session: aiohttp.ClientSession, city_key: str) -> list[dict]:
+    """Open Kalshi brackets for a city; [] on any failure."""
+    from kalshi_client import normalize_market
+
+    series = STATIONS[city_key].series_ticker
+    try:
+        url = f"{_KALSHI_BASE}/markets?series_ticker={series}&status=open&limit=100"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+            return [normalize_market(m) for m in data.get("markets", [])]
+    except Exception as e:  # noqa: BLE001 — one city must not kill the poll
+        logger.error("Kalshi fetch failed for %s: %s", city_key, e)
+        return []
+
+
+def parse_bracket_range(title: str) -> tuple[float, float, str]:
+    """Loose market-title parser → (low, high, kind)."""
+    clean = title.replace("°F", "").replace("°", "").replace("*", "").strip()
+    if re.search(r"below|under|or less|<", clean, re.I):
+        nums = re.findall(r"([\d.]+)", clean)
+        if nums:
+            return (-999, float(nums[0]), "low_tail")
+    if re.search(r"above|or more|or higher|>", clean, re.I):
+        nums = re.findall(r"([\d.]+)", clean)
+        if nums:
+            return (float(nums[0]), 999, "high_tail")
+    match = re.search(r"([\d.]+)\s*(?:to|-)\s*([\d.]+)", clean)
+    if match:
+        low, high = float(match.group(1)), float(match.group(2))
+        return (low, high + 1, "range")
+    return (0, 0, "unknown")
+
 
 async def fetch_bracket_prices(
     session: aiohttp.ClientSession,
@@ -411,12 +447,11 @@ async def fetch_bracket_prices(
     """Fetch current Kalshi bracket prices for a city.
 
     Returns None when no market data came back (exception OR empty list —
-    fetch_kalshi_brackets swallows HTTP/network errors into [], so an empty
+    _fetch_kalshi_brackets swallows HTTP/network errors into [], so an empty
     result is indistinguishable from an API blip and the caller should retry).
     """
-    from edge_scanner_v2 import fetch_kalshi_brackets
     try:
-        brackets = await fetch_kalshi_brackets(session, city_key)
+        brackets = await _fetch_kalshi_brackets(session, city_key)
     except Exception as e:
         logger.error("Kalshi fetch failed for %s: %s", city_key, e)
         return None
@@ -425,7 +460,6 @@ async def fetch_bracket_prices(
 
 def find_bracket_price(brackets: list[dict], peak_temp: float) -> dict | None:
     """Find the bracket that contains the peak temperature."""
-    from edge_scanner_v2 import parse_bracket_range
     rounded = round(peak_temp)
     for mkt in brackets:
         title = mkt.get("title", "")
@@ -480,7 +514,7 @@ async def send_peak_alert(
             entry = min(entry, 50)
             desc += (
                 f"**💰 TRADEABLE — {edge_cents}¢ edge**\n"
-                f"Execute: `python3 execute_trade.py {ticker} yes {entry} 10`\n"
+                f"Execute: `.venv/bin/python scripts/take.py {ticker} buy yes 10 {entry}`\n"
             )
         elif bid >= 90:
             desc += "⚠️ Market already priced at 90¢+ — edge is thin.\n"
@@ -583,39 +617,9 @@ async def poll_once(
                     await send_peak_alert(state, bracket_info, tz, dry_run=dry_run)
                     state.alert_sent = True
 
-                # ── Strategy G: Auto-execute peak trade ──
-                # Only mark the day complete (alerted=True) on a definitive
-                # outcome (executed, or rejected by a deterministic gate).
-                # Transient failures retry on the next 10-min poll, capped at
-                # PEAK_TRADE_MAX_ATTEMPTS.
-                handoff_complete = True
-                if PEAK_TRADE_ENABLED and bracket_info:
-                    state.trade_attempts += 1
-                    try:
-                        from peak_trader import execute_peak_trade
-                        trade_result = await execute_peak_trade(
-                            city_key=city_key,
-                            peak_temp=state.peak_temp,
-                            bracket_info=bracket_info,
-                            dry_run=dry_run,
-                        )
-                        if trade_result["success"]:
-                            print(f"  🔒⚡ {city_key}: PEAK TRADE {'[DRY RUN] ' if dry_run else ''}EXECUTED")
-                        elif trade_result.get("transient") and state.trade_attempts < PEAK_TRADE_MAX_ATTEMPTS:
-                            handoff_complete = False
-                            print(
-                                f"  🔒   {city_key}: Peak trade transient failure — {trade_result['reason']} "
-                                f"(attempt {state.trade_attempts}/{PEAK_TRADE_MAX_ATTEMPTS}, retrying next poll)"
-                            )
-                        else:
-                            print(f"  🔒   {city_key}: Peak trade skipped — {trade_result['reason']}")
-                    except Exception as e:
-                        logger.error("Peak trade failed for %s: %s", city_key, e)
-                        print(f"  🔒❌ {city_key}: Peak trade error — {e}")
-                        if state.trade_attempts < PEAK_TRADE_MAX_ATTEMPTS:
-                            handoff_complete = False
-
-                state.alerted = handoff_complete
+                # (Strategy G auto-execution removed 2026-07-06 with the KDE
+                # stack — peak detection is observability + alert only now.)
+                state.alerted = True
             else:
                 latest = observations[-1]
                 decline_count = sum(

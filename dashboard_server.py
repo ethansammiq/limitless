@@ -3,8 +3,9 @@
 
 Read-only aiohttp server that serves dashboard.html and exposes the bot's
 live state files as JSON, so the dashboard can auto-refresh and show the
-*actual* paper-trading state (balance, P&L, open positions, recent orders,
-service heartbeats, peak monitor) instead of a one-shot static load.
+*actual* system state (service heartbeats, live account snapshot, peak
+monitor, market prices, temps, opportunity radar) instead of a one-shot
+static load.
 
 Zero new dependencies — aiohttp is already a project requirement.
 
@@ -28,7 +29,7 @@ import json
 import os
 import re
 import time
-from collections import Counter, deque
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,9 +37,7 @@ from aiohttp import web
 
 ROOT = Path(__file__).resolve().parent
 
-# Load .env BEFORE importing config — config reads PAPER_TRADING_MODE at import
-# time via os.getenv, so without this it would default to LIVE and serve the
-# wrong position file (mirrors position_monitor.py / auto_scan.py).
+# Load .env BEFORE any config import (mirrors the cron jobs).
 try:
     from dotenv import load_dotenv
 
@@ -46,38 +45,16 @@ try:
 except Exception:
     pass
 
-# Resolve canonical state-file paths from config (honors PAPER_TRADING_MODE);
-# fall back to basenames in the repo root if config can't be imported.
-try:
-    import config as _cfg
-
-    PAPER_MODE = bool(getattr(_cfg, "PAPER_TRADING_MODE", False))
-    POSITIONS_FILE = Path(getattr(_cfg, "get_positions_file", lambda: ROOT / "positions_paper.json")())
-    BALANCE_FILE = Path(getattr(_cfg, "PAPER_BALANCE_FILE", ROOT / "paper_balance.json"))
-    ORDERS_FILE = Path(getattr(_cfg, "PAPER_ORDERS_FILE", ROOT / "paper_orders.json"))
-except Exception:  # pragma: no cover - defensive fallback
-    PAPER_MODE = os.getenv("PAPER_TRADING_MODE", "false").lower() in ("true", "1", "yes")
-    POSITIONS_FILE = ROOT / ("positions_paper.json" if PAPER_MODE else "positions.json")
-    BALANCE_FILE = ROOT / "paper_balance.json"
-    ORDERS_FILE = ROOT / "paper_orders.json"
-
 HEARTBEATS_FILE = ROOT / "heartbeats.json"
-# Real-money account snapshot, written by live_watch.py each run. This is the
-# actual Kalshi account — separate from the paper ledger below it.
+# Real-money account snapshot, written by live_watch.py each run — the only
+# money this dashboard shows (the KDE paper ledger was retired 2026-07-06).
 LIVE_ACCOUNT_FILE = ROOT / "logs" / "live_account.json"
 PEAKS_FILE = ROOT / "peak_state.json"
-CALIBRATION_FILE = ROOT / "calibration_cache.json"
-SCAN_FILE = ROOT / "scan_data.json"
 DASHBOARD_HTML = ROOT / "dashboard.html"
 
-# Recent orders to expose (paper_orders.json grows unbounded; the full file is
-# ~400KB and we never want to ship that to the browser every 15s).
-RECENT_ORDERS = 30
-
-# position_monitor runs every 5 min, 24/7 — it is the true liveness signal.
-LIVENESS_INTERVAL_S = 300
-# scan_data.json older than this is treated as stale (don't render it as "live").
-STALE_SCAN_S = 3 * 3600
+# cli_sniper runs every 2 min, 24/7 — the true liveness signal for the
+# settlement-source system.
+LIVENESS_INTERVAL_S = 120
 
 # ─── Live contract-price polling ──────────────────────────────────────────────
 # A background task polls Kalshi market data (read-only, no trading) for the open
@@ -89,9 +66,9 @@ PRICE_TOP_N = int(os.getenv("DASHBOARD_PRICE_TOP_N", "8"))   # tracked per city,
 PRICE_MAX_POINTS = 480                                        # ring-buffer length per ticker
 PRICE_MAX_TICKERS = 80
 PRICE_HISTORY_FILE = ROOT / "price_history.json"
-
-# Persisted "start of day" equity so the KPI feed can show today's P&L.
-DAY_ANCHOR_FILE = ROOT / "dashboard_day_anchor.json"
+# Manual watchlist: tickers always tracked and badged even when unheld and too
+# illiquid to make the per-city volume cut. {"tickers": ["KXHIGH..."]}
+WATCHLIST_FILE = ROOT / "dashboard_watchlist.json"
 
 # ─── Live temperature observations ────────────────────────────────────────────
 # Each poll reuses peak_monitor.fetch_iem_observations (free IEM ASOS, NWS
@@ -148,7 +125,7 @@ def _cents(v):
 
 def _atomic_write(path: Path, text: str) -> None:
     """Write via temp file + os.replace so readers never see a torn file
-    (matches the repo convention in position_store / peak_monitor / heartbeat)."""
+    (matches the repo convention in core.io / peak_monitor / heartbeat)."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
@@ -195,8 +172,10 @@ def _label_date(ticker: str):
     return f"{mon.title()} {int(dd)}"
 
 
-def _ingest(city: str, markets: list, now_iso: str, held: set | None = None) -> None:
+def _ingest(city: str, markets: list, now_iso: str, held: set | None = None,
+            watched: set | None = None) -> None:
     held = held or set()
+    watched = watched or set()
     scored = []
     for m in markets or []:
         t = m.get("ticker")
@@ -205,9 +184,10 @@ def _ingest(city: str, markets: list, now_iso: str, held: set | None = None) -> 
         bid, ask, last, vol = _market_quote(m)
         scored.append((vol, t, m, bid, ask, last))
     scored.sort(key=lambda x: x[0], reverse=True)
-    # Keep the top-N by volume per city, PLUS any ticker we hold a position in,
-    # so our own contracts are always charted even when they're illiquid.
-    keep = scored[:PRICE_TOP_N] + [s for s in scored[PRICE_TOP_N:] if s[1] in held]
+    # Keep the top-N by volume per city, PLUS any ticker we hold a position in
+    # or manually watch, so those contracts are always charted even illiquid.
+    pinned = held | watched
+    keep = scored[:PRICE_TOP_N] + [s for s in scored[PRICE_TOP_N:] if s[1] in pinned]
     for vol, t, m, bid, ask, last in keep:
         mid = _mid(bid, ask, last)
         if mid is None:
@@ -221,7 +201,7 @@ def _ingest(city: str, markets: list, now_iso: str, held: set | None = None) -> 
                 "points": deque(maxlen=PRICE_MAX_POINTS),
             }
         rec.update(bid=bid, ask=ask, last=last, mid=mid, volume=vol,
-                   updated=now_iso, held=(t in held))
+                   updated=now_iso, held=(t in held), watched=(t in watched))
         rec["points"].append({"t": now_iso, "mid": mid, "bid": bid, "ask": ask})
 
 
@@ -264,13 +244,19 @@ def _radar_status(lo, hi, certain) -> str:
 
 
 def _held_tickers() -> set:
-    """Tickers we currently hold a position in (open / pending_sell / resting)."""
-    positions, _ = _read_json(POSITIONS_FILE)
+    """Tickers with a nonzero live position (live_watch.py account snapshot)."""
+    data, _ = _read_json(LIVE_ACCOUNT_FILE)
     return {
         p.get("ticker")
-        for p in (positions or [])
-        if p.get("ticker") and p.get("status") in ("open", "pending_sell", "resting")
+        for p in (data or {}).get("open_positions", [])
+        if p.get("ticker") and p.get("qty")
     }
+
+
+def _watched_tickers() -> set:
+    """Manual watchlist tickers (dashboard_watchlist.json)."""
+    data, _ = _read_json(WATCHLIST_FILE)
+    return {t for t in (data or {}).get("tickers", []) if t}
 
 
 def _evict() -> None:
@@ -324,6 +310,7 @@ async def poll_prices_once() -> None:
     now_iso = _now().isoformat()
     cities = list(STATIONS.keys())
     held = _held_tickers()
+    watched = _watched_tickers()
     # start() lives inside the try so a failure still runs stop() (no session leak).
     try:
         await client.start()
@@ -334,7 +321,7 @@ async def poll_prices_once() -> None:
                 )
             except Exception:
                 continue
-            _ingest(city, mk, now_iso, held)
+            _ingest(city, mk, now_iso, held, watched)
             _radar_ingest(city, mk, now_iso)
     finally:
         await client.stop()
@@ -485,56 +472,10 @@ def _age(iso: str | None) -> float | None:
         return None
 
 
-def _sellable_cents(ticker: str, side: str):
-    """Price (cents) we could sell our side at right now, from the live marks.
-
-    A YES position is sold at the YES bid; a NO position at (100 - YES ask).
-    Returns None when there is no live mark for the ticker (graceful degrade).
-    """
-    rec = _prices.get(ticker)
-    if not rec:
-        return None
-    yes_bid, yes_ask = rec.get("bid"), rec.get("ask")
-    if side == "no":
-        return (100 - yes_ask) if yes_ask is not None else None
-    return yes_bid if yes_bid is not None else None
-
-
-def _daily_anchor(equity: float):
-    """Equity at the first observation today; resets at local midnight."""
-    today = _now().date().isoformat()
-    data, _ = _read_json(DAY_ANCHOR_FILE)
-    if isinstance(data, dict) and data.get("date") == today and data.get("equity") is not None:
-        return _to_float(data.get("equity"), None)
-    try:
-        _atomic_write(DAY_ANCHOR_FILE, json.dumps({"date": today, "equity": round(equity, 2)}))
-    except Exception:
-        pass
-    return round(equity, 2)
-
-
 def build_state() -> dict:
+    """Service health + peaks. Money lives at /api/live (live_watch snapshot);
+    the paper equity/positions/orders/scan KPIs died with the KDE engine."""
     files = {}
-
-    balance, berr = _read_json(BALANCE_FILE)
-    files["balance"] = {**_file_meta(BALANCE_FILE), "error": berr}
-
-    positions, perr = _read_json(POSITIONS_FILE)
-    files["positions"] = {**_file_meta(POSITIONS_FILE), "error": perr}
-    positions = positions or []
-    open_pos = [p for p in positions if p.get("status") == "open"]
-    total_realized = round(sum(float(p.get("pnl_realized", 0) or 0) for p in positions), 2)
-    open_contracts = sum(int(p.get("contracts", 0) or 0) for p in open_pos)
-    open_cost = round(
-        sum(max(float(p.get("avg_price", 0) or 0), 0) * int(p.get("contracts", 0) or 0) for p in open_pos) / 100.0,
-        2,
-    )
-
-    orders, oerr = _read_json(ORDERS_FILE)
-    files["orders"] = {**_file_meta(ORDERS_FILE), "error": oerr}
-    orders = orders or []
-    recent_orders = list(reversed(orders[-RECENT_ORDERS:]))
-    order_counts = dict(Counter(o.get("status", "?") for o in orders))
 
     heartbeats_raw, herr = _read_json(HEARTBEATS_FILE)
     files["heartbeats"] = {**_file_meta(HEARTBEATS_FILE), "error": herr}
@@ -542,96 +483,20 @@ def build_state() -> dict:
     for svc, hb in (heartbeats_raw or {}).items():
         ts = hb.get("timestamp") if isinstance(hb, dict) else None
         heartbeats[svc] = {"timestamp": ts, "age_seconds": _age(ts)}
-    pm = heartbeats.get("position_monitor", {})
-    pm_age = pm.get("age_seconds")
-    alive = pm_age is not None and pm_age < LIVENESS_INTERVAL_S * 3  # <15 min
+    sniper_age = heartbeats.get("cli_sniper", {}).get("age_seconds")
+    alive = sniper_age is not None and sniper_age < LIVENESS_INTERVAL_S * 3  # <6 min
 
     peaks, pkerr = _read_json(PEAKS_FILE)
     files["peaks"] = {**_file_meta(PEAKS_FILE), "error": pkerr}
 
-    calibration, cerr = _read_json(CALIBRATION_FILE)
-    files["calibration"] = {**_file_meta(CALIBRATION_FILE), "error": cerr}
-
-    scan, scerr = _read_json(SCAN_FILE)
-    scan_meta = {**_file_meta(SCAN_FILE), "error": scerr}
-    scan_age = scan_meta.get("age_seconds")
-    scan_stale = scan_age is None or scan_age > STALE_SCAN_S
-    scan_meta["stale"] = scan_stale
-    if scan_stale:
-        scan = None  # don't render stale weather as if it were live
-
-    # ── KPI feed: equity/P&L, exposure, performance, bot health ──────────────
-    cash = _to_float((balance or {}).get("balance"), 0.0)
-    init = _to_float((balance or {}).get("initial_balance"), 0.0)
-
-    # Live mark-to-market of open positions using the price poller's quotes.
-    open_value = 0.0
-    unrealized = 0.0
-    covered = 0
-    pos_rois = []  # per covered open position, for best/worst
-    for p in open_pos:
-        n = int(p.get("contracts", 0) or 0)
-        avg = max(_to_float(p.get("avg_price"), 0.0), 0.0)
-        cost = avg * n / 100.0
-        sell = _sellable_cents(p.get("ticker"), p.get("side", "yes"))
-        if sell is not None:
-            value = sell * n / 100.0
-            open_value += value
-            unrealized += value - cost
-            covered += 1
-            if cost > 0:
-                pos_rois.append({"ticker": p.get("ticker"), "roi_pct": round((value - cost) / cost * 100, 1)})
-        else:
-            open_value += cost  # no live mark → hold flat at cost basis
-    marks_live = PRICES_ENABLED and covered > 0
-
-    equity = round(cash + open_value, 2)
-    total_pnl = round(equity - init, 2) if init > 0 else None
-    total_pnl_pct = round((equity - init) / init * 100, 2) if init > 0 else None
-    anchor = _daily_anchor(equity)
-    daily_pnl = round(equity - anchor, 2) if anchor is not None else None
-    daily_pnl_pct = round((equity - anchor) / anchor * 100, 2) if anchor else None
-    deployed_pct = round(open_cost / equity * 100, 1) if equity > 0 else None
-
-    finished = [p for p in positions if p.get("status") in ("settled", "closed")]
-    wins = sum(1 for p in finished if _to_float(p.get("pnl_realized"), 0.0) > 0)
-    win_rate = round(wins / len(finished) * 100, 1) if finished else None
-    rois = []
-    for p in finished:
-        oc = int(p.get("original_contracts", p.get("contracts", 0)) or 0)
-        avg = max(_to_float(p.get("avg_price"), 0.0), 0.0)
-        cst = avg * oc / 100.0
-        if cst > 0:
-            rois.append(_to_float(p.get("pnl_realized"), 0.0) / cst * 100)
-    avg_roi = round(sum(rois) / len(rois), 1) if rois else None
-    best = max(pos_rois, key=lambda x: x["roi_pct"]) if pos_rois else None
-    worst = min(pos_rois, key=lambda x: x["roi_pct"]) if pos_rois else None
+    files["live_account"] = {**_file_meta(LIVE_ACCOUNT_FILE), "error": None}
 
     errors = [{"file": k, "error": v["error"]} for k, v in files.items() if v.get("error")]
 
     kpis = {
-        "equity_pnl": {
-            "cash": round(cash, 2), "open_value": round(open_value, 2), "equity": equity,
-            "realized_pnl": total_realized,
-            "unrealized_pnl": round(unrealized, 2) if marks_live else None,
-            "total_pnl": total_pnl, "total_pnl_pct": total_pnl_pct,
-            "daily_pnl": daily_pnl, "daily_pnl_pct": daily_pnl_pct,
-            "marks_live": marks_live,
-        },
-        "exposure": {
-            "open_cost_basis": open_cost, "open_count": len(open_pos),
-            "open_contracts": open_contracts, "deployed_pct": deployed_pct,
-        },
-        "performance": {
-            "settled_count": len(finished), "win_count": wins, "win_rate": win_rate,
-            "avg_roi_pct": avg_roi, "best": best, "worst": worst,
-            "marks_covered": covered, "open_count": len(open_pos),
-        },
         "health": {
-            "alive": alive, "position_monitor_age_seconds": pm_age,
-            "scan_age_seconds": scan_meta.get("age_seconds"),
-            "scan_stale": scan_stale,
-            "mode": "PAPER" if PAPER_MODE else "LIVE",
+            "alive": alive, "cli_sniper_age_seconds": sniper_age,
+            "mode": "LIVE",
             "errors": errors,
             "prices_enabled": PRICES_ENABLED,
             "prices_ok": (_prices_meta.get("last_poll_ok") if PRICES_ENABLED else None),
@@ -640,30 +505,14 @@ def build_state() -> dict:
 
     return {
         "server_time": _now().isoformat(),
-        "mode": "PAPER" if PAPER_MODE else "LIVE",
+        "mode": "LIVE",
         "liveness": {
             "alive": alive,
-            "position_monitor_age_seconds": pm_age,
+            "cli_sniper_age_seconds": sniper_age,
             "interval_seconds": LIVENESS_INTERVAL_S,
         },
-        "balance": balance,
-        "positions": {
-            "open": open_pos,
-            "all": positions,
-            "summary": {
-                "open_count": len(open_pos),
-                "total_count": len(positions),
-                "total_realized_pnl": total_realized,
-                "open_contracts": open_contracts,
-                "open_cost_basis": open_cost,
-            },
-        },
-        "orders": {"recent": recent_orders, "counts": order_counts, "total": len(orders)},
         "heartbeats": heartbeats,
         "peaks": peaks or {},
-        "calibration": calibration or {},
-        "scan": scan,
-        "scan_meta": scan_meta,
         "kpis": kpis,
         "files": files,
     }
@@ -671,13 +520,6 @@ def build_state() -> dict:
 
 async def handle_state(_request: web.Request) -> web.Response:
     return web.json_response(build_state(), headers={"Cache-Control": "no-store"})
-
-
-async def handle_scan(_request: web.Request) -> web.Response:
-    scan, err = _read_json(SCAN_FILE)
-    if err:
-        return web.json_response({"error": err}, status=404)
-    return web.json_response(scan, headers={"Cache-Control": "no-store"})
 
 
 async def handle_index(_request: web.Request) -> web.Response:
@@ -696,6 +538,7 @@ async def handle_prices(_request: web.Request) -> web.Response:
             "ticker": t, "city": r.get("city"), "date": r.get("date"), "label": r.get("label"),
             "bid": r.get("bid"), "ask": r.get("ask"), "last": r.get("last"),
             "mid": r.get("mid"), "volume": r.get("volume"), "held": r.get("held", False),
+            "watched": r.get("watched", False),
             "updated": r.get("updated"), "points": pts[-240:],
         })
     contracts.sort(key=lambda c: (c["city"] or "", -(c["volume"] or 0)))
@@ -752,7 +595,7 @@ async def handle_temps(_request: web.Request) -> web.Response:
 
 async def handle_live(_request: web.Request) -> web.Response:
     """Real-money account snapshot (live_watch.py output). Distinct from
-    /api/state, which is the paper ledger."""
+    /api/state, which is service health."""
     data, err = _read_json(LIVE_ACCOUNT_FILE)
     if err or not data:
         return web.json_response(
@@ -801,14 +644,13 @@ async def handle_radar(_request: web.Request) -> web.Response:
 
 
 async def handle_health(_request: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "mode": "PAPER" if PAPER_MODE else "LIVE"})
+    return web.json_response({"ok": True, "mode": "LIVE"})
 
 
 def make_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/state", handle_state)
-    app.router.add_get("/api/scan", handle_scan)
     app.router.add_get("/api/prices", handle_prices)
     app.router.add_get("/api/temps", handle_temps)
     app.router.add_get("/api/live", handle_live)
@@ -823,7 +665,7 @@ def make_app() -> web.Application:
 def main() -> None:
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
     port = int(os.getenv("DASHBOARD_PORT", "8787"))
-    print(f"Weather Edge dashboard → http://{host}:{port}  (mode: {'PAPER' if PAPER_MODE else 'LIVE'})")
+    print(f"Weather Edge dashboard → http://{host}:{port}")
     if PRICES_ENABLED:
         print(f"Live price polling: ON — reading Kalshi market data every {PRICE_POLL_SECONDS}s (read-only)")
     web.run_app(make_app(), host=host, port=port, print=None)

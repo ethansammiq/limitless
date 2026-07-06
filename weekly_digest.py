@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""WEEKLY DIGEST — per-strategy P&L + live account + dead-bracket base rate.
+"""WEEKLY DIGEST — live account + dead-bracket base rate + sniper scorecard.
 
-The measurement loop, automated: strategy attribution has been recorded on
-paper positions since 2026-07 but nothing reported it, live trades were
-journaled nowhere, and the dead-bracket event frequency — the number that
-decides whether the riskless edge pays — was unmeasured. One Discord embed
-a week answers all three, so losing patterns get cut on evidence instead
-of vibes.
+The measurement loop, automated: one Discord embed a week reporting the
+live account, the dead-bracket event frequency — the number that decides
+whether the riskless edge pays — and the sniper scorecard headline, so
+losing patterns get cut on evidence instead of vibes. (The paper
+per-strategy section died with the KDE engine, 2026-07-06.)
 
 Sections (all file-based reads — no API calls, cannot fail on auth):
-  paper      positions_paper.json, entry_time in window, grouped by
-             `strategy` (legacy rows without one -> "unattributed")
   live       logs/live_fills.jsonl + logs/live_balance.jsonl (written by
              live_watch.py — schedule that or this section reads empty)
   sweeper    logs/dead_brackets/*.jsonl finding counts + total net
@@ -40,7 +37,6 @@ from log_setup import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-POSITIONS_FILE = PROJECT_ROOT / "positions_paper.json"
 FILLS_LOG = PROJECT_ROOT / "logs" / "live_fills.jsonl"
 BALANCE_LOG = PROJECT_ROOT / "logs" / "live_balance.jsonl"
 DEAD_DIR = PROJECT_ROOT / "logs" / "dead_brackets"
@@ -69,31 +65,6 @@ def _read_jsonl(path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
-
-
-def paper_by_strategy(positions: list[dict], since: datetime) -> dict[str, dict]:
-    """Aggregate windowed paper positions per strategy.
-
-    entry_time is the window key — positions here open and resolve within
-    a day or two, and no close timestamp is recorded."""
-    out: dict[str, dict] = {}
-    for p in positions or []:
-        ts = _parse_ts(p.get("entry_time"))
-        if ts is None or ts < since:
-            continue
-        strat = p.get("strategy") or "unattributed"
-        agg = out.setdefault(strat, {"n": 0, "settled": 0, "wins": 0, "pnl": 0.0, "open": 0})
-        agg["n"] += 1
-        pnl = p.get("pnl_realized")
-        status = p.get("status")
-        if status == "open":
-            agg["open"] += 1
-        if status in ("settled", "closed") and pnl is not None:
-            agg["settled"] += 1
-            agg["pnl"] += float(pnl)
-            if float(pnl) > 0:
-                agg["wins"] += 1
-    return out
 
 
 def live_summary(fills: list[dict], balances: list[dict], since: datetime) -> dict:
@@ -131,22 +102,10 @@ def build_digest(days: int) -> tuple[str, str]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     lines = []
 
-    try:
-        positions = json.loads(POSITIONS_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        positions = []
-    strategies = paper_by_strategy(positions, since)
-    lines.append(f"**Paper, per strategy ({days}d):**")
-    if strategies:
-        for strat, a in sorted(strategies.items(), key=lambda kv: -kv[1]["pnl"]):
-            wr = f"{a['wins']}/{a['settled']}" if a["settled"] else "0 settled"
-            lines.append(f"• {strat}: {a['n']} opened, {wr} won, "
-                         f"P&L ${a['pnl']:.2f}" + (f", {a['open']} open" if a["open"] else ""))
-    else:
-        lines.append("• no positions opened in window")
-
+    # (Paper per-strategy section removed 2026-07-06 — the KDE paper engine
+    # was retired; the digest reports the settlement-source system only.)
     live = live_summary(_read_jsonl(FILLS_LOG), _read_jsonl(BALANCE_LOG), since)
-    lines.append(f"\n**Live account ({days}d):**")
+    lines.append(f"**Live account ({days}d):**")
     if live["fills"] or live["balance"] is not None:
         delta = f"{live['balance_delta']:+.2f}" if live["balance_delta"] is not None else "n/a"
         bal = f"${live['balance']:.2f}" if live["balance"] is not None else "unknown"

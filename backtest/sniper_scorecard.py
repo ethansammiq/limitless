@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from dutch_book import kalshi_taker_fee_cents  # noqa: E402
+from core.fees import kalshi_taker_fee_cents  # noqa: E402
 
 JOURNAL_DIR = PROJECT_ROOT / "logs" / "cli_sniper"
 VERDICT_FILE = HERE / "sniper_scorecard_verdict.json"

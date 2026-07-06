@@ -2,11 +2,8 @@
 # Install: pip install -r requirements.txt
 # Python 3.11+ required (for zoneinfo, modern type hints)
 
-# Async HTTP client for API calls (Open-Meteo, NWS, Kalshi, Discord)
+# Async HTTP client for API calls (NWS, Kalshi, IEM, Discord)
 aiohttp~=3.9
-
-# Direct import in proxy_arb_engine (also an aiohttp transitive — pin it)
-yarl~=1.9
 
 # Environment variable management (.env files)
 python-dotenv~=1.0
@@ -14,14 +11,8 @@ python-dotenv~=1.0
 # RSA-PSS signing for Kalshi API authentication
 cryptography~=42.0
 
-# Vectorized KDE probability computation (~50x faster than pure Python)
-numpy~=1.26
-
 # Retry logic with exponential backoff (Kalshi API)
 tenacity~=8.2
 
-# Anthropic SDK (LLM doc synthesis)
-anthropic~=0.116
-
-# Test suite (931 tests; deploy.sh runs them remotely after every sync)
+# Test suite (deploy.sh runs it remotely after every sync)
 pytest~=9.1

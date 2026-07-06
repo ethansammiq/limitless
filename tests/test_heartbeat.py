@@ -95,7 +95,7 @@ class TestSingleChecker:
     def test_watchdog_is_the_checker(self):
         import watchdog
         assert hasattr(watchdog, "check_heartbeats")
-        assert "position_monitor" in watchdog.EXPECTED_INTERVALS
+        assert "cli_sniper" in watchdog.EXPECTED_INTERVALS
 
 
 class TestWatchdogCatchup:
@@ -136,14 +136,14 @@ class TestWatchdogCatchup:
     def _now(self, hour, minute=0):
         return datetime(2026, 6, 12, hour, minute, tzinfo=self.watchdog.ET)
 
-    def test_kde_stack_consolidation_contract(self):
-        # 2026-07-05: auto_scan / morning_check / bias_collector retired;
-        # auto_trader reduced to one daily scan. The watchdog must neither
-        # expect nor try to respawn the retired services.
-        for retired in ("auto_scan", "morning_check", "bias_collector"):
+    def test_kde_stack_deletion_contract(self):
+        # 2026-07-06: the KDE stack (auto_trader / position_monitor /
+        # auto_scan / morning_check / bias_collector) was deleted. The
+        # watchdog must neither expect nor try to respawn any of it.
+        for retired in ("auto_trader", "position_monitor", "auto_scan",
+                        "morning_check", "bias_collector"):
             assert retired not in self.watchdog.EXPECTED_INTERVALS
             assert retired not in self.watchdog.CATCHUP_JOBS
-        assert self.watchdog.EXPECTED_INTERVALS["auto_trader"] == 26
         assert self.watchdog.EXPECTED_INTERVALS["backtest_collector"] == 25
         assert "backtest_collector" in self.watchdog.CATCHUP_JOBS
 

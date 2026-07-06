@@ -55,7 +55,7 @@ from core.obs import (  # noqa: E402
     corroborated_extreme,
     fetch_day_obs,
 )
-from dutch_book import kalshi_taker_fee_cents  # noqa: E402
+from core.fees import kalshi_taker_fee_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import by_station  # noqa: E402
 from log_setup import get_logger  # noqa: E402

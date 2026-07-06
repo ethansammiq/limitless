@@ -58,12 +58,10 @@ fi
 # touch these on a running server (a stale Mac copy would clobber the live
 # ledger); they move only via an explicit --state migration.
 STATE_FILES=(
-    positions_paper.json paper_balance.json paper_orders.json
-    heartbeats.json peak_state.json stale_price_state.json
-    alert_state.json dead_bracket_state.json watchdog_catchup.json
+    heartbeats.json peak_state.json
+    dead_bracket_state.json watchdog_catchup.json
     live_watch_state.json cli_sniper_state.json
-    price_history.json temp_history.json dashboard_day_anchor.json
-    weather_edge.db model_bias_corrections.json
+    price_history.json temp_history.json dashboard_watchlist.json
 )
 
 SERVER="$1"
@@ -88,7 +86,7 @@ upload_secrets() {
         $SCP_CMD "$LOCAL_DIR/.env" "$REMOTE_USER@$SERVER:$REMOTE_DIR/.env"
         # The Mac .env carries a Mac-absolute key path; rewrite it for the
         # server or every authenticated call silently 401s (live_watch then
-        # journals balance $0.00 and position_monitor preflight-fails).
+        # journals balance $0.00 — happened live 2026-07-05).
         $SSH_CMD "$REMOTE_USER@$SERVER" "sed -i 's|^KALSHI_PRIVATE_KEY_PATH=.*|KALSHI_PRIVATE_KEY_PATH=$REMOTE_DIR/kalshi_private_key.pem|' $REMOTE_DIR/.env"
         echo "  ✅ .env uploaded (key path rewritten for $REMOTE_DIR)"
     else
@@ -116,12 +114,8 @@ upload_code() {
         --exclude '*.pyc' \
         --exclude '.env' \
         --exclude 'kalshi_private_key.pem' \
-        --exclude 'positions.json' \
-        --exclude '.positions.lock' \
-        --exclude '.positions_paper.lock' \
         --exclude '.heartbeats.lock' \
         --exclude 'alerts_fallback.jsonl' \
-        --exclude 'PAUSE_TRADING' \
         --exclude 'heartbeats/' \
         --exclude 'backtest/*.json' \
         --exclude 'backtest/*.jsonl*' \
@@ -154,7 +148,7 @@ upload_state() {
     for d in shadow_books dead_brackets cli_sniper; do
         [ -d "$LOCAL_DIR/logs/$d" ] && rsync -az -e "$RSYNC_SSH" "$LOCAL_DIR/logs/$d/" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$d/"
     done
-    for f in live_fills.jsonl live_positions.jsonl live_balance.jsonl trade_events.jsonl; do
+    for f in live_fills.jsonl live_positions.jsonl live_balance.jsonl; do
         [ -f "$LOCAL_DIR/logs/$f" ] && $SCP_CMD "$LOCAL_DIR/logs/$f" "$REMOTE_USER@$SERVER:$REMOTE_DIR/logs/$f"
     done
     echo "  ✅ backtest data + journals synced"
@@ -207,9 +201,8 @@ print(f'  ✅ Config: {len(STATIONS)} cities')
 from kalshi_client import KalshiClient
 ts = KalshiClient._monotonic_ts_ms()
 print(f'  ✅ Kalshi client: monotonic ts={ts}')
-from trading_guards import check_kill_switch
-ok, reason = check_kill_switch()
-print(f'  ✅ Kill switch: {reason}')
+from ladders import load_ladders
+print(f'  ✅ Ladders: {len(load_ladders())} series')
 print('  ✅ All imports clean')
 \"
     "
@@ -247,5 +240,4 @@ echo ""
 echo "  Quick commands:"
 echo "  ssh $REMOTE_USER@$SERVER 'tail -f /var/log/weather-edge/*.log'"
 echo "  ssh $REMOTE_USER@$SERVER 'cd $REMOTE_DIR && .venv/bin/python3 heartbeat.py --status'"
-echo "  ssh $REMOTE_USER@$SERVER 'touch $REMOTE_DIR/PAUSE_TRADING'  # Emergency stop"
 echo ""

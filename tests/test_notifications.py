@@ -257,15 +257,17 @@ class TestLedgerTags:
         for ctx in ("live_watch", "cli_sniper", "dead_bracket_sweeper"):
             assert notifications.tag_title("t", context=ctx).startswith("💰 REAL")
 
-    def test_context_map_paper_engine(self):
-        assert notifications.tag_title("t", context="auto_trader").startswith("🧪 SIM")
+    def test_deleted_kde_contexts_untagged(self):
+        # auto_trader died with the KDE stack (2026-07-06); an unknown
+        # context must fall through untagged, not crash or mis-tag.
+        assert notifications.tag_title("t", context="auto_trader") == "t"
 
     def test_system_alerts_untagged(self):
         for ctx in ("watchdog", "weekly_digest", "audit_coverage", ""):
             assert notifications.tag_title("WATCHDOG ALERT", context=ctx) == "WATCHDOG ALERT"
 
     def test_explicit_ledger_beats_context(self):
-        assert notifications.tag_title("t", context="auto_trader", ledger="live") \
+        assert notifications.tag_title("t", context="watchdog", ledger="live") \
             == "💰 REAL · t"
 
     def test_idempotent(self):

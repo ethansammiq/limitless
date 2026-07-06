@@ -92,36 +92,10 @@ fi
 # ─────────────────────────────────────────────
 echo "[6/7] Installing systemd services..."
 
-# Position Monitor — persistent service (every 5 min via timer)
-$SUDO tee /etc/systemd/system/weather-edge-monitor.service > /dev/null << EOF
-[Unit]
-Description=Weather Edge Position Monitor
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=$RUN_USER
-WorkingDirectory=$DEPLOY_DIR
-Environment=PYTHONUNBUFFERED=1
-ExecStart=$VENV_DIR/bin/python3 $DEPLOY_DIR/position_monitor.py --once
-StandardOutput=append:$LOG_DIR/position_monitor.log
-StandardError=append:$LOG_DIR/position_monitor.log
-TimeoutStartSec=120
-EOF
-
-$SUDO tee /etc/systemd/system/weather-edge-monitor.timer > /dev/null << EOF
-[Unit]
-Description=Weather Edge Position Monitor Timer (every 5 min)
-
-[Timer]
-OnCalendar=*:0/5
-Persistent=true
-RandomizedDelaySec=10
-
-[Install]
-WantedBy=timers.target
-EOF
+# (The position-monitor service/timer died with the KDE paper stack,
+# 2026-07-06. If upgrading an older server, remove the stale units:
+#   systemctl disable --now weather-edge-monitor.timer
+#   rm /etc/systemd/system/weather-edge-monitor.{service,timer}; systemctl daemon-reload)
 
 # Watchdog — persistent health check (every 15 min via timer)
 $SUDO tee /etc/systemd/system/weather-edge-watchdog.service > /dev/null << EOF
@@ -177,7 +151,6 @@ WantedBy=multi-user.target
 EOF
 
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable weather-edge-monitor.timer
 $SUDO systemctl enable weather-edge-watchdog.timer
 $SUDO systemctl enable weather-edge-dashboard.service
 
@@ -198,11 +171,8 @@ cat << EOF
 # All times are ET (server timezone set to America/New_York)
 # ═══════════════════════════════════════════════════
 
-# Auto Trader — ONE daily scan at the 15:00 post-HRRR window (scan-only;
-# KDE forecasting measured -EV 2026-06, kept only to feed the dashboard's
-# opportunities panel). auto_scan / bias_collector / morning_check retired
-# in the 2026-07-05 KDE-stack consolidation.
-0 15 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1
+# (The KDE stack — auto_trader / auto_scan / bias_collector / morning_check /
+# position_monitor — was deleted 2026-07-06; KDE forecasting measured -EV.)
 
 # Peak Monitor — every 10 min during peak-formation hours
 */10 13-22 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/peak_monitor.py --once >> $LOG_DIR/peak_monitor.log 2>&1
@@ -228,7 +198,7 @@ cat << EOF
 # Sniper Scorecard — did the CLI alerts have edge? (writes the verdict the digest reads)
 45 17 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest/sniper_scorecard.py --report discord >> $LOG_DIR/sniper_scorecard.log 2>&1
 
-# Weekly Digest — per-strategy P&L + live summary + dead-bracket base rate + scorecard
+# Weekly Digest — live summary + dead-bracket base rate + scorecard
 0 18 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/weekly_digest.py >> $LOG_DIR/weekly_digest.log 2>&1
 
 # Backtest Collector — 8:00 AM (settlement ground truth for daily_data.jsonl)
@@ -236,7 +206,7 @@ cat << EOF
 EOF
 ) | crontab -
 
-echo "  ✅ Cron jobs installed (auto_trader is scan-only by default)"
+echo "  ✅ Cron jobs installed (all jobs alert-only; take.py is the only order path)"
 
 # ─────────────────────────────────────────────
 # LOG ROTATION
@@ -283,13 +253,9 @@ echo ""
 echo "  NEXT STEPS:"
 echo "  ─────────────────────────────────────────"
 echo "  1. Upload code:      ./deploy/deploy.sh <server-ip>"
-echo "  2. Verify dry-run:   ssh $RUN_USER@<ip> '$VENV_DIR/bin/python3 $DEPLOY_DIR/auto_trader.py --dry-run'"
-echo "  3. Start monitors:   ssh $RUN_USER@<ip> 'sudo systemctl start weather-edge-monitor.timer weather-edge-watchdog.timer'"
+echo "  2. Verify dry-run:   ssh $RUN_USER@<ip> '$VENV_DIR/bin/python3 $DEPLOY_DIR/cli_sniper.py --once --dry-run'"
+echo "  3. Start monitors:   ssh $RUN_USER@<ip> 'sudo systemctl start weather-edge-watchdog.timer'"
 echo "  4. Watch logs:       ssh $RUN_USER@<ip> 'tail -f $LOG_DIR/*.log'"
-echo "  5. Go live:          Edit cron, remove --dry-run flags"
-echo ""
-echo "  EMERGENCY STOP:"
-echo "  ssh $RUN_USER@<ip> 'touch $DEPLOY_DIR/PAUSE_TRADING'"
 echo ""
 echo "  VIEW STATUS:"
 echo "  systemctl list-timers --all | grep weather"

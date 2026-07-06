@@ -1,6 +1,7 @@
-"""Core trading primitives — broker abstractions, opportunity contract, LLM synth.
+"""Core primitives shared by the settlement-source jobs.
 
-Domain-agnostic plumbing shared across all market scanners (weather, policy,
-legal, FDA, entertainment). Downstream pipeline (auto_trader, execute_trade,
-position_monitor, trading_guards) depends only on these protocols.
+obs.py (station-day observations + settlement-certainty bounds),
+brackets.py (bracket subtitle parsing / deadness), fees.py (Kalshi taker
+fee), io.py (atomic writes). The broker/opportunity/LLM-synth protocols
+died with the KDE stack (2026-07-06).
 """

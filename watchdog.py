@@ -36,14 +36,10 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 CATCHUP_STATE_FILE = PROJECT_ROOT / "watchdog_catchup.json"
 
 # Expected heartbeat intervals per service (hours).
-# 2026-07-05 KDE-stack consolidation: auto_scan / morning_check /
-# bias_collector retired (KDE forecasting measured -EV in June; the
-# corrections and advisory pings served only that path), and auto_trader
-# reduced to one daily 15:00 ET scan feeding the dashboard's opportunities
-# panel.
+# 2026-07-06: the KDE stack (auto_trader / position_monitor / auto_scan /
+# morning_check / bias_collector) was deleted outright — KDE forecasting
+# measured -EV in June; only the settlement-source jobs remain.
 EXPECTED_INTERVALS = {
-    "auto_trader": 26,         # Runs once daily at 15:00 ET. Allow 26h.
-    "position_monitor": 0.25,  # Runs every 5 min. Allow 15 min.
     "peak_monitor": 16,        # Runs every 10 min, 13-22 ET. Overnight gap ~14h. Allow 16h.
     "backtest_collector": 25,  # Runs daily at 8 AM. Allow 25h.
     "shadow_logger": 2,        # Runs every 30 min (beats even out of window). Allow 2h.

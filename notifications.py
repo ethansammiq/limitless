@@ -2,9 +2,9 @@
 """
 NOTIFICATIONS — Reliable Discord webhook delivery with retry and fallback.
 
-Shared module used by auto_scan.py, position_monitor.py, and execute_trade.py.
-If Discord is unreachable, alerts are saved to a local JSONL fallback file
-so no opportunity is silently lost.
+Shared module used by every alerting job (cli_sniper, dead_bracket_sweeper,
+live_watch, watchdog, weekly_digest, …). If Discord is unreachable, alerts
+are saved to a local JSONL fallback file so no opportunity is silently lost.
 
 Features:
   - Exponential backoff for connection errors (5 attempts, 2s→60s, ~2 min total)
@@ -232,8 +232,6 @@ _CONTEXT_LEDGER = {
     "live_watch": "live",
     "cli_sniper": "live",
     "dead_bracket_sweeper": "live",
-    # The KDE/auto engine trades only the paper ledger.
-    "auto_trader": "paper",
 }
 
 
@@ -256,7 +254,6 @@ async def send_discord_alert(
     """
     Send a single Discord embed alert with retry and fallback.
 
-    Used by position_monitor.py and execute_trade.py for simple alerts.
     `ledger` ("paper"|"live") tags the title so simulation noise can never
     be mistaken for real money; contexts with an unambiguous ledger are
     tagged automatically.
@@ -280,7 +277,6 @@ async def send_discord_embeds(
     """
     Send multiple Discord embeds with chunking, retry, and fallback.
 
-    Used by auto_scan.py for multi-embed scan results.
     Falls back to JSONL file if Discord is persistently unreachable.
     """
     webhook_url = _get_discord_webhook()

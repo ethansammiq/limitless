@@ -748,335 +748,8 @@ body::before {
 <div id="prices"></div>
 <div id="temps"></div>
 <div id="radar"></div>
-<div id="app"></div>
 
 <script>
-const MODEL_LABELS = {
-  'ecmwf_ifs025': 'IFS',
-  'ecmwf_aifs025': 'AIFS',
-  'gfs_seamless': 'GFS',
-  'icon_seamless': 'ICON',
-  'gem_global': 'GEM',
-};
-
-function confClass(score) {
-  if (score >= 90) return 'elite';
-  if (score >= 75) return 'high';
-  if (score >= 55) return 'medium';
-  return 'low';
-}
-
-function tsClass(ts) {
-  if (ts >= 0.55) return 'hot';
-  if (ts >= 0.35) return 'warm';
-  return 'cold';
-}
-
-function trendClass(trend) {
-  if (trend === 'running_hot') return 'hot';
-  if (trend === 'running_cold') return 'cold';
-  if (trend === 'on_track') return 'ok';
-  return '';
-}
-
-function trendLabel(trend) {
-  if (trend === 'running_hot') return '↑ HOT';
-  if (trend === 'running_cold') return '↓ COLD';
-  if (trend === 'on_track') return '✓ ON TRACK';
-  return trend;
-}
-
-function stratClass(s) {
-  if (s.startsWith('B:WIND')) return 'wind';
-  if (s.startsWith('E:NWS')) return 'diverge';
-  if (s.startsWith('A:MIDNIGHT')) return 'midnight';
-  if (s.startsWith('D:WET')) return 'wet';
-  if (s.includes('TREND')) return 'trend';
-  return '';
-}
-
-function shortBracket(title) {
-  // Extract just the temp range
-  const m = title.match(/(\d+)-(\d+)°/);
-  if (m) return `${m[1]}-${m[2]}°F`;
-  const lt = title.match(/<(\d+)°/);
-  if (lt) return `<${lt[1]}°F`;
-  const gt = title.match(/>(\d+)°/);
-  if (gt) return `>${gt[1]}°F`;
-  return title.replace(/Will the \*\*high temp.*?\*\* be /, '').replace(/ on.*/, '');
-}
-
-function formatVol(v) {
-  if (v >= 10000) return (v/1000).toFixed(0) + 'k';
-  if (v >= 1000) return (v/1000).toFixed(1) + 'k';
-  return v.toString();
-}
-
-function renderDashboard(data) {
-  const scanTime = new Date(data.scan_time);
-  const cities = data.cities.filter(c => c.status === 'ok');
-  const bestConf = data.summary.best_confidence;
-  const bestTS = data.summary.best_trade_score;
-
-  // Filter to tomorrow's brackets only
-  const targetDate = data.target_date; // "2026-02-14"
-  const dateCode = targetDate.replace(/-/g, '').slice(2); // "26FEB14" pattern
-  // Actually parse: 2026-02-14 -> "26FEB14"
-  const d = new Date(targetDate + 'T12:00:00');
-  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const targetCode = targetDate.slice(2,4) + months[d.getMonth()] + targetDate.slice(8,10);
-
-  let html = '';
-
-  // ─── HEADER ───
-  html += `
-  <div class="header animate-in">
-    <div class="header-left">
-      <div class="logo">
-        <div class="logo-dot"></div>
-        WEATHER EDGE
-      </div>
-      <div class="header-meta">
-        <span><span class="meta-label">Target</span> <span class="meta-value">${data.target_display}</span></span>
-        <span><span class="meta-label">Scanned</span> <span class="meta-value">${scanTime.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit', timeZoneName:'short'})}</span></span>
-        <span><span class="meta-label">Balance</span> <span class="meta-value balance">$${data.balance.toFixed(2)}</span></span>
-      </div>
-    </div>
-  </div>`;
-
-  // ─── STAT STRIP ───
-  html += `
-  <div class="stat-strip animate-in" style="animation-delay:0.05s">
-    <div class="stat-cell">
-      <div class="stat-number">${cities.length}</div>
-      <div class="stat-label">Cities Scanned</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-number">${data.summary.total_opportunities}</div>
-      <div class="stat-label">Opportunities</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-number ${data.summary.tradeable_count > 0 ? 'success' : ''}">${data.summary.tradeable_count}</div>
-      <div class="stat-label">Tradeable (TS≥0.55)</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-number highlight">${bestConf}</div>
-      <div class="stat-label">Best Confidence</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-number ${tsClass(bestTS) === 'hot' ? 'highlight' : ''}">${bestTS.toFixed(3)}</div>
-      <div class="stat-label">Best Trade Score</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-number">194</div>
-      <div class="stat-label">Ensemble Members</div>
-    </div>
-  </div>`;
-
-  // ─── CITY CARDS ───
-  html += `<div class="city-grid">`;
-
-  for (const city of cities) {
-    const ens = city.ensemble;
-    const nws = city.nws;
-    const score = city.confidence.score;
-    const label = city.confidence.label.toLowerCase();
-    const delay = (cities.indexOf(city) * 0.07 + 0.1).toFixed(2);
-
-    // Filter tomorrow's brackets
-    const tmBrackets = city.brackets.filter(b => b.ticker.includes(targetCode));
-
-    // Collect unique strategies
-    const allStrats = [...new Set(city.opportunities.flatMap(o => o.strategies))];
-
-    html += `
-    <div class="city-card conf-${label} animate-in" style="animation-delay:${delay}s">
-      <div class="city-header">
-        <div>
-          <span class="city-name">${city.name}</span>
-          <span class="city-key">${city.key}</span>
-        </div>
-        <div class="conf-badge ${label}">${score}/100 ${label.toUpperCase()}</div>
-      </div>
-
-      <div class="conf-gauge-wrap">
-        <div class="conf-gauge-bar">
-          <div class="conf-gauge-fill ${label}" style="width:${score}%"></div>
-        </div>
-      </div>
-
-      <div class="ensemble-strip">
-        <div class="ens-stat">
-          <span class="ens-stat-val">${ens.mean}°</span>
-          <span class="ens-stat-label">Mean</span>
-        </div>
-        <div class="ens-stat">
-          <span class="ens-stat-val">±${ens.std}°</span>
-          <span class="ens-stat-label">Spread (σ)</span>
-        </div>
-        <div class="ens-stat">
-          <span class="ens-stat-val">${ens.p10}–${ens.p90}°</span>
-          <span class="ens-stat-label">P10–P90</span>
-        </div>
-        <div class="ens-stat">
-          <span class="ens-stat-val">${ens.kde_bandwidth}</span>
-          <span class="ens-stat-label">KDE bw</span>
-        </div>
-      </div>
-
-      <div class="model-grid">
-        ${ens.models.map(m => `
-          <div class="model-pill ${m.is_ai ? 'ai' : ''}">
-            <div class="model-pill-name">${m.is_ai ? '★ ' : ''}${MODEL_LABELS[m.name] || m.name}</div>
-            <div class="model-pill-temp">${m.mean}°</div>
-            <div class="model-pill-std">±${m.std}° · ${m.eff_weight}w</div>
-          </div>
-        `).join('')}
-      </div>
-
-      <div class="nws-strip">
-        <div class="nws-item">
-          <span class="nws-item-label">NWS</span>
-          <span class="nws-item-value ${Math.abs(nws.forecast_high - ens.mean) > 2.5 ? 'diverge' : ''}">${nws.forecast_high}°F</span>
-        </div>
-        <div class="nws-item">
-          <span class="nws-item-label">Physics</span>
-          <span class="nws-item-value">${nws.physics_high}°F</span>
-        </div>
-        <div class="nws-item">
-          <span class="nws-item-label">Now</span>
-          <span class="nws-item-value">${nws.current_temp}°F</span>
-        </div>
-        <div class="nws-item">
-          <span class="nws-item-label">Trend</span>
-          <span class="nws-item-value ${trendClass(nws.temp_trend)}">${trendLabel(nws.temp_trend)}</span>
-        </div>
-        ${nws.wind_penalty ? `<div class="nws-item"><span class="nws-item-label">Wind</span><span class="nws-item-value cold">${nws.wind_penalty > 0 ? '-' : ''}${nws.wind_penalty}° (${nws.peak_wind_gust}mph)</span></div>` : ''}
-        ${Math.abs(nws.forecast_high - ens.mean) > 2 ? `<div class="nws-item"><span class="nws-item-label">Δ NWS</span><span class="nws-item-value diverge">${(nws.forecast_high - ens.mean) > 0 ? '+' : ''}${(nws.forecast_high - ens.mean).toFixed(1)}°F</span></div>` : ''}
-      </div>
-
-      <table class="bracket-table">
-        <thead>
-          <tr>
-            <th>Bracket</th>
-            <th>Bid</th>
-            <th>Ask</th>
-            <th>KDE</th>
-            <th>Edge</th>
-            <th>Vol</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${tmBrackets.map(b => {
-            const opp = city.opportunities.find(o => o.ticker === b.ticker);
-            const kde = opp ? opp.kde_prob : 0;
-            const edge = opp ? opp.edge_raw : 0;
-            const kdeW = Math.min(kde, 60); // cap bar width
-            return `
-            <tr>
-              <td>${shortBracket(b.title)}</td>
-              <td class="bid-cell">${b.yes_bid}¢</td>
-              <td class="bid-cell">${b.yes_ask}¢</td>
-              <td class="kde-cell"><span class="kde-bar" style="width:${kdeW}px"></span>${kde.toFixed(0)}%</td>
-              <td class="edge-cell ${edge > 0 ? 'positive' : 'negative'}">${edge > 0 ? '+' : ''}${edge.toFixed(0)}¢</td>
-              <td class="vol-cell">${formatVol(b.volume)}</td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-
-      ${allStrats.length > 0 ? `
-      <div class="strat-tags">
-        ${allStrats.map(s => `<span class="strat-tag ${stratClass(s)}">${s}</span>`).join('')}
-      </div>` : ''}
-
-      ${city.opportunities.length > 0 ? `
-      <div class="opp-section">
-        <div class="opp-section-title">Top Opportunities</div>
-        ${city.opportunities.slice(0, 3).map(opp => `
-          <div class="opp-row">
-            <div class="opp-side ${opp.side}">${opp.side}</div>
-            <div class="opp-detail">
-              <span class="opp-bracket">${shortBracket(opp.bracket_title)} @ ${opp.side === 'yes' ? opp.yes_bid : (100 - opp.yes_ask)}¢</span>
-              <span class="opp-ticker">${opp.ticker}</span>
-            </div>
-            <div class="opp-stats">
-              <span class="opp-edge">+${opp.edge_raw.toFixed(0)}¢</span>
-              <span class="opp-kde">${opp.kde_prob.toFixed(0)}%</span>
-              <span class="opp-ts ${tsClass(opp.trade_score)}">${opp.trade_score.toFixed(3)}</span>
-            </div>
-          </div>
-        `).join('')}
-      </div>` : ''}
-    </div>`;
-  }
-
-  html += `</div>`;
-
-  // ─── ALL OPPORTUNITIES TABLE ───
-  const sortedOpps = [...data.all_opportunities].sort((a, b) => b.trade_score - a.trade_score);
-
-  html += `
-  <div class="bottom-section animate-in" style="animation-delay:0.5s">
-    <div class="section-title">
-      All Opportunities — Ranked by Trade Score
-      <span class="count">${sortedOpps.length}</span>
-    </div>
-    <table class="opp-table">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>City</th>
-          <th>Side</th>
-          <th>Bracket</th>
-          <th>Price</th>
-          <th>KDE</th>
-          <th>Edge</th>
-          <th>Conf</th>
-          <th>Trade Score</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${sortedOpps.slice(0, 15).map((opp, i) => {
-          const price = opp.side === 'yes' ? opp.yes_bid : (100 - opp.yes_ask);
-          const ts = opp.trade_score;
-          return `
-          <tr>
-            <td><span class="rank-num ${i < 3 ? 'top' : 'normal'}">${i + 1}</span></td>
-            <td style="font-weight:600">${opp.city}</td>
-            <td><span class="opp-side ${opp.side}" style="font-size:0.7rem">${opp.side.toUpperCase()}</span></td>
-            <td>${shortBracket(opp.bracket_title)}</td>
-            <td class="bid-cell">${price}¢</td>
-            <td class="kde-cell">${opp.kde_prob.toFixed(0)}%</td>
-            <td class="edge-cell positive">+${opp.edge_raw.toFixed(0)}¢</td>
-            <td>
-              <span class="conf-badge ${confClass(opp.confidence_score)}" style="font-size:0.65rem;padding:1px 6px">
-                ${opp.confidence_score}
-              </span>
-            </td>
-            <td>
-              <div class="ts-bar-wrap">
-                <span class="opp-ts ${tsClass(ts)}">${ts.toFixed(3)}</span>
-                <div class="ts-bar">
-                  <div class="ts-bar-fill ${tsClass(ts)}" style="width:${(ts / 0.7 * 100).toFixed(0)}%"></div>
-                </div>
-              </div>
-            </td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table>
-  </div>`;
-
-  // ─── FOOTER ───
-  html += `
-  <div class="footer">
-    <span>EDGE SCANNER v2.0 · KDE + Model Weighting + Bot Protection · ${data.summary.cities_scanned} cities</span>
-    <span>${data.summary.tradeable_count === 0 ? 'No setups above threshold · Patience IS the edge' : data.summary.tradeable_count + ' tradeable setup(s) found'}</span>
-  </div>`;
-
-  document.getElementById('app').innerHTML = html;
-}
 
 // ─── LIVE POLLING ───────────────────────────────────────────────────────────
 const REFRESH_MS = 15000;
@@ -1103,15 +776,14 @@ function renderHealthKpis(state){
   const k = state.kpis;
   if (!k) return '';
   const hl = k.health;
-  const mon = ageClass(hl.position_monitor_age_seconds, 600, 1200);
+  const mon = ageClass(hl.cli_sniper_age_seconds, 360, 720);
   const monCls = mon==='ok'?'success':(mon==='warm'?'warn':'danger');
   const pricesTxt = hl.prices_enabled ? (hl.prices_ok===false?'error':(hl.prices_ok?'live':'…')) : 'off';
   const pricesCls = hl.prices_enabled ? (hl.prices_ok?'success':(hl.prices_ok===false?'danger':'')) : '';
   const nErr = (hl.errors&&hl.errors.length)||0;
   return `<div class="kpi-feed">${kpiGroup('Bot Health', [
     kpiCell('Status', hl.alive?'LIVE':'STALLED', hl.alive?'success':'danger'),
-    kpiCell('Monitor', fmtAge(hl.position_monitor_age_seconds), monCls),
-    kpiCell('Last Scan', hl.scan_stale ? 'stale' : fmtAge(hl.scan_age_seconds), hl.scan_stale ? 'warm' : ''),
+    kpiCell('Sniper', fmtAge(hl.cli_sniper_age_seconds), monCls),
     kpiCell('Prices', pricesTxt, pricesCls),
     kpiCell('Errors', nErr, nErr?'danger':'success'),
   ])}</div>`;
@@ -1127,7 +799,7 @@ function renderLive(state){
     <div class="sb-left">
       <span class="mode-pill">${esc(state.mode)}</span>
       <span class="live-ind"><span class="live-dot ${live.alive?'on':'off'}"></span>${live.alive?'LIVE':'STALLED'}</span>
-      <span class="sb-meta">position_monitor ${fmtAge(live.position_monitor_age_seconds)} ago</span>
+      <span class="sb-meta">cli_sniper ${fmtAge(live.cli_sniper_age_seconds)} ago</span>
     </div>
     <div class="sb-right">
       <span class="sb-meta" id="conn">●</span>
@@ -1135,9 +807,8 @@ function renderLive(state){
     </div>
   </div>`;
 
-  // Bot health only — the paper simulation ledger (KPIs, open positions,
-  // recent orders) was removed 2026-07-05: the KDE paper loop is demoted
-  // (measured -EV) and real money is the panel above.
+  // Bot health only — real money is the panel above (the KDE paper stack
+  // was deleted 2026-07-06, measured -EV).
   h += renderHealthKpis(state);
 
   // Service heartbeats
@@ -1145,7 +816,7 @@ function renderLive(state){
   for (const [svc, hb] of Object.entries(state.heartbeats||{})){
     if (svc.startsWith('_')) continue;
     const a = hb.age_seconds;
-    const cls = (svc === 'position_monitor') ? ageClass(a, 600, 1200) : 'neutral';
+    const cls = (svc === 'cli_sniper') ? ageClass(a, 360, 720) : 'neutral';
     h += `<div class="health-pill ${cls}"><span class="hp-name">${esc(svc)}</span><span class="hp-age">${fmtAge(a)} ago</span></div>`;
   }
   h += `</div></div>`;
@@ -1231,7 +902,7 @@ function renderPriceChart(contracts){
     const ba = (c.bid!=null && c.ask!=null) ? `${c.bid}/${c.ask}¢` : '';
     legend += `<div class="pl-item">
       <span class="pl-swatch" style="background:${s.color}"></span>
-      <span class="pl-label">${esc(c.label||c.ticker)}</span>
+      <span class="pl-label">${esc(c.label||c.ticker)}${c.date?` <span class="pl-sub">${esc(c.date)}</span>`:''}${c.held?' ◆':''}${c.watched?' 👁':''}</span>
       <span class="pl-mid">${c.mid!=null?Math.round(c.mid)+'¢':'—'}</span>
       <span class="pl-sub">${ba}</span>
       <span class="pl-sub">vol ${fmtVol(c.volume)}</span>
@@ -1285,7 +956,9 @@ function renderPrices(data){
   h += `</div>`;
 
   let vis = all.filter(c => c.city===priceCity && c.points && c.points.length);
-  vis.sort((a,b) => (b.volume||0)-(a.volume||0));
+  // Held/watched contracts pin to the top so the volume cut never drops them.
+  const pin = c => (c.held?2:0) + (c.watched?1:0);
+  vis.sort((a,b) => (pin(b)-pin(a)) || (b.volume||0)-(a.volume||0));
   vis = vis.slice(0, 8);
 
   h += renderPriceChart(vis);
@@ -1495,20 +1168,11 @@ async function tick(){
     const state = await r.json();
     renderLive(state);
     setConn(true);
-    // Live account panel (real money) — independent of the paper ledger
+    // Live account panel (real money)
     try {
       const lr = await fetch('/api/live', { cache: 'no-store' });
       if (lr.ok) renderLiveAccount(await lr.json());
     } catch (_) { /* keep last panel */ }
-    if (state.scan){
-      renderDashboard(state.scan);
-    } else {
-      const m = state.scan_meta || {};
-      document.getElementById('app').innerHTML = `<div class="scan-notice">
-        <div class="sn-title">Weather scan idle</div>
-        <div class="sn-sub">Last scan ${m.exists ? fmtAge(m.age_seconds)+' ago' : 'never generated'}. The city cards light up once <code>scan_data.json</code> is fresh — add a cron line running <code>scan_json.py</code> on the same schedule as <code>auto_scan</code>.</div>
-      </div>`;
-    }
     // Live contract prices (independent — never let it break the bot panel)
     try {
       const pr = await fetch('/api/prices', { cache: 'no-store' });
