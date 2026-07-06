@@ -1,0 +1,42 @@
+# Publishes the sanitized public_stats.json (written by
+# scripts/export_public_stats.py on the VPS) to the single-commit `stats`
+# branch, which ethansam.io fetches via raw.githubusercontent.com.
+#
+# Security model: STATS_SSH_KEY corresponds to a forced-command entry in the
+# VPS authorized_keys — the key can ONLY `cat` the stats file, regardless of
+# the command sent. The site never talks to the VPS or Kalshi.
+name: publish-stats
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch snapshot over cat-only SSH key
+        env:
+          KEY: ${{ secrets.STATS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/stats_key
+          chmod 600 ~/.ssh/stats_key
+          ssh-keyscan -T 10 37.27.241.140 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/stats_key -o BatchMode=yes -o ConnectTimeout=15 \
+            root@37.27.241.140 snapshot > public_stats.json
+          python3 -m json.tool public_stats.json > /dev/null  # valid-JSON gate
+
+      - name: Force-push single-commit stats branch
+        run: |
+          mkdir stats && cd stats
+          git init -q -b stats
+          cp ../public_stats.json .
+          git add public_stats.json
+          git -c user.name=stats-bot -c user.email=stats-bot@users.noreply.github.com \
+            commit -qm "stats snapshot"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" stats

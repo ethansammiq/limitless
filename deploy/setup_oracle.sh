@@ -219,6 +219,9 @@ cat << EOF
 # Live Watch — read-only live-account journal + sell-into-strength pings
 */10 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/live_watch.py --once >> $LOG_DIR/live_watch.log 2>&1
 
+# Public Stats Export — sanitized snapshot for the ethansam.io Trading tab
+*/30 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/scripts/export_public_stats.py >> $LOG_DIR/export_public_stats.log 2>&1
+
 # Coverage Audit — series drift / parse health / office silence (weekly)
 30 17 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/scripts/audit_coverage.py --report discord >> $LOG_DIR/audit_coverage.log 2>&1
 
