@@ -748,6 +748,7 @@ body::before {
 <div id="prices"></div>
 <div id="temps"></div>
 <div id="radar"></div>
+<div id="walls"></div>
 
 <script>
 
@@ -1156,6 +1157,30 @@ function renderRadar(data){
     ${rows}</div>`;
 }
 
+function renderWalls(data){
+  const el = document.getElementById('walls');
+  if (!el) return;
+  const walls = data.walls || [];
+  if (!walls.length){
+    el.innerHTML = `<div class="live-section"><div class="ls-title">Wall Watch</div>
+      <div class="sb-meta">No certainty walls in today's shadow books — informed size shows up here when it arrives.</div></div>`;
+    return;
+  }
+  let rows = '';
+  for (const w of walls.slice(0, 14)){
+    const age = w.first_seen ? fmtAge((Date.now() - new Date(w.first_seen))/1000) : '—';
+    const fresh = w.first_seen && (Date.now() - new Date(w.first_seen)) < 3600e3;
+    rows += `<div class="health-pill ${w.side === 'yes' ? 'warm' : 'neutral'}" ${fresh ? 'style="outline:1px solid var(--amber)"' : ''}>
+      <span class="hp-name">${esc(w.ticker)} · ${w.side.toUpperCase()} wall</span>
+      <span class="hp-age">${fmtVol(w.total)} @ ${w.band[0]}-${w.band[1]}¢ · ${w.ladder_levels} rungs · seen ${age} ago</span>
+    </div>`;
+  }
+  el.innerHTML = `<div class="live-section">
+    <div class="price-head"><div class="ls-title" style="margin:0">Wall Watch <span class="count">${walls.length}</span></div>
+    <div class="sb-meta">resting size ≥1k/level or ≥3×500 rungs · a wall = a defended settlement thesis, not prey</div></div>
+    <div class="health-strip">${rows}</div></div>`;
+}
+
 function setConn(ok){
   const el = document.getElementById('conn');
   if (el){ el.className = ok ? 'sb-meta ok' : 'sb-meta bad'; el.textContent = ok ? '● connected' : '● disconnected'; }
@@ -1188,6 +1213,11 @@ async function tick(){
       const rr = await fetch('/api/radar', { cache: 'no-store' });
       if (rr.ok) renderRadar(await rr.json());
     } catch (_) { /* keep last radar */ }
+    // Wall watch (shadow-book informed-size scan)
+    try {
+      const wr = await fetch('/api/walls', { cache: 'no-store' });
+      if (wr.ok) renderWalls(await wr.json());
+    } catch (_) { /* keep last walls */ }
   } catch (err) {
     setConn(false);
     if (!document.querySelector('#live .status-banner')){

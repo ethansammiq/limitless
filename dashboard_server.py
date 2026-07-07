@@ -46,6 +46,7 @@ except Exception:
     pass
 
 HEARTBEATS_FILE = ROOT / "heartbeats.json"
+SHADOW_DIR = ROOT / "logs" / "shadow_books"
 # Real-money account snapshot, written by live_watch.py each run — the only
 # money this dashboard shows (the KDE paper ledger was retired 2026-07-06).
 LIVE_ACCOUNT_FILE = ROOT / "logs" / "live_account.json"
@@ -643,6 +644,63 @@ async def handle_radar(_request: web.Request) -> web.Response:
         headers={"Cache-Control": "no-store"})
 
 
+# (path, mtime) -> parsed walls, so each 15s dashboard tick doesn't re-parse
+# an unchanged shadow journal (it only grows every 30 min).
+_walls_cache: dict = {}
+
+
+def _load_shadow_walls(path: Path) -> dict:
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    cached = _walls_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    from core.walls import scan_rows
+
+    rows = []
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("venue") == "kalshi" and row.get("live"):
+            rows.append(row)
+    walls = scan_rows(rows)
+    _walls_cache.clear()  # keep at most one file parsed
+    _walls_cache[key] = (mtime, walls)
+    return walls
+
+
+async def handle_walls(_request: web.Request) -> web.Response:
+    """Certainty-wall watch: informed size resting in today's shadow books
+    (competitor dossier 2026-07-07 — walls mark defended settlement theses;
+    a wall predating its public data marks a faster-flow station)."""
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    walls = _load_shadow_walls(SHADOW_DIR / f"{day}.jsonl")
+    out = []
+    for ticker, rec in walls.items():
+        for side in ("yes", "no"):
+            w = rec.get(f"{side}_wall")
+            if not w:
+                continue
+            out.append({
+                "ticker": ticker, "series": rec.get("series"),
+                "target_date": rec.get("target_date"), "side": side,
+                "total": w["total"], "max_level": w["max_level"],
+                "ladder_levels": w["ladder_levels"], "band": w["band"],
+                "first_seen": rec.get(f"first_seen_{side}"),
+                "last_seen": rec.get("ts"),
+                "yes_bid": rec.get("yes_bid"), "yes_ask": rec.get("yes_ask"),
+            })
+    out.sort(key=lambda r: -r["total"])
+    return web.json_response(
+        {"day": day, "walls": out, "count": len(out)},
+        headers={"Cache-Control": "no-store"})
+
+
 async def handle_health(_request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "mode": "LIVE"})
 
@@ -655,6 +713,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/temps", handle_temps)
     app.router.add_get("/api/live", handle_live)
     app.router.add_get("/api/radar", handle_radar)
+    app.router.add_get("/api/walls", handle_walls)
     app.router.add_get("/healthz", handle_health)
     if PRICES_ENABLED or TEMPS_ENABLED:
         app.on_startup.append(_start_poller)
