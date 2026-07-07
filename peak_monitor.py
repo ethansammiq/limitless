@@ -55,6 +55,8 @@ from config import (
     PEAK_LATEST_HOUR,
     PEAK_POLL_INTERVAL_SEC,
 )
+from core.obs import climate_day_start
+from market_timeseries import extract_target_date_from_ticker
 from notifications import send_discord_embeds
 from heartbeat import write_heartbeat
 from log_setup import get_logger
@@ -458,10 +460,18 @@ async def fetch_bracket_prices(
     return brackets if brackets else None
 
 
-def find_bracket_price(brackets: list[dict], peak_temp: float) -> dict | None:
-    """Find the bracket that contains the peak temperature."""
+def find_bracket_price(brackets: list[dict], peak_temp: float, target_date: str) -> dict | None:
+    """Find the bracket for the peak temperature on the given climate day.
+
+    `target_date` (ISO) must match the event date embedded in the ticker —
+    today's and tomorrow's events are open simultaneously, so matching by
+    strike alone can recommend tomorrow's market for today's peak (live
+    failure 2026-07-06). Unparseable ticker dates are skipped: fail closed.
+    """
     rounded = round(peak_temp)
     for mkt in brackets:
+        if extract_target_date_from_ticker(mkt.get("ticker", "")) != target_date:
+            continue
         title = mkt.get("title", "")
         low, high, btype = parse_bracket_range(title)
         if btype == "unknown":
@@ -607,7 +617,10 @@ async def poll_once(
                     # "market may be closed" below and finish the day.
                     brackets = []
 
-                bracket_info = find_bracket_price(brackets, state.peak_temp)
+                # Anchor the event date to the climate day of the peak itself,
+                # not the wall-clock date at alert time.
+                target_date = climate_day_start(tz, state.max_time).date().isoformat()
+                bracket_info = find_bracket_price(brackets, state.peak_temp, target_date)
 
                 print(f"  🔒 {city_key}: PEAK CONFIRMED at {state.peak_temp:.1f}°F → {state.peak_bracket}")
                 if bracket_info:

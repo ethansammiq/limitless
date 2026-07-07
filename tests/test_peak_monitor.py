@@ -219,47 +219,94 @@ class TestDetectPeak:
 class TestBracketMatching:
     """find_bracket_price correctly maps peak temp to bracket."""
 
+    TARGET = "2026-02-14"
+
     def _mock_brackets(self) -> list[dict]:
         return [
-            {"ticker": "T-30-31", "title": "30° to 31°F", "yes_bid": 5, "yes_ask": 10, "volume": 100},
-            {"ticker": "T-72-73", "title": "72° to 73°F", "yes_bid": 45, "yes_ask": 55, "volume": 500},
-            {"ticker": "T-74-75", "title": "74° to 75°F", "yes_bid": 30, "yes_ask": 40, "volume": 300},
-            {"ticker": "T-76-above", "title": "76°F or above", "yes_bid": 10, "yes_ask": 20, "volume": 200},
+            {"ticker": "KXHIGHNY-26FEB14-B30.5", "title": "30° to 31°F", "yes_bid": 5, "yes_ask": 10, "volume": 100},
+            {"ticker": "KXHIGHNY-26FEB14-B72.5", "title": "72° to 73°F", "yes_bid": 45, "yes_ask": 55, "volume": 500},
+            {"ticker": "KXHIGHNY-26FEB14-B74.5", "title": "74° to 75°F", "yes_bid": 30, "yes_ask": 40, "volume": 300},
+            {"ticker": "KXHIGHNY-26FEB14-T76", "title": "76°F or above", "yes_bid": 10, "yes_ask": 20, "volume": 200},
         ]
 
     def test_exact_bracket_match(self):
-        result = find_bracket_price(self._mock_brackets(), 73.0)
+        result = find_bracket_price(self._mock_brackets(), 73.0, self.TARGET)
         assert result is not None
-        assert result["ticker"] == "T-72-73"
+        assert result["ticker"] == "KXHIGHNY-26FEB14-B72.5"
 
     def test_fractional_temp(self):
         """73.4°F rounds to 73 → bracket 72-73."""
-        result = find_bracket_price(self._mock_brackets(), 73.4)
+        result = find_bracket_price(self._mock_brackets(), 73.4, self.TARGET)
         assert result is not None
-        assert result["ticker"] == "T-72-73"
+        assert result["ticker"] == "KXHIGHNY-26FEB14-B72.5"
 
     def test_rounds_up(self):
         """73.5°F rounds to 74 → bracket 74-75 (parse_bracket_range returns low,high+1)."""
-        result = find_bracket_price(self._mock_brackets(), 73.5)
+        result = find_bracket_price(self._mock_brackets(), 73.5, self.TARGET)
         # round(73.5) = 74 in Python (banker's rounding), but 73.6 → 74
-        result2 = find_bracket_price(self._mock_brackets(), 73.6)
+        result2 = find_bracket_price(self._mock_brackets(), 73.6, self.TARGET)
         assert result2 is not None
-        assert result2["ticker"] == "T-74-75"
+        assert result2["ticker"] == "KXHIGHNY-26FEB14-B74.5"
 
     def test_tail_bracket(self):
         """77°F → above 76."""
-        result = find_bracket_price(self._mock_brackets(), 77.0)
+        result = find_bracket_price(self._mock_brackets(), 77.0, self.TARGET)
         assert result is not None
-        assert result["ticker"] == "T-76-above"
+        assert result["ticker"] == "KXHIGHNY-26FEB14-T76"
 
     def test_no_match(self):
         """50°F — no bracket covers it."""
-        result = find_bracket_price(self._mock_brackets(), 50.0)
+        result = find_bracket_price(self._mock_brackets(), 50.0, self.TARGET)
         assert result is None
 
     def test_empty_brackets(self):
-        result = find_bracket_price([], 73.0)
+        result = find_bracket_price([], 73.0, self.TARGET)
         assert result is None
+
+
+class TestBracketEventDate:
+    """Regression: 2026-07-06 live alert confirmed TODAY's LAX peak (75.2°F)
+    but recommended TOMORROW's ticker (KXHIGHLAX-26JUL07-B75.5) — both events
+    were open and find_bracket_price matched by strike alone. The confirmed
+    peak must map to the SAME climate day's event, never the next day's."""
+
+    def _jul6_lax_brackets(self) -> list[dict]:
+        # JUL07 markets listed first, as in the live incident: without the
+        # date filter, 75.2 (→75) strike-matches JUL07 "75 to 76" before
+        # JUL06 "74 to 75".
+        return [
+            {"ticker": "KXHIGHLAX-26JUL07-B73.5", "title": "73° to 74°F", "yes_bid": 20, "yes_ask": 30, "volume": 50},
+            {"ticker": "KXHIGHLAX-26JUL07-B75.5", "title": "75° to 76°F", "yes_bid": 25, "yes_ask": 35, "volume": 80},
+            {"ticker": "KXHIGHLAX-26JUL06-B74.5", "title": "74° to 75°F", "yes_bid": 60, "yes_ask": 70, "volume": 400},
+            {"ticker": "KXHIGHLAX-26JUL06-B76.5", "title": "76° to 77°F", "yes_bid": 5, "yes_ask": 12, "volume": 150},
+        ]
+
+    def test_jul6_peak_maps_to_jul6_event(self):
+        result = find_bracket_price(self._jul6_lax_brackets(), 75.2, "2026-07-06")
+        assert result is not None
+        assert result["ticker"] == "KXHIGHLAX-26JUL06-B74.5"
+
+    def test_never_recommends_next_day_ticker(self):
+        result = find_bracket_price(self._jul6_lax_brackets(), 75.2, "2026-07-06")
+        assert "JUL07" not in result["ticker"]
+
+    def test_only_next_day_markets_open_returns_none(self):
+        """If today's event is gone from the open list, alert 'market may be
+        closed' rather than recommending tomorrow's ticker."""
+        next_day_only = [m for m in self._jul6_lax_brackets() if "26JUL07" in m["ticker"]]
+        assert find_bracket_price(next_day_only, 75.2, "2026-07-06") is None
+
+    def test_unparseable_ticker_date_fails_closed(self):
+        brackets = [{"ticker": "T-74-75", "title": "74° to 75°F", "yes_bid": 60, "yes_ask": 70, "volume": 400}]
+        assert find_bracket_price(brackets, 75.2, "2026-07-06") is None
+
+    def test_target_date_from_climate_day_of_peak(self):
+        """The poll loop anchors target_date to climate_day_start(tz, max_time)."""
+        from zoneinfo import ZoneInfo
+        from core.obs import climate_day_start
+        pt = ZoneInfo("America/Los_Angeles")
+        peak_time = datetime(2026, 7, 6, 12, 35, tzinfo=pt)
+        assert climate_day_start(pt, peak_time).date().isoformat() == "2026-07-06"
 
 
 # ─── Test: state persistence ───────────────────────────
