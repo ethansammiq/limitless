@@ -66,6 +66,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 | `core/brackets.py` | Bracket subtitle parsing + deadness/contains logic |
 | `core/fees.py` | Kalshi taker fee (integer-cents, clamped) |
 | `core/io.py` | Atomic file writes (tmp+rename) |
+| `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
 | `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
 | `peak_monitor.py` | Post-peak lock-in alerts, original 5 cities (cron */10, 13-22 ET) |
@@ -82,7 +83,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 | `scripts/export_public_stats.py` | Sanitized public snapshot for ethansam.io (cron */30; whitelist + secret-assertions) |
 | `weekly_digest.py` | Live summary + dead-bracket base rate + scorecard line (cron Sun 18:00) |
 | `watchdog.py` | Heartbeat staleness checks + catch-up spawns (systemd */15) |
-| `dashboard_server.py` | Read-only localhost dashboard: health, live account, prices, temps, radar |
+| `dashboard_server.py` | Read-only localhost dashboard: health, live account, prices, temps, radar, wall watch |
 | `kalshi_client.py` | Kalshi API client — RSA-PSS auth, V2 order placement, checked reads |
 | `config.py` | Original 5-city station configs + API client tuning (NOT the ladder registry) |
 | `.env` | API credentials (NEVER commit to git) |
