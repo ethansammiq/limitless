@@ -1,4 +1,8 @@
 """core.dsm — parsing against real IEM AFOS products, no network."""
+import json
+
+import pytest
+
 from core import dsm
 
 # Verbatim IEM AFOS retrieve.py output for pil=DSMMIA, fetched 2026-07-07.
@@ -64,6 +68,62 @@ class TestSelection:
         assert dsm.dsm_extreme(two, "high") == (93, "1344")
         assert dsm.dsm_extreme(two, "low") == (77, "1818")
         assert dsm.dsm_extreme([], "high") is None
+
+
+class TestFetchFallback:
+    """IEM primary → NWS fallback → fail open. Network stubbed via dsm._get."""
+
+    NWS_LISTING = json.dumps({"@graph": [
+        {"@id": "https://api.weather.gov/products/p1"},
+        {},  # entry without @id is skipped
+        {"@id": "https://api.weather.gov/products/p2"},
+    ]})
+    NWS_P1 = json.dumps(
+        {"productText": "KMIA DS 06/07 931344/ 771818//"})
+    NWS_P2 = json.dumps({"productText": None})
+
+    @pytest.fixture
+    def stub(self, monkeypatch):
+        calls = []
+
+        def install(responses):
+            def fake_get(url, timeout):
+                calls.append(url)
+                result = responses[len(calls) - 1]
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            monkeypatch.setattr(dsm, "_get", fake_get)
+            return calls
+        return install
+
+    def test_iem_success_skips_nws(self, stub):
+        calls = stub([MIA_BLOB])
+        assert len(dsm.fetch_dsm_reports("MIA")) == 2
+        assert len(calls) == 1 and "mesonet" in calls[0]
+
+    def test_rate_limited_iem_falls_through_to_nws(self, stub):
+        calls = stub(["Too many requests from your IP",
+                      self.NWS_LISTING, self.NWS_P1, self.NWS_P2])
+        reports = dsm.fetch_dsm_reports("MIA")
+        assert [r.max_f for r in reports] == [93]
+        assert "api.weather.gov/products/types/DSM/locations/MIA" in calls[1]
+
+    def test_iem_transport_error_falls_through_to_nws(self, stub):
+        stub([OSError("timeout"), self.NWS_LISTING, self.NWS_P1, self.NWS_P2])
+        assert [r.max_f for r in dsm.fetch_dsm_reports("mia")] == [93]
+
+    def test_bad_nws_product_skipped_not_fatal(self, stub):
+        stub(["", self.NWS_LISTING, OSError("500"), self.NWS_P1])
+        assert [r.max_f for r in dsm.fetch_dsm_reports("MIA")] == [93]
+
+    def test_both_feeds_down_fails_open(self, stub):
+        stub([OSError("429"), OSError("503")])
+        assert dsm.fetch_dsm_reports("MIA") == []
+
+    def test_nws_station_with_no_products_fails_open(self, stub):
+        stub(["Too many requests", json.dumps({"@graph": []})])
+        assert dsm.fetch_dsm_reports("MDW") == []
 
 
 class TestContradicts:

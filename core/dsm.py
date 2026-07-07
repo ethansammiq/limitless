@@ -7,10 +7,14 @@ including all 3 prelim-vs-DSM conflicts. The DSM is therefore treated as
 authoritative over any same-day CLI print: an extreme in the DSM that beats
 a CLI floor kills any trade premised on the printed value.
 
-Feed: IEM AFOS archive (pil=DSM{awips}). Aggressively rate-limited upstream,
-so callers fetch at most once per station per product. Fetch failures return
-[] and the caller proceeds unchecked — the veto only ever REMOVES alert
-suggestions, and every alert is human-verified before trading.
+Feed: IEM AFOS archive (pil=DSM{awips}), aggressively rate-limited upstream,
+so callers fetch at most once per station per product. On an IEM miss
+(refusal or empty) the NWS API is tried as fallback
+(api.weather.gov/products/types/DSM/locations/{awips}) — its coverage is
+spotty per station (2026-07-07: NYC 28 products, MIA and MDW 0), which is
+why it isn't primary. If both feeds miss, return [] and the caller proceeds
+unchecked — the veto only ever REMOVES alert suggestions, and every alert
+is human-verified before trading.
 
 Product format (live samples 2026-07-07, KMIA):
     KMIA DS 06/07 931344/ 771818// 93/ 78//0010422/...      (daily)
@@ -23,12 +27,15 @@ falls, so either already contradicting a CLI floor is decisive.
 """
 from __future__ import annotations
 
+import json
 import re
 import urllib.request
 from dataclasses import dataclass
 
 DSM_URL = ("https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
            "?pil=DSM{awips}&fmt=text&limit=6")
+NWS_LIST_URL = "https://api.weather.gov/products/types/DSM/locations/{awips}"
+NWS_PRODUCT_LIMIT = 6
 USER_AGENT = "WeatherEdgeDSM/1.0"
 
 _REPORT = re.compile(
@@ -64,16 +71,44 @@ def parse_dsm_text(text: str) -> list[DSMReport]:
     return out
 
 
-def fetch_dsm_reports(awips: str, timeout: int = 20) -> list[DSMReport]:
-    """Recent DSM reports for a station; [] on ANY failure (fail open)."""
-    url = DSM_URL.format(awips=awips.upper())
+def _get(url: str, timeout: int) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def _fetch_nws_text(awips: str, timeout: int) -> str:
+    """Concatenated raw text of the newest NWS-API DSM products for a station."""
+    listing = json.loads(_get(NWS_LIST_URL.format(awips=awips.upper()), timeout))
+    chunks = []
+    for entry in listing.get("@graph", [])[:NWS_PRODUCT_LIMIT]:
+        product_url = entry.get("@id")
+        if not product_url:
+            continue
+        try:
+            product = json.loads(_get(product_url, timeout))
+        except Exception:  # noqa: BLE001 — one bad product must not kill the rest
+            continue
+        chunks.append(product.get("productText") or "")
+    return "\n\n".join(chunks)
+
+
+def fetch_dsm_reports(awips: str, timeout: int = 20) -> list[DSMReport]:
+    """Recent DSM reports; IEM primary, NWS fallback, [] if both miss (fail open).
+
+    An IEM rate-limit refusal body parses to no reports, so it falls through
+    to the NWS fallback the same as a transport error.
+    """
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", "replace")
+        reports = parse_dsm_text(_get(DSM_URL.format(awips=awips.upper()), timeout))
+    except Exception:  # noqa: BLE001
+        reports = []
+    if reports:
+        return reports
+    try:
+        return parse_dsm_text(_fetch_nws_text(awips, timeout))
     except Exception:  # noqa: BLE001 — the veto must never kill the sniper run
         return []
-    return parse_dsm_text(text)
 
 
 def reports_for_date(reports: list[DSMReport], iso_date: str) -> list[DSMReport]:
