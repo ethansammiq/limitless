@@ -1170,8 +1170,9 @@ function renderWalls(data){
   for (const w of walls.slice(0, 14)){
     const age = w.first_seen ? fmtAge((Date.now() - new Date(w.first_seen))/1000) : '—';
     const fresh = w.first_seen && (Date.now() - new Date(w.first_seen)) < 3600e3;
-    rows += `<div class="health-pill ${w.side === 'yes' ? 'warm' : 'neutral'}" ${fresh ? 'style="outline:1px solid var(--amber)"' : ''}>
-      <span class="hp-name">${esc(w.ticker)} · ${w.side.toUpperCase()} wall</span>
+    const kindTag = w.kind === 'defense' ? '🛡 defense' : (w.kind === 'penny_farm' ? '🎣 farm' : 'mid');
+    rows += `<div class="health-pill ${w.kind === 'defense' ? 'warm' : 'neutral'}" ${fresh && w.kind === 'defense' ? 'style="outline:1px solid var(--amber)"' : ''}>
+      <span class="hp-name">${esc(w.ticker)} · ${w.side.toUpperCase()} ${kindTag}</span>
       <span class="hp-age">${fmtVol(w.total)} @ ${w.band[0]}-${w.band[1]}¢ · ${w.ladder_levels} rungs · seen ${age} ago</span>
     </div>`;
   }

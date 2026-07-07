@@ -67,3 +67,20 @@ class TestScanRows:
         assert out["TK"]["yes_wall"] is not None
         assert out["TK"]["no_wall"] is None
         assert out["TK"]["first_seen_no"] is None
+
+
+class TestWallKind:
+    def test_penny_farm(self):
+        from core.walls import detect_wall
+        w = detect_wall([[1, 173000], [2, 4000]])
+        assert w["kind"] == "penny_farm"
+
+    def test_defense(self):
+        from core.walls import detect_wall
+        w = detect_wall([[89, 2500], [86, 2500], [83, 2500]])
+        assert w["kind"] == "defense"
+
+    def test_mid(self):
+        from core.walls import detect_wall
+        w = detect_wall([[30, 1500], [28, 40]])
+        assert w["kind"] == "mid"

@@ -36,11 +36,23 @@ def detect_wall(levels: list | None) -> dict | None:
     if not is_wall:
         return None
     prices = [c for c, _ in lvls]
+    band = [min(prices), max(prices)]
+    # Penny farms (huge size parked ≤10¢ fishing for lottery fills) are noise;
+    # a defended settlement thesis rests at conviction prices (≥50¢). The MIA
+    # 7/6 book had both: 2,500/3¢ YES rungs at 85-92¢ (defense) vs 173k of
+    # 1-2¢ NO bids (farm).
+    if band[1] <= 10:
+        kind = "penny_farm"
+    elif band[0] >= 50:
+        kind = "defense"
+    else:
+        kind = "mid"
     return {
         "total": round(total, 1),
         "max_level": round(max_level, 1),
         "ladder_levels": ladder_levels,
-        "band": [min(prices), max(prices)],
+        "band": band,
+        "kind": kind,
     }
 
 

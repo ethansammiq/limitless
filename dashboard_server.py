@@ -691,11 +691,14 @@ async def handle_walls(_request: web.Request) -> web.Response:
                 "target_date": rec.get("target_date"), "side": side,
                 "total": w["total"], "max_level": w["max_level"],
                 "ladder_levels": w["ladder_levels"], "band": w["band"],
+                "kind": w["kind"],
                 "first_seen": rec.get(f"first_seen_{side}"),
                 "last_seen": rec.get("ts"),
                 "yes_bid": rec.get("yes_bid"), "yes_ask": rec.get("yes_ask"),
             })
-    out.sort(key=lambda r: -r["total"])
+    # Defended theses first (the tradeable context), then mid, farms last.
+    rank = {"defense": 0, "mid": 1, "penny_farm": 2}
+    out.sort(key=lambda r: (rank.get(r["kind"], 3), -r["total"]))
     return web.json_response(
         {"day": day, "walls": out, "count": len(out)},
         headers={"Cache-Control": "no-store"})
