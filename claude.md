@@ -21,6 +21,14 @@ cap without `--yes`. Alerts print the exact take.py command to run.
   reprices over ~10 min; a */2 cron beats it.
 - **Morning finals (01:13–04:51 local)** settle too fast to trade (verified live:
   20/20 caught, 0 tradeable findings). Alert-only, low priority.
+- **DSM veto** (`core/dsm.py` + `apply_dsm_veto`): before alerting a floor
+  buy_winner, fetch the station's ASOS DSM from IEM AFOS (pil=DSM{awips});
+  if the DSM extreme already beats the printed floor, the buy is VETOED and
+  alerted as ⛔ info instead — the final CLI follows the DSM (85/85 MIA
+  archive study; the 2026-07-06 prelim-92/DSM-93 trade). Fail open: DSM
+  unreachable → finding passes marked `dsm: unchecked` (alerts are
+  human-verified; the veto only removes suggestions). sell_dead is never
+  vetoed. Journaled kind `dsm_veto`; scorecard ignores it (unpriced).
 - **Finality rule** (`effective_finality`): a CLI product only finalizes the day
   BEFORE its station-local issuance date; same-day products classify only ≥15:00
   local, else skip. (The 2026-07-05 bug: same-day 07:31-local products regex-marked
@@ -34,7 +42,24 @@ bids — riskless sells, all 40 ladders, cron */15.
 Post-peak confirmation on the original 5 cities (3 declining obs, ≥1.5°F below
 running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-only.
 
-## 3. MEASUREMENT DISCIPLINE (how decisions get made)
+## 3. DEV COMMANDS (use these; don't rediscover them)
+
+```bash
+python3 -m pytest -q                          # full suite, must be green before done
+python3 cli_sniper.py --replay MIA --dry-run  # full pipeline on a real product, no side effects
+python3 cli_sniper.py --replay MIA:2          # N issuances back (regression replays)
+python3 dead_bracket_sweeper.py --once --dry-run
+REMOTE_USER=root ./deploy/deploy.sh 37.27.241.140   # deploy (code-only rsync; see §5 rules)
+ssh -L 8787:localhost:8787 root@37.27.241.140       # dashboard tunnel
+```
+
+Definition of done, in order: (1) tests pass, (2) a `--replay`/`--dry-run`
+against real data exercises the changed path, (3) committed (conventional
+commits), (4) deployed — deploys are a separate human decision on this repo,
+never bundle them into "done". Edits to any cron-imported file are one deploy
+away from production: keep every commit importable and test-verified.
+
+## 4. MEASUREMENT DISCIPLINE (how decisions get made)
 - `backtest/sniper_scorecard.py` joins every journaled finding to Kalshi
   settlement. **Pre-registered pivot gate (Aug 2, 2026):** upper 80% CI
   < +2¢/contract OR <6 settled findings → stop optimizing weather and pivot.
@@ -44,7 +69,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
   (no latency race) — evidence AGAINST building a resident daemon.
 - Point estimates at n≤15 are coin flips (SD≈50¢/contract). Gates use CIs.
 
-## 4. OPERATIONS
+## 5. OPERATIONS
 - **Everything runs on the VPS** (Hetzner CX23, deployed 2026-07-05). The Mac is
   a dev machine; it must never run the crons (dual-writer corruption class).
 - Deploys: `REMOTE_USER=root ./deploy/deploy.sh <ip>` (code-only rsync; NEVER
@@ -57,7 +82,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 - Dashboard: localhost:8787 on the VPS (ssh tunnel); public sanitized stats
   flow exporter → cat-only SSH key → GitHub Action → stats branch → ethansam.io.
 
-## 5. FILES
+## 6. FILES
 
 | File | Purpose |
 |------|---------|
@@ -66,6 +91,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 | `core/brackets.py` | Bracket subtitle parsing + deadness/contains logic |
 | `core/fees.py` | Kalshi taker fee (integer-cents, clamped) |
 | `core/io.py` | Atomic file writes (tmp+rename) |
+| `core/dsm.py` | ASOS Daily Summary Message fetch/parse (IEM AFOS) — the settlement oracle behind the sniper's DSM veto |
 | `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
 | `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
@@ -88,7 +114,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 | `config.py` | Original 5-city station configs + API client tuning (NOT the ladder registry) |
 | `.env` | API credentials (NEVER commit to git) |
 
-## 6. API REFERENCE
+## 7. API REFERENCE
 
 ### Kalshi (authenticated)
 - **Base:** `https://api.elections.kalshi.com/trade-api/v2`
@@ -102,6 +128,12 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
   distinguish degraded reads from real empties — `_req_safe` swallows all
   errors into `{}`. Never journal or mark-seen off an unchecked read.
 
+### IEM (free, no auth, AGGRESSIVELY rate-limited — expect bursts of 429-class refusals)
+- **AFOS text archive:** `mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={PIL}&fmt=text&limit=N`
+  (DSM{awips}, CLI{awips}, historical products — the settlement-forensics feed)
+- **Daily summaries:** `/api/1/daily.json` · **hourly ASOS:** `/cgi-bin/request/asos.py`
+- One request per station per run, generous timeouts, always fail open on refusal
+
 ### NWS (free, no auth, rate-limited)
 - **CLI products:** `api.weather.gov/products/types/CLI/locations/{WFO}`
   (per-office listing; the global listing is 2MB/unfilterable)
@@ -109,7 +141,7 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 - **Settlement page:** `forecast.weather.gov/product.php?site={WFO}&product=CLI&issuedby={AWIPS}`
 - **User-Agent required**
 
-## 7. PRINCIPLES
+## 8. PRINCIPLES
 
 1. **Settlement beats forecasting.** The system that knew tomorrow's temperature
    distribution lost money; the system that reads today's settlement document
@@ -120,5 +152,21 @@ running max, ≥45 min) → buy the settlement bracket if ≥10¢ edge. Alert-on
 3. **Alert-only automation.** The permission design, the classifier, and the
    ops model all assume no automated order ever fires. Keep it that way.
 4. **State files have one writer.** VPS owns the journals; the Mac reads.
-5. **Fail closed.** Degraded API reads skip work and retry next cron; the
-   coverage audit reports "COULD NOT CHECK" rather than silence.
+5. **Fail closed on state, fail open on filters.** A degraded read never
+   journals or marks-seen (retry next cron; the audit says "COULD NOT CHECK",
+   never silence). But a safety filter that only REMOVES suggestions (the DSM
+   veto) passes through unchecked on feed failure — a human verifies every
+   alert anyway, and a filter that can kill the money path is worse than none.
+6. **Deletion is a feature.** The KDE stack was 21k LOC of measured -EV;
+   deleting it outright beat every "gate it / keep it for reference" option.
+   When evidence kills a subsystem, remove it the same week — dead code rots
+   into false context for every future session. Never rebuild from nostalgia.
+7. **The journal outranks memory.** Uncensored journals + pre-registered gates
+   exist because narrative recall flatters itself. When a claim matters, rerun
+   it against the journal/archive (the 85/85 DSM study settled what opinion
+   couldn't). One data point is an anecdote; an archive is an answer.
+8. **Simplicity is a risk control.** Prefer the cron one-shot over the
+   resident daemon, the flat file over the database, stdlib urllib over a new
+   dependency — every moving part on a live money box is something the
+   watchdog must now watch. Complexity gets added only when a measured gate
+   (e.g. alert_decay) demands it.
