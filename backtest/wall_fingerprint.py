@@ -17,8 +17,10 @@ Questions answered:
 Alert-only research; never trades.
 
 Usage:
-    python3 backtest/wall_fingerprint.py            # whole archive
-    python3 backtest/wall_fingerprint.py --days 7
+    python3 backtest/wall_fingerprint.py                    # whole archive
+    python3 backtest/wall_fingerprint.py --days 7 --report discord
+
+Cron: Sundays 17:15 ET (before audit/scorecard/digest), whole archive.
 """
 from __future__ import annotations
 
@@ -166,12 +168,32 @@ def build_report(walls: dict, results: dict, tz_by_series: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--days", type=int, default=None)
+    ap.add_argument("--report", choices=("stdout", "discord"), default="stdout")
     args = ap.parse_args()
     walls = load_wall_days(args.days)
     tickers = sorted({t for (_, t, _) in walls})
     print(f"scanning settlements for {len(tickers)} tickers…", file=sys.stderr)
     results = fetch_results(tickers)
-    print(build_report(walls, results, _series_tz()))
+    text = build_report(walls, results, _series_tz())
+    print(text)
+    if args.report == "discord":
+        try:
+            import asyncio
+
+            from notifications import send_discord_alert
+
+            asyncio.run(send_discord_alert(
+                title="🧱 Wall fingerprint — weekly",
+                description=text[:4096], color=0x95A5A6,
+                context="wall_fingerprint"))
+        except Exception as exc:  # noqa: BLE001 — report must never crash cron
+            print(f"discord send failed: {exc}", file=sys.stderr)
+    try:
+        from heartbeat import write_heartbeat
+
+        write_heartbeat("wall_fingerprint")
+    except Exception:  # noqa: BLE001 — heartbeat must never block the report
+        pass
 
 
 if __name__ == "__main__":
