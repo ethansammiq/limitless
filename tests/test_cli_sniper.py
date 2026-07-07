@@ -227,3 +227,63 @@ class TestRunSeenMarking:
     def test_clean_read_marks_seen(self, monkeypatch, tmp_path):
         state = self._run(monkeypatch, tmp_path, ok=True)
         assert "MDW:042136" in state["seen"]
+
+
+class TestDSMVeto:
+    """2026-07-06 MIA regression: prelim CLI printed 92 while the DSM had
+    93/1344 committed — the final followed the DSM. A floor buy_winner the
+    DSM contradicts must be vetoed, never suggested as a buy."""
+
+    from core import dsm as _dsm
+
+    REPORTS = _dsm.parse_dsm_text(
+        "KMIA DS 06/07 931344/ 771818//")
+
+    def _finding(self, kind="buy_winner", printed=92, ladder_kind="high"):
+        return {"ticker": "KXHIGHMIA-26JUL06-B91.5", "subtitle": "91° to 92°",
+                "series": "KXHIGHMIA", "ladder_kind": ladder_kind,
+                "printed": printed, "final": False, "kind": kind}
+
+    def test_contradicted_buy_is_vetoed(self):
+        kept, vetoed = cs.apply_dsm_veto(
+            [self._finding()], self.REPORTS, "2026-07-06")
+        assert kept == []
+        assert vetoed[0]["kind"] == "dsm_veto"
+        assert vetoed[0]["dsm_extreme"] == 93
+        assert vetoed[0]["dsm_time_lst"] == "1344"
+
+    def test_agreeing_buy_passes_annotated(self):
+        kept, vetoed = cs.apply_dsm_veto(
+            [self._finding(printed=93)], self.REPORTS, "2026-07-06")
+        assert vetoed == []
+        assert kept[0]["kind"] == "buy_winner" and kept[0]["dsm"] == 93
+
+    def test_sell_dead_never_vetoed(self):
+        kept, vetoed = cs.apply_dsm_veto(
+            [self._finding(kind="sell_dead")], self.REPORTS, "2026-07-06")
+        assert vetoed == [] and kept[0]["kind"] == "sell_dead"
+
+    def test_no_dsm_for_date_fails_open(self):
+        kept, vetoed = cs.apply_dsm_veto(
+            [self._finding()], self.REPORTS, "2026-07-07")
+        assert vetoed == []
+        assert kept[0]["kind"] == "buy_winner" and kept[0]["dsm"] == "unchecked"
+
+    def test_empty_reports_fail_open(self):
+        kept, vetoed = cs.apply_dsm_veto([self._finding()], [], "2026-07-06")
+        assert vetoed == [] and kept[0]["dsm"] == "unchecked"
+
+    def test_low_ladder_mirrors(self):
+        kept, vetoed = cs.apply_dsm_veto(
+            [self._finding(printed=78, ladder_kind="low")],
+            self.REPORTS, "2026-07-06")
+        assert vetoed[0]["dsm_extreme"] == 77   # DSM min 77 < printed 78
+
+    def test_alert_line_has_no_command(self):
+        _, vetoed = cs.apply_dsm_veto(
+            [self._finding()], self.REPORTS, "2026-07-06")
+        title, body = cs.format_alert(vetoed)
+        assert "1 DSM veto" in title
+        assert "93° @ 1344 LST" in body
+        assert "VETOED" in body
+        assert "take.py" not in body.split("_Alert only")[0]

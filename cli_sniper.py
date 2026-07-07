@@ -56,6 +56,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from core import dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
@@ -207,6 +208,36 @@ def classify(parsed: ParsedCLI, ladder: Ladder, markets: list[dict]) -> list[dic
     return findings
 
 
+def apply_dsm_veto(findings: list[dict], reports: list[dsm.DSMReport],
+                   summary_date: str) -> tuple[list[dict], list[dict]]:
+    """Split floor findings into (kept, vetoed) against the station's DSM.
+
+    The DSM is authoritative over a prelim CLI print (final CLI == DSM max
+    85/85 days in the MIA archive study, 2026-07-07): a buy_winner premised
+    on a printed floor the DSM already exceeds is a losing trade — the final
+    report will follow the DSM into the next bracket. sell_dead findings are
+    never vetoed (a bigger DSM extreme only strengthens deadness). With no
+    usable DSM the finding passes through marked dsm="unchecked" (fail open:
+    alerts are human-verified, and a veto only removes suggestions).
+    """
+    kept, vetoed = [], []
+    day_reports = dsm.reports_for_date(reports, summary_date)
+    for f in findings:
+        if f["kind"] != "buy_winner":
+            kept.append(f)
+            continue
+        extreme = dsm.dsm_extreme(day_reports, f["ladder_kind"])
+        if extreme is None:
+            kept.append({**f, "dsm": "unchecked"})
+        elif dsm.contradicts(f["ladder_kind"], f["printed"], extreme[0]):
+            vetoed.append({**f, "kind": "dsm_veto",
+                           "dsm_extreme": extreme[0],
+                           "dsm_time_lst": extreme[1]})
+        else:
+            kept.append({**f, "dsm": extreme[0]})
+    return kept, vetoed
+
+
 def _fetch_product(wfo: str, awips: str, version: int = 1) -> str | None:
     url = PRODUCT_URL.format(wfo=wfo, awips=awips, version=version)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -280,13 +311,23 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
 
 def format_alert(opps: list[dict]) -> tuple[str, str]:
     n_buy = sum(1 for o in opps if o["kind"] == "buy_winner")
-    n_sell = len(opps) - n_buy
+    n_veto = sum(1 for o in opps if o["kind"] == "dsm_veto")
+    n_sell = len(opps) - n_buy - n_veto
     title = f"🎯 CLI SNIPER — {n_buy} winner buy(s), {n_sell} dead-bid sell(s)"
+    if n_veto:
+        title += f", {n_veto} DSM veto(es)"
     lines = []
     for o in opps:
         drift = "warming" if o.get("ladder_kind") == "high" else "cooling"
         cert = "FINAL" if o["final"] else f"floor (post-4PM {drift} risk)"
-        if o["kind"] == "buy_winner":
+        if o["kind"] == "dsm_veto":
+            lines.append(
+                f"⛔ **{o['ticker']}** ({o['subtitle']}) — CLI printed "
+                f"**{o['printed']}°** but DSM already has "
+                f"**{o['dsm_extreme']}° @ {o['dsm_time_lst']} LST** → "
+                f"printed-bracket buy VETOED; final CLI follows the DSM "
+                f"(85/85 archive) — revision side likely wins")
+        elif o["kind"] == "buy_winner":
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — CLI printed **{o['printed']}°** "
                 f"[{cert}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}\n  `{o['cmd']}`")
@@ -372,6 +413,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
             journal_entry = {"ts": now_utc.isoformat(timespec="seconds"),
                              **asdict(parsed), "findings": []}
             read_ok = True
+            dsm_reports: list[dsm.DSMReport] | None = None  # lazy, once per product
             for ladder in group:
                 markets, ok = await client.get_markets_checked(series_ticker=ladder.series)
                 if not ok:
@@ -380,6 +422,24 @@ async def run(dry_run: bool, replay: str | None) -> None:
                                    f"{parsed.awips} left unseen for retry")
                     continue
                 findings = classify(parsed, ladder, markets)
+                # DSM veto — floor products only (finals already equal the DSM).
+                if (not parsed.is_final
+                        and any(f["kind"] == "buy_winner" for f in findings)):
+                    if dsm_reports is None:
+                        dsm_reports = await asyncio.to_thread(
+                            dsm.fetch_dsm_reports, parsed.awips)
+                        if not dsm_reports:
+                            logger.warning(f"{parsed.awips}: DSM unavailable — "
+                                           f"buy findings pass unchecked")
+                    findings, vetoed = apply_dsm_veto(
+                        findings, dsm_reports, parsed.summary_date)
+                    for v in vetoed:
+                        logger.warning(
+                            f"{v['ticker']}: DSM VETO — CLI printed "
+                            f"{v['printed']}° but DSM has {v['dsm_extreme']}° "
+                            f"@ {v['dsm_time_lst']} LST")
+                    journal_entry["findings"] += vetoed
+                    opportunities += vetoed
                 priced = await _price_findings(client, findings)
                 journal_entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
