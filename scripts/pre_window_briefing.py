@@ -27,6 +27,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
 
+from heartbeat import write_heartbeat  # noqa: E402
 from notifications import send_discord_alert  # noqa: E402
 
 HEARTBEAT_FILE = PROJECT_ROOT / "heartbeats.json"
@@ -112,6 +113,7 @@ def main() -> None:
         color=0x3498DB,
         context="pre_window_briefing",
     ))
+    write_heartbeat("pre_window_briefing")
 
 
 if __name__ == "__main__":
