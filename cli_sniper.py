@@ -86,12 +86,25 @@ ALERTED_MAX_AGE_H = 48
 BUY_MAX_ASK_FINAL_C = 85          # certain winner: buy up to this ask
 BUY_MAX_ASK_FLOOR_C = 70          # floor leader: residual warming risk
 MIN_SELL_NET_C = 100              # dead-bid alert floor, cents ($1)
+# A LOW ladder's afternoon print locks nothing — the min can still fall until
+# midnight LST, so "bracket contains printed min" is an open forecast bet.
+# Scorecard 2026-07-08: this class realized -30.8¢/contract over 6 settles
+# (the high/floor class was +2.3¢). Journaled for measurement, never alerted.
+SUPPRESS_LOW_FLOOR_BUYS = True
+# Corrections can issue any time (2026-07-08: post-final MM scrub at ~09:26Z).
+# Outside issuance windows, stations with journaled findings in the last 24h
+# get a v1 re-fetch every ~20 min so a corrected re-issue is seen and alerted.
+CORRECTION_SWEEP_EVERY_MIN = 20
 
 MONTHS = {m: i + 1 for i, m in enumerate(
     ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY",
      "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"])}
 
-_WMO_LINE = re.compile(r"^\w{6}\s+K\w{3}\s+(\d{6})\s*$", re.M)
+# The stamp line may carry a correction suffix (CCA/CCB/COR) — e.g.
+# "CDUS42 KMFL 081455 CCA". 2026-07-08 live: a post-final correction scrubbed
+# the MIA minimum to MM and the old $-anchored regex silently rejected the
+# whole product, leaving positions premised on the original value blind.
+_WMO_LINE = re.compile(r"^\w{6}\s+K\w{3}\s+(\d{6})(?:\s+([A-Z]{2,3}))?\s*$", re.M)
 _AWIPS_LINE = re.compile(r"^CLI(\w{3})\s*$", re.M)
 _SUMMARY = re.compile(r"CLIMATE SUMMARY FOR\s+(\w+)\s+(\d{1,2})\s+(\d{4})")
 _VALID_TODAY = re.compile(r"VALID TODAY AS OF")
@@ -108,6 +121,7 @@ class ParsedCLI:
     is_final: bool        # morning product (final) vs afternoon floor
     max_f: int | None
     min_f: int | None
+    correction: str | None = None   # WMO suffix (CCA/COR/...) when corrected
 
 
 def parse_product(text: str) -> ParsedCLI | None:
@@ -129,7 +143,14 @@ def parse_product(text: str) -> ParsedCLI | None:
         is_final=not _VALID_TODAY.search(text),
         max_f=int(mx.group(1)) if mx else None,
         min_f=int(mn.group(1)) if mn else None,
+        correction=stamp.group(2).upper() if stamp.group(2) else None,
     )
+
+
+def _seen_key(parsed: ParsedCLI) -> str:
+    """Dedup key — a corrected re-issue is a distinct, never-seen product."""
+    base = f"{parsed.awips}:{parsed.stamp}"
+    return f"{base}:{parsed.correction}" if parsed.correction else base
 
 
 # Same-day products issued before mid-afternoon (e.g. a 07:31 local "so far"
@@ -201,6 +222,8 @@ def classify(parsed: ParsedCLI, ladder: Ladder, markets: list[dict]) -> list[dic
         base = {"ticker": ticker, "subtitle": mkt.get("subtitle") or mkt.get("yes_sub_title"),
                 "series": ladder.series, "ladder_kind": ladder.kind,
                 "printed": printed, "final": parsed.is_final}
+        if parsed.correction:
+            base["corrected"] = parsed.correction
         if is_dead(ladder.kind, lo, hi, printed):
             findings.append({**base, "kind": "sell_dead"})
         elif contains(lo, hi, printed):
@@ -273,6 +296,33 @@ def _journal(entry: dict, now_utc: datetime) -> None:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
+def _recent_journal_entries(now_utc: datetime) -> list[dict]:
+    """Journal entries from today's and yesterday's files (≈ last 24-48h)."""
+    out = []
+    for day in (now_utc, now_utc - timedelta(days=1)):
+        path = JOURNAL_DIR / f"{day.strftime('%Y-%m-%d')}.jsonl"
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines():
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def _recently_active_stations(now_utc: datetime) -> set[str]:
+    """Stations whose journaled products produced findings in the last ~24h."""
+    return {e["awips"] for e in _recent_journal_entries(now_utc)
+            if e.get("awips") and e.get("findings")}
+
+
+def _journal_has_findings(awips: str, summary_date: str, now_utc: datetime) -> bool:
+    """Did we journal findings for this station+date? (correction relevance)"""
+    return any(e.get("awips") == awips and e.get("summary_date") == summary_date
+               and e.get("findings") for e in _recent_journal_entries(now_utc))
+
+
 def _take_cmd(action: str, ticker: str, qty: int, price_c: int) -> str:
     return (f".venv/bin/python scripts/take.py {ticker} {action} yes "
             f"{qty} {price_c}")
@@ -304,20 +354,37 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
             limit = BUY_MAX_ASK_FINAL_C if f["final"] else BUY_MAX_ASK_FLOOR_C
             if 1 <= ask <= limit and depth >= 1:
                 qty = max(1, int(depth))
-                priced.append({**f, "ask": ask, "ask_depth": depth,
-                               "cmd": _take_cmd("buy", f["ticker"], qty, ask)})
+                entry = {**f, "ask": ask, "ask_depth": depth,
+                         "cmd": _take_cmd("buy", f["ticker"], qty, ask)}
+                if (SUPPRESS_LOW_FLOOR_BUYS and f["ladder_kind"] == "low"
+                        and not f["final"]):
+                    # Journal-only: measured -EV forecast bet, never alerted.
+                    entry.pop("cmd")
+                    entry["suppressed"] = "low_floor_forecast"
+                priced.append(entry)
     return priced
 
 
 def format_alert(opps: list[dict]) -> tuple[str, str]:
     n_buy = sum(1 for o in opps if o["kind"] == "buy_winner")
     n_veto = sum(1 for o in opps if o["kind"] == "dsm_veto")
-    n_sell = len(opps) - n_buy - n_veto
+    n_sell = sum(1 for o in opps if o["kind"] == "sell_dead")
     title = f"🎯 CLI SNIPER — {n_buy} winner buy(s), {n_sell} dead-bid sell(s)"
     if n_veto:
         title += f", {n_veto} DSM veto(es)"
+    n_corr = sum(1 for o in opps if o["kind"] == "correction_notice")
+    if n_corr:
+        title += f", {n_corr} CORRECTION(s)"
     lines = []
     for o in opps:
+        if o["kind"] == "correction_notice":
+            lines.append(
+                f"🛑 **CORRECTION {o['corrected']}** — {o['awips']} "
+                f"{o['summary_date']}: max now **{o['max_f'] if o['max_f'] is not None else 'MM (removed)'}**, "
+                f"min now **{o['min_f'] if o['min_f'] is not None else 'MM (removed)'}**. "
+                f"Prior findings on this ladder may be premised on a value "
+                f"that no longer exists — re-verify any open trade NOW.")
+            continue
         drift = "warming" if o.get("ladder_kind") == "high" else "cooling"
         cert = "FINAL" if o["final"] else f"floor (post-4PM {drift} risk)"
         if o["kind"] == "dsm_veto":
@@ -356,6 +423,13 @@ async def run(dry_run: bool, replay: str | None) -> None:
             raise SystemExit(f"unknown station {awips!r} — not in ladders.json")
     else:
         targets = {a: 1 for a in stations_in_window(now_utc, groups)}
+        # Correction sweep: recently-active stations get a v1 re-fetch every
+        # ~20 min even out of window — a corrected re-issue (new seen-key)
+        # flows through the normal pipeline; anything unchanged dedups out.
+        if now_utc.minute % CORRECTION_SWEEP_EVERY_MIN < 2:
+            for awips in _recently_active_stations(now_utc):
+                if awips in groups:
+                    targets.setdefault(awips, 1)
         if not targets:
             logger.info("cli sniper: no station in an issuance window")
             return
@@ -372,7 +446,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
         if parsed is None:
             logger.info(f"{awips}: no parseable CLI product")
             continue
-        key = f"{parsed.awips}:{parsed.stamp}"
+        key = _seen_key(parsed)
         if not replay and key in state["seen"]:
             continue
         # NOTE: 'seen' is marked AFTER a clean market read (below), not here —
@@ -397,7 +471,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
     await client.start()
     try:
         for parsed, group in new_parses:
-            key = f"{parsed.awips}:{parsed.stamp}"
+            key = _seen_key(parsed)
             finality = effective_finality(parsed, group[0].tz, now_utc)
             if finality == "skip":
                 logger.info(f"{parsed.awips}: same-day pre-afternoon product "
@@ -443,7 +517,27 @@ async def run(dry_run: bool, replay: str | None) -> None:
                 priced = await _price_findings(client, findings)
                 journal_entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
-                opportunities += priced
+                opportunities += [p for p in priced if not p.get("suppressed")]
+            # A corrected re-issue of a product we previously found money on
+            # is alert-worthy even when nothing re-classifies (e.g. a value
+            # scrubbed to MM removes every finding) — the human may hold a
+            # position premised on the ORIGINAL print.
+            if (parsed.correction
+                    and _journal_has_findings(parsed.awips, parsed.summary_date,
+                                              now_utc)):
+                notice = {"kind": "correction_notice",
+                          "ticker": f"CORR:{parsed.awips}:{parsed.summary_date}"
+                                    f":{parsed.stamp}:{parsed.correction}",
+                          "awips": parsed.awips,
+                          "summary_date": parsed.summary_date,
+                          "corrected": parsed.correction,
+                          "final": parsed.is_final,
+                          "max_f": parsed.max_f, "min_f": parsed.min_f}
+                journal_entry["findings"].append(notice)
+                opportunities.append(notice)
+                logger.warning(f"{parsed.awips}: CORRECTION {parsed.correction} "
+                               f"for {parsed.summary_date} — max={parsed.max_f} "
+                               f"min={parsed.min_f}")
             # Mark seen only on a clean sweep — a degraded read leaves the
             # product for the next */2 cron to retry.
             if read_ok and not replay:
@@ -453,8 +547,11 @@ async def run(dry_run: bool, replay: str | None) -> None:
     finally:
         await client.stop()
 
+    # A corrected product bypasses the 48h ticker dedup: the prior alert was
+    # about a value that may no longer exist.
     fresh = [o for o in opportunities
-             if replay or o["ticker"] not in state["alerted"]]
+             if replay or o.get("corrected")
+             or o["ticker"] not in state["alerted"]]
     if dry_run or replay:
         if fresh:
             title, body = format_alert(fresh)
@@ -489,8 +586,20 @@ def main() -> None:
     args = ap.parse_args()
     if not args.once and not args.replay:
         ap.error("use --once (cron) or --replay AWIPS")
-    asyncio.run(run(args.dry_run, args.replay))
-    write_heartbeat("cli_sniper")
+    # Single-instance run lock: a slow run (NWS timeouts across overlapping
+    # windows) must not overlap the next */2 tick — overlapping instances
+    # double-fire Discord and clobber each other's seen/alerted state (the
+    # save is a whole-dict write). Locked-out runs exit WITHOUT heartbeating
+    # so a genuinely hung instance still trips the watchdog.
+    import fcntl
+    with (PROJECT_ROOT / ".cli_sniper.lock").open("w") as lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info("cli sniper: previous run still active — skipping")
+            return
+        asyncio.run(run(args.dry_run, args.replay))
+        write_heartbeat("cli_sniper")
 
 
 if __name__ == "__main__":

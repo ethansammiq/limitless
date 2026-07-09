@@ -243,6 +243,18 @@ def main() -> None:
     if not args.once:
         ap.error("only --once mode is supported; schedule via cron")
 
+    # Single-instance run lock (same rationale as cli_sniper): overlapping
+    # cron runs double-alert and clobber each other's whole-dict state saves.
+    # Locked-out runs exit WITHOUT heartbeating so a hung run still trips
+    # the watchdog.
+    import fcntl
+    lock_fd = (PROJECT_ROOT / ".dead_bracket_sweeper.lock").open("w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.info("dead-bracket sweeper: previous run still active — skipping")
+        return
+
     findings = asyncio.run(sweep())
     total = sum(f["net_cents"] for f in findings)
     if not args.dry_run:

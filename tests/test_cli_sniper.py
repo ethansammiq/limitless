@@ -287,3 +287,98 @@ class TestDSMVeto:
         assert "93° @ 1344 LST" in body
         assert "VETOED" in body
         assert "take.py" not in body.split("_Alert only")[0]
+
+
+def _with_correction(product_text: str, suffix: str = "CCA") -> str:
+    """Append a WMO correction suffix to a fixture's stamp line."""
+    import re as _re
+    return _re.sub(r"(?m)^(\w{6}\s+K\w{3}\s+\d{6})\s*$", rf"\1 {suffix}",
+                   product_text, count=1)
+
+
+class TestCorrections:
+    """2026-07-08 regression: a post-final CCA scrubbed the MIA minimum to
+    MM and the $-anchored stamp regex rejected the entire product — the
+    correction was invisible to the pipeline."""
+
+    def test_corrected_product_parses(self):
+        p = cs.parse_product(_with_correction(MORNING))
+        assert p is not None
+        assert p.correction == "CCA"
+        assert p.summary_date == "2026-07-03"
+
+    def test_uncorrected_product_has_no_suffix(self):
+        assert cs.parse_product(MORNING).correction is None
+
+    def test_seen_key_distinguishes_correction(self):
+        plain = cs.parse_product(MORNING)
+        corr = cs.parse_product(_with_correction(MORNING))
+        assert cs._seen_key(plain) != cs._seen_key(corr)
+        assert cs._seen_key(corr).endswith(":CCA")
+
+    def test_classify_tags_findings_corrected(self):
+        p = cs.parse_product(_with_correction(MORNING))
+        markets = [_mkt("KXHIGHCHI-26JUL03-B90.5", "90° to 91°")]
+        found = cs.classify(p, MDW_HIGH, markets)
+        assert found[0]["corrected"] == "CCA"
+
+    def test_correction_notice_alert_has_no_command(self):
+        notice = {"kind": "correction_notice",
+                  "ticker": "CORR:MIA:2026-07-07:081455:CCA",
+                  "awips": "MIA", "summary_date": "2026-07-07",
+                  "corrected": "CCA", "final": True,
+                  "max_f": 93, "min_f": None}
+        title, body = cs.format_alert([notice])
+        assert "1 CORRECTION" in title
+        assert "MM (removed)" in body
+        assert "re-verify" in body.lower()
+        assert "take.py" not in body.split("_Alert only")[0]
+
+
+class TestPriceFindings:
+    """_price_findings computes the ask, applies caps, and emits the literal
+    command humans run — previously untested (audit 2026-07-08)."""
+
+    class _Client:
+        def __init__(self, books):
+            self._books = books
+
+        async def get_orderbook(self, ticker):
+            return self._books[ticker]
+
+    def _find(self, kind="buy_winner", ladder_kind="high", final=False,
+              ticker="KXHIGHCHI-26JUL04-B84.5"):
+        return {"ticker": ticker, "subtitle": "84° to 85°",
+                "series": "KXHIGHCHI", "ladder_kind": ladder_kind,
+                "printed": 85, "final": final, "kind": kind}
+
+    def _run(self, findings, books):
+        import asyncio as aio
+        return aio.run(cs._price_findings(self._Client(books), findings))
+
+    def test_high_floor_buy_priced_with_command(self):
+        books = {"KXHIGHCHI-26JUL04-B84.5": {"yes": [], "no": [[84, 40]]}}
+        out = self._run([self._find()], books)
+        assert out[0]["ask"] == 16 and out[0]["ask_depth"] == 40
+        assert out[0]["cmd"].endswith("KXHIGHCHI-26JUL04-B84.5 buy yes 40 16")
+        assert "suppressed" not in out[0]
+
+    def test_floor_ask_cap_filters(self):
+        books = {"KXHIGHCHI-26JUL04-B84.5": {"yes": [], "no": [[25, 40]]}}
+        assert self._run([self._find(final=False)], books) == []      # ask 75 > 70
+        out = self._run([self._find(final=True)], books)              # 75 ≤ 85
+        assert out and out[0]["ask"] == 75
+
+    def test_low_floor_buy_suppressed_but_journaled(self):
+        books = {"KXLOWTMIA-26JUL07-B74.5": {"yes": [], "no": [[85, 53]]}}
+        out = self._run([self._find(ladder_kind="low",
+                                    ticker="KXLOWTMIA-26JUL07-B74.5")], books)
+        assert out[0]["suppressed"] == "low_floor_forecast"
+        assert "cmd" not in out[0]           # never actionable
+        assert out[0]["ask"] == 15           # still measured for the scorecard
+
+    def test_low_final_buy_not_suppressed(self):
+        books = {"KXLOWTMIA-26JUL07-B74.5": {"yes": [], "no": [[85, 53]]}}
+        out = self._run([self._find(ladder_kind="low", final=True,
+                                    ticker="KXLOWTMIA-26JUL07-B74.5")], books)
+        assert "suppressed" not in out[0] and "cmd" in out[0]

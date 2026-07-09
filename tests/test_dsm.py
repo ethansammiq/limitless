@@ -136,3 +136,26 @@ class TestContradicts:
         assert dsm.contradicts("low", 74, 73)
         assert not dsm.contradicts("low", 74, 74)
         assert not dsm.contradicts("low", 74, 75)
+
+
+class TestDateOrderUnambiguous:
+    """The DD/MM assumption validated on a real mid-June archive product
+    (day > 12 disambiguates). IEM AFOS retrieve.py sdate/edate fetch,
+    2026-07-08: KMIA daily DSM for June 14 prints '14/06'. If this were
+    MM/DD the veto would silently die every month from the 13th (fail-open
+    masks it as dsm: unchecked)."""
+
+    JUNE_14_DAILY = ("KMIA DS 14/06 931300/ 771559// 93/ 80//9990417/T/M/M/"
+                     "M/M/M/M/M/M/M/M/M/M/M/M/M/00/T/00/00/00/00/00/00/00/"
+                     "34/22211520/22341513/3/NN/N/N/NN/EP EW=")
+
+    def test_day_gt_12_parses_as_dd_mm(self):
+        r = dsm.parse_dsm_text(self.JUNE_14_DAILY)[0]
+        assert (r.day, r.month) == (14, 6)
+        assert r.max_f == 93 and r.max_time_lst == "1300"
+        assert r.min_f == 77 and r.min_time_lst == "1559"
+
+    def test_reports_for_date_matches_unambiguous_day(self):
+        reports = dsm.parse_dsm_text(self.JUNE_14_DAILY)
+        assert dsm.reports_for_date(reports, "2026-06-14")[0].max_f == 93
+        assert dsm.reports_for_date(reports, "2026-12-06") == []  # MM/DD read
