@@ -52,6 +52,7 @@ EXPECTED_INTERVALS = {
     "wall_fingerprint": 192,    # Runs Sundays 17:15 (wall win rates). Allow 8 days.
     "export_public_stats": 2,   # Runs every 30 min (website snapshot). Allow 2h.
     "pre_window_briefing": 25,  # Runs daily 16:27 ET. Allow 25h.
+    "funding_logger": 2,        # Runs every 10 min (perps funding vs spot). Allow 2h.
 }
 
 # Daily cron jobs the watchdog can re-run when the host slept through the
