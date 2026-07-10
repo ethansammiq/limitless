@@ -1,7 +1,7 @@
 """Tests for scripts/take.py guards (no network, no orders)."""
 import argparse
 
-from scripts.take import order_cost_dollars, validate
+from scripts.take import order_cost_dollars, summarize_order_fills, validate
 
 
 def _args(action="buy", side="yes", count=10, price_c=20):
@@ -34,3 +34,29 @@ class TestValidate:
 
     def test_cap_override(self):
         assert validate(_args(count=500, price_c=90), 1000.0) is None
+
+
+class TestSummarizeOrderFills:
+    """place_order can report status=resting for an IOC that filled nothing
+    (2026-07-10, two live orders) — fills are the ground truth."""
+
+    FILLS = [
+        {"order_id": "A", "count_fp": "50.00", "yes_price_dollars": "0.62"},
+        {"order_id": "A", "count_fp": "44.00", "yes_price_dollars": "0.68"},
+        {"order_id": "B", "count_fp": "6.00", "yes_price": 69},
+    ]
+
+    def test_sums_only_this_order(self):
+        filled, avg = summarize_order_fills(self.FILLS, "A")
+        assert filled == 94
+        assert 62 < avg < 68
+
+    def test_integer_cent_fills(self):
+        filled, avg = summarize_order_fills(self.FILLS, "B")
+        assert filled == 6
+        assert avg == 69
+
+    def test_no_fills_is_zero(self):
+        assert summarize_order_fills(self.FILLS, "Z") == (0, 0.0)
+        assert summarize_order_fills([], "A") == (0, 0.0)
+        assert summarize_order_fills(None, "A") == (0, 0.0)

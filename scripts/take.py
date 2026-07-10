@@ -61,6 +61,28 @@ def expire_ts(hhmm: str) -> int:
     return int(now.replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp())
 
 
+def summarize_order_fills(fills: list[dict], order_id: str) -> tuple[int, float]:
+    """(contracts filled, avg yes-price in cents) for one order's fills.
+
+    The instant place_order response can say status=resting even for a
+    market/IOC order that is already cancelling (observed live 2026-07-10:
+    two IOC buys reported "resting", filled nothing, and the truth only
+    surfaced via the account snapshot 10 minutes later). Fills are the
+    ground truth; report from them."""
+    total = 0
+    cents_qty = 0.0
+    for f in fills or []:
+        if f.get("order_id") != order_id:
+            continue
+        qty = float(f.get("count_fp") or f.get("count") or 0)
+        yes_c = f.get("yes_price")
+        if yes_c is None:
+            yes_c = round(float(f.get("yes_price_dollars") or 0) * 100)
+        total += int(round(qty))
+        cents_qty += qty * yes_c
+    return total, (cents_qty / total if total else 0.0)
+
+
 async def run(args) -> None:
     from kalshi_client import KalshiClient
 
@@ -83,7 +105,19 @@ async def run(args) -> None:
             expiration_time=expire_ts(args.expire_et) if args.expire_et else None,
         )
         order = (result or {}).get("order") or {}
-        print(f"order {order.get('order_id', 'FAILED')} status={order.get('status')}")
+        order_id = order.get("order_id", "")
+        print(f"order {order_id or 'FAILED'} status={order.get('status')}")
+        if order_id:
+            await asyncio.sleep(1.5)  # let the match/cancel settle
+            fills = await client.get_fills(ticker=args.ticker)
+            filled, avg_c = summarize_order_fills(fills, order_id)
+            if filled:
+                print(f"FILLED {filled}/{args.count} @ avg {avg_c:.1f}c")
+            else:
+                print(f"FILLED 0/{args.count} — no fills for this order "
+                      f"(IOC found no book at {args.price_c}c or better)"
+                      if args.ioc else
+                      f"FILLED 0/{args.count} — order resting on the book")
         for p in await client.get_positions() or []:
             if p.get("ticker") == args.ticker:
                 print(f"position: {p.get('position_fp')} "
