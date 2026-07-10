@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "KalshiClient",
     "KalshiAPIError",
+    "KalshiAuthError",
     "KalshiRateLimitError",
     "fetch_balance_quick",
     "parse_fp",
@@ -93,6 +94,25 @@ class KalshiRateLimitError(KalshiAPIError):
     def __init__(self, retry_after: int = 0):
         self.retry_after = retry_after
         super().__init__(429, f"Rate limited. Retry after {retry_after}s")
+
+
+class KalshiAuthError(Exception):
+    """401/403 from Kalshi — bad key, bad signature, or wrong credentials.
+
+    Deliberately NOT a KalshiAPIError subclass: auth failures are never
+    transient, so they must not enter the retry loop, and `_req_safe` must
+    not degrade them to `{}` — a silent `{}` from a private endpoint reads
+    as "no positions / $0 balance", which is how a live session spent an
+    evening (2026-07-09) trusting empty results from a mis-credentialed
+    client. Fail closed on state (CLAUDE.md §8.5).
+    """
+    def __init__(self, status: int, message: str = ""):
+        self.status = status
+        self.message = message
+        super().__init__(
+            f"Kalshi auth error {status}: {message} — check KALSHI_API_KEY_ID/"
+            f"KALSHI_PRIVATE_KEY_PATH (.env) and that the client was built "
+            f"with credentials")
 
 
 def normalize_market(mkt: dict) -> dict:
@@ -215,9 +235,22 @@ class KalshiClient:
             cls._last_ts = ts
             return ts
 
-    def __init__(self, api_key_id: str = "", private_key_path: str = "", demo_mode: bool = True):
-        self.api_key_id = api_key_id
-        self.private_key_path = private_key_path
+    def __init__(self, api_key_id: str = "", private_key_path: str = "",
+                 demo_mode: bool | None = None):
+        """Credentials default from the environment; demo requires opt-in.
+
+        A bare ``KalshiClient()`` used to mean demo-api with no credentials —
+        which serves plausible-looking markets whose books do NOT match the
+        live exchange. On 2026-07-09 an evening of ad-hoc scans quoted
+        "asks" that were demo furniture and IOC orders against the live book
+        found nothing there. Demo is now explicit: pass ``demo_mode=True``
+        or set ``KALSHI_DEMO_MODE=true``.
+        """
+        env = __import__("os").environ
+        self.api_key_id = api_key_id or env.get("KALSHI_API_KEY_ID", "")
+        self.private_key_path = private_key_path or env.get("KALSHI_PRIVATE_KEY_PATH", "")
+        if demo_mode is None:
+            demo_mode = env.get("KALSHI_DEMO_MODE", "").lower() in ("1", "true", "yes")
         self.demo_mode = demo_mode
         self.base_url = KALSHI_DEMO_URL if demo_mode else KALSHI_LIVE_URL
         self.private_key = None
@@ -252,9 +285,12 @@ class KalshiClient:
                 )
             except (ValueError, Exception) as exc:
                 raise RuntimeError(f"Failed to load private key at {self.private_key_path}: {exc}") from exc
-            logger.info("Kalshi client initialized with credentials")
+            logger.info(f"Kalshi client initialized with credentials "
+                        f"({'DEMO' if self.demo_mode else 'live'}: {self.base_url})")
         else:
-            logger.warning("Kalshi client initialized WITHOUT credentials (public endpoints only)")
+            logger.warning(f"Kalshi client initialized WITHOUT credentials "
+                           f"(public endpoints only; "
+                           f"{'DEMO' if self.demo_mode else 'live'}: {self.base_url})")
 
     async def stop(self):
         """Close the client session."""
@@ -321,6 +357,14 @@ class KalshiClient:
                     self._error_count += 1
                     raise KalshiRateLimitError(retry_after)
 
+                # Auth failures are terminal, not transient — no retry, no
+                # degrade-to-{} (KalshiAuthError is outside both paths).
+                if resp.status in (401, 403):
+                    self._error_count += 1
+                    body = await resp.text()
+                    logger.error(f"AUTH failure {resp.status} on {method} {path}: {body[:200]}")
+                    raise KalshiAuthError(resp.status, body[:200])
+
                 # Handle other errors — raise so callers can distinguish from empty results
                 if resp.status not in (200, 201):
                     self._error_count += 1
@@ -340,9 +384,15 @@ class KalshiClient:
             raise
 
     async def _req_safe(self, method: str, path: str, data: dict = None, auth: bool = False) -> dict:
-        """Make an API request, returning empty dict on all failures (safe version)."""
+        """Make an API request, returning empty dict on transient failures.
+
+        Auth failures re-raise: a `{}` from a private endpoint is
+        indistinguishable from a real empty (no positions, $0), and acting on
+        that fiction is worse than crashing the run (2026-07-09)."""
         try:
             return await self._req(method, path, data, auth)
+        except KalshiAuthError:
+            raise
         except Exception as e:
             logger.error(f"Request failed after retries: {method} {path} - {e}")
             return {}

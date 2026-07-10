@@ -328,3 +328,68 @@ class TestCheckedReads:
         _capture_requests(client, {})
         markets, ok = asyncio.run(client.get_markets_checked(series_ticker="KXHIGHCHI"))
         assert markets == [] and ok is False    # request failed — caller must not trust []
+
+
+class TestAuthFailureIsLoud:
+    """A silent {} from a 401 read as 'no positions / $0 balance' for an
+    entire evening (2026-07-09). Auth errors must raise, not degrade."""
+
+    def test_auth_error_not_an_api_error(self):
+        from kalshi_client import KalshiAuthError
+        assert not issubclass(KalshiAuthError, KalshiAPIError)  # -> no retry
+
+    def test_req_safe_reraises_auth(self):
+        import asyncio
+        from kalshi_client import KalshiAuthError
+        client = KalshiClient(demo_mode=True)
+
+        async def raise_auth(*a, **k):
+            raise KalshiAuthError(401, "token authentication failure")
+        client._req = raise_auth
+
+        async def go():
+            return await client._req_safe("GET", "/portfolio/balance", auth=True)
+        try:
+            asyncio.run(go())
+            raise AssertionError("KalshiAuthError was swallowed")
+        except KalshiAuthError:
+            pass
+
+    def test_req_safe_still_degrades_transient(self):
+        import asyncio
+        client = KalshiClient(demo_mode=True)
+
+        async def raise_api(*a, **k):
+            raise KalshiAPIError(500, "internal")
+        client._req = raise_api
+
+        async def go():
+            return await client._req_safe("GET", "/markets")
+        assert asyncio.run(go()) == {}
+
+
+class TestConstructorDefaults:
+    """Bare KalshiClient() used to mean demo-api silently — an evening of
+    scans (2026-07-09) priced live trades off demo furniture."""
+
+    def test_default_is_live_not_demo(self, monkeypatch):
+        monkeypatch.delenv("KALSHI_DEMO_MODE", raising=False)
+        client = KalshiClient()
+        assert "demo" not in client.base_url.lower()
+
+    def test_env_can_opt_into_demo(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_DEMO_MODE", "true")
+        client = KalshiClient()
+        assert "demo" in client.base_url.lower()
+
+    def test_credentials_default_from_env(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_API_KEY_ID", "env-key")
+        monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/env/key.pem")
+        client = KalshiClient(demo_mode=False)
+        assert client.api_key_id == "env-key"
+        assert client.private_key_path == "/env/key.pem"
+
+    def test_explicit_args_beat_env(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_API_KEY_ID", "env-key")
+        client = KalshiClient(api_key_id="explicit", demo_mode=False)
+        assert client.api_key_id == "explicit"
