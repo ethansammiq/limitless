@@ -56,7 +56,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from core import dsm  # noqa: E402
+from core import drift, dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
@@ -356,6 +356,7 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
                 qty = max(1, int(depth))
                 entry = {**f, "ask": ask, "ask_depth": depth,
                          "cmd": _take_cmd("buy", f["ticker"], qty, ask)}
+                _attach_drift_economics(entry)
                 if (SUPPRESS_LOW_FLOOR_BUYS and f["ladder_kind"] == "low"
                         and not f["final"]):
                     # Journal-only: measured -EV forecast bet, never alerted.
@@ -363,6 +364,39 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
                     entry["suppressed"] = "low_floor_forecast"
                 priced.append(entry)
     return priced
+
+
+_DRIFT_DIST: drift.DriftDist | None = None
+
+
+def _drift_dist() -> drift.DriftDist:
+    """Floor→final distribution from the journal, computed once per run."""
+    global _DRIFT_DIST
+    if _DRIFT_DIST is None:
+        _DRIFT_DIST = drift.distribution(drift.load_pairs(JOURNAL_DIR))
+    return _DRIFT_DIST
+
+
+def _attach_drift_economics(entry: dict) -> None:
+    """Quantify a floor buy_winner with the measured drift distribution.
+
+    2026-07-09: three floor-containing brackets graded 86-98% by this table
+    went unbought at 51-66¢ because the alert carried no probability. The
+    number belongs in the alert, not in a human's head. High ladders only —
+    a low floor locks nothing (the min can still fall until midnight LST).
+    """
+    if entry["final"] or entry["ladder_kind"] != "high":
+        return
+    bounds = parse_subtitle(entry.get("subtitle"))
+    if bounds is None:
+        return
+    dist = _drift_dist()
+    prob = drift.bracket_win_prob(entry["printed"], bounds[0], bounds[1], dist)
+    if prob is None:
+        return
+    entry["drift_prob"] = round(prob, 3)
+    entry["drift_n"] = dist.n
+    entry["drift_ev_c"] = round(drift.ev_cents(prob, entry["ask"]), 1)
 
 
 def format_alert(opps: list[dict]) -> tuple[str, str]:
@@ -395,9 +429,13 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
                 f"printed-bracket buy VETOED; final CLI follows the DSM "
                 f"(85/85 archive) — revision side likely wins")
         elif o["kind"] == "buy_winner":
+            econ = ""
+            if "drift_prob" in o:
+                econ = (f" | drift {o['drift_prob']:.0%} win "
+                        f"(n={o['drift_n']}), EV {o['drift_ev_c']:+.0f}¢")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — CLI printed **{o['printed']}°** "
-                f"[{cert}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}\n  `{o['cmd']}`")
+                f"[{cert}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}{econ}\n  `{o['cmd']}`")
         else:
             levels = ", ".join(f"{p}¢×{q}" for p, q in o["levels"])
             lines.append(

@@ -33,6 +33,19 @@ cap without `--yes`. Alerts print the exact take.py command to run.
   BEFORE its station-local issuance date; same-day products classify only ≥15:00
   local, else skip. (The 2026-07-05 bug: same-day 07:31-local products regex-marked
   FINAL alerted false 1¢ certain-winners.)
+- **Drift model** (`core/drift.py`): floor→final distribution measured from the
+  journal (2026-07-10, n=104 first-print pairs: final==floor 85.6%, +1 12.5%,
+  +2 1.9%). Floor buy_winner alerts on HIGH ladders carry `drift_prob`/`drift_ev_c`
+  — a floor-at-bottom bracket (floor survives +1) grades ~98%, floor-at-top ~86%.
+  Floors are FIRST prints (re-issued floors launder drift out of the sample).
+  2026-07-09 lesson: three such brackets at 51-66¢ went unbought for lack of a
+  number in the alert; the winning OKC skip graded +45¢ EV.
+- **Journal-first rule (manual trades):** before ANY manual bracket trade, grep
+  the journal for an existing print on that station/day. 2026-07-09: a 1¢
+  "leading bracket" was bought 29 min after its kill-print was already on disk.
+  In thin ladders a too-good ask IS the wall — obs feeds ran 0.6-2°F under the
+  CLI on all four prints that evening (MIA/ATL/DCA/MDW); the document outranks
+  every feed.
 
 ### DEAD-BRACKET SWEEPER
 Brackets the station's own observations have already killed but still holding
@@ -92,6 +105,7 @@ away from production: keep every commit importable and test-verified.
 | `core/fees.py` | Kalshi taker fee (integer-cents, clamped) |
 | `core/io.py` | Atomic file writes (tmp+rename) |
 | `core/dsm.py` | ASOS Daily Summary Message fetch/parse (IEM AFOS) — the settlement oracle behind the sniper's DSM veto |
+| `core/drift.py` | Floor→final drift distribution from the journal — prices floor buy_winners (win prob + EV in alerts) |
 | `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
 | `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
@@ -127,6 +141,14 @@ away from production: keep every commit importable and test-verified.
 - **Checked reads:** `get_markets_checked()` / `get_balance_checked()`
   distinguish degraded reads from real empties — `_req_safe` swallows all
   errors into `{}`. Never journal or mark-seen off an unchecked read.
+- **Auth failures raise** (`KalshiAuthError`, no retry, not swallowed by
+  `_req_safe`): a silent `{}` from a 401 read as "no positions / $0" for an
+  evening (2026-07-09). Demo is opt-in only (`demo_mode=True` or
+  `KALSHI_DEMO_MODE=true`) — a bare `KalshiClient()` used to mean demo-api,
+  whose books are furniture that does not match the live exchange.
+- **Order truth is fills, not the instant status:** place_order can report
+  `resting` for an IOC that filled nothing (2026-07-10). take.py now reports
+  FILLED n/count @ avg from the fills feed 1.5s later.
 
 ### IEM (free, no auth, AGGRESSIVELY rate-limited — expect bursts of 429-class refusals)
 - **AFOS text archive:** `mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={PIL}&fmt=text&limit=N`

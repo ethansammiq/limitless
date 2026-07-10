@@ -382,3 +382,41 @@ class TestPriceFindings:
         out = self._run([self._find(ladder_kind="low", final=True,
                                     ticker="KXLOWTMIA-26JUL07-B74.5")], books)
         assert "suppressed" not in out[0] and "cmd" in out[0]
+
+
+class TestDriftEconomics:
+    """Floor buy_winners carry the measured drift probability (2026-07-09:
+    three 86-98% brackets went unbought because the alert had no number)."""
+
+    def _entry(self, **over):
+        e = {"ticker": "KXHIGHMIA-26JUL09-B92.5", "subtitle": "92° to 93°",
+             "ladder_kind": "high", "printed": 92, "final": False, "ask": 56}
+        e.update(over)
+        return e
+
+    def _with_dist(self, monkeypatch, same=89, up1=13, up2=2):
+        from core.drift import DriftDist
+        monkeypatch.setattr(cs, "_drift_dist", lambda: DriftDist(same, up1, up2))
+
+    def test_floor_high_gets_probability_and_ev(self, monkeypatch):
+        self._with_dist(monkeypatch)
+        e = self._entry()
+        cs._attach_drift_economics(e)
+        assert 0.97 < e["drift_prob"] < 1.0     # floor-at-bottom: same + up1
+        assert e["drift_n"] == 104
+        assert e["drift_ev_c"] > 35
+
+    def test_final_and_low_ladders_not_priced(self, monkeypatch):
+        self._with_dist(monkeypatch)
+        fin = self._entry(final=True)
+        cs._attach_drift_economics(fin)
+        low = self._entry(ladder_kind="low")
+        cs._attach_drift_economics(low)
+        assert "drift_prob" not in fin
+        assert "drift_prob" not in low
+
+    def test_small_sample_attaches_nothing(self, monkeypatch):
+        self._with_dist(monkeypatch, same=10, up1=1, up2=0)
+        e = self._entry()
+        cs._attach_drift_economics(e)
+        assert "drift_prob" not in e
