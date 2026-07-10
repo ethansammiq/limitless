@@ -37,7 +37,9 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from core.io import atomic_write_json  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
+from kalshi_client import parse_dollars  # noqa: E402
 from log_setup import get_logger  # noqa: E402
+from market_timeseries import extract_target_date_from_ticker  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -58,6 +60,41 @@ REALERT_STEP_C = 3
 # when there's real size within a few cents of the best bid.
 MIN_ALERT_DEPTH = 5
 DEPTH_BAND_C = 3
+# Kalshi normally settles a weather ladder within hours of the final CLI, but
+# KXLOWTMIA-26JUL07 sat undetermined for 50+ hours (2026-07-10) with $35 of
+# collateral locked, noticed only by a human happening to look. Any position
+# whose event date is this many days past gets one overdue ping per day.
+SETTLEMENT_OVERDUE_DAYS = 2
+
+
+def overdue_settlements(positions: list[dict], today_utc) -> list[tuple[dict, int]]:
+    """(position, age_days) for nonzero positions whose event date is
+    >= SETTLEMENT_OVERDUE_DAYS in the past — still unsettled long after the
+    settlement document existed."""
+    out = []
+    for p in positions or []:
+        try:
+            qty = float(p.get("position_fp") or p.get("position") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty == 0:
+            continue
+        tgt = extract_target_date_from_ticker(p.get("ticker", ""))
+        if not tgt:
+            continue
+        try:
+            event_day = datetime.strptime(tgt, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        age = (today_utc - event_day).days
+        if age >= SETTLEMENT_OVERDUE_DAYS:
+            out.append((p, age))
+    return out
+
+
+def should_alert_overdue(state: dict, ticker: str, today_iso: str) -> bool:
+    """One overdue ping per ticker per day."""
+    return state.get(f"overdue:{ticker}") != today_iso
 
 
 def known_fill_ids() -> set[str]:
@@ -221,6 +258,8 @@ async def run(threshold: int, dry_run: bool) -> None:
                 print(f"  {p['ticker']}: {p['qty']:.0f}x, best bid {bid}c "
                       f"(depth {p['bid_depth']:.0f})"
                       f"{'  <-- SELL-INTO-STRENGTH' if real else ''}")
+            for p, age in overdue_settlements(positions, datetime.now(timezone.utc).date()):
+                print(f"  {p['ticker']}: SETTLEMENT OVERDUE {age}d")
             return
 
         for f in fresh:
@@ -269,6 +308,33 @@ async def run(threshold: int, dry_run: bool) -> None:
                 state[p["ticker"]] = {"bid": bid, "ts": now}
             atomic_write_json(STATE_FILE, state)
             logger.info(f"strength alert sent for {len(pings)} position(s)")
+
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        overdue = [(p, age) for p, age in
+                   overdue_settlements(positions, datetime.now(timezone.utc).date())
+                   if should_alert_overdue(state, p["ticker"], today_iso)]
+        if overdue:
+            lines = [
+                f"**{p['ticker']}** — event {age} days past, still unsettled "
+                f"(exposure ${parse_dollars(p.get('market_exposure_dollars')):.2f}). "
+                f"Settlement doc has existed for days; consider a support ticket."
+                for p, age in overdue
+            ]
+            try:
+                from notifications import send_discord_alert
+
+                await send_discord_alert(
+                    title=f"⏳ {len(overdue)} position(s) with OVERDUE settlement",
+                    description="\n".join(lines)[:4096],
+                    color=0x95A5A6,
+                    context="live_watch",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"discord overdue alert failed: {exc}")
+            for p, _ in overdue:
+                state[f"overdue:{p['ticker']}"] = today_iso
+            atomic_write_json(STATE_FILE, state)
+            logger.info(f"settlement-overdue alert sent for {len(overdue)} position(s)")
     finally:
         await client.stop()
 

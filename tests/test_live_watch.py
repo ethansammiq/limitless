@@ -112,3 +112,39 @@ class TestReadsDegraded:
     def test_real_responses_are_not_degraded(self):
         assert lw.reads_degraded({"fills": []}) is False
         assert lw.reads_degraded({"fills": [{"fill_id": "a"}]}) is False
+
+
+class TestOverdueSettlements:
+    """KXLOWTMIA-26JUL07 sat unsettled 50+ hours (2026-07-10) — the watcher
+    now pings instead of a human happening to look."""
+
+    from datetime import date
+    TODAY = date(2026, 7, 10)
+
+    def _pos(self, ticker, qty="100.00"):
+        return {"ticker": ticker, "position_fp": qty,
+                "market_exposure_dollars": "34.94"}
+
+    def test_old_event_flagged_with_age(self):
+        out = lw.overdue_settlements([self._pos("KXLOWTMIA-26JUL07-B78.5")], self.TODAY)
+        assert len(out) == 1
+        assert out[0][1] == 3
+
+    def test_recent_event_not_flagged(self):
+        out = lw.overdue_settlements([self._pos("KXHIGHMIA-26JUL09-B92.5")], self.TODAY)
+        assert out == []
+
+    def test_zero_position_ignored(self):
+        out = lw.overdue_settlements([self._pos("KXLOWTMIA-26JUL07-B78.5", qty="0.00")], self.TODAY)
+        assert out == []
+
+    def test_unparseable_ticker_ignored(self):
+        out = lw.overdue_settlements([self._pos("NOT-A-TICKER")], self.TODAY)
+        assert out == []
+
+    def test_one_ping_per_day(self):
+        state = {}
+        assert lw.should_alert_overdue(state, "T1", "2026-07-10") is True
+        state["overdue:T1"] = "2026-07-10"
+        assert lw.should_alert_overdue(state, "T1", "2026-07-10") is False
+        assert lw.should_alert_overdue(state, "T1", "2026-07-11") is True
