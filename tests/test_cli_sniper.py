@@ -279,6 +279,30 @@ class TestDSMVeto:
             self.REPORTS, "2026-07-06")
         assert vetoed[0]["dsm_extreme"] == 77   # DSM min 77 < printed 78
 
+    def test_dsm_inside_bracket_is_not_vetoed(self):
+        """2026-07-09 MSP false veto: printed max 83, DSM 84, bracket 83-84 —
+        the DSM disagreed with the print but stayed inside the bracket; the
+        final CLI was 84 and the bracket won. A DSM extreme inside the
+        finding's own bracket must pass, annotated, not vetoed."""
+        reports = self._dsm.parse_dsm_text("KMSP DS 09/07 841512/ 660544//")
+        finding = {"ticker": "KXHIGHTMIN-26JUL09-B83.5", "subtitle": "83° to 84°",
+                   "series": "KXHIGHTMIN", "ladder_kind": "high",
+                   "printed": 83, "final": False, "kind": "buy_winner"}
+        kept, vetoed = cs.apply_dsm_veto([finding], reports, "2026-07-09")
+        assert vetoed == []
+        assert kept[0]["kind"] == "buy_winner" and kept[0]["dsm"] == 84
+
+    def test_dsm_outside_bracket_still_vetoes(self):
+        """2026-07-09 DEN correct veto: printed low 59, DSM 57, bracket 58-59
+        — the DSM extreme escapes the bracket, so the veto must still fire."""
+        reports = self._dsm.parse_dsm_text("KDEN DS 09/07 891455/ 570449//")
+        finding = {"ticker": "KXLOWTDEN-26JUL09-B58.5", "subtitle": "58° to 59°",
+                   "series": "KXLOWTDEN", "ladder_kind": "low",
+                   "printed": 59, "final": False, "kind": "buy_winner"}
+        kept, vetoed = cs.apply_dsm_veto([finding], reports, "2026-07-09")
+        assert kept == []
+        assert vetoed[0]["kind"] == "dsm_veto" and vetoed[0]["dsm_extreme"] == 57
+
     def test_alert_line_has_no_command(self):
         _, vetoed = cs.apply_dsm_veto(
             [self._finding()], self.REPORTS, "2026-07-06")

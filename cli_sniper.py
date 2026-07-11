@@ -238,10 +238,15 @@ def apply_dsm_veto(findings: list[dict], reports: list[dsm.DSMReport],
     The DSM is authoritative over a prelim CLI print (final CLI == DSM max
     85/85 days in the MIA archive study, 2026-07-07): a buy_winner premised
     on a printed floor the DSM already exceeds is a losing trade — the final
-    report will follow the DSM into the next bracket. sell_dead findings are
-    never vetoed (a bigger DSM extreme only strengthens deadness). With no
-    usable DSM the finding passes through marked dsm="unchecked" (fail open:
-    alerts are human-verified, and a veto only removes suggestions).
+    report will follow the DSM into the next bracket. But only when the DSM
+    extreme actually leaves the bracket: 2026-07-09 MSP printed max 83, DSM
+    said 84, both inside the "83° to 84°" bracket — the veto killed a winning
+    trade. A DSM extreme still inside the finding's bracket confirms the buy
+    rather than contradicting it (the same day's DEN low — printed 59, DSM 57,
+    bracket 58-59 — stays vetoed). sell_dead findings are never vetoed (a
+    bigger DSM extreme only strengthens deadness). With no usable DSM the
+    finding passes through marked dsm="unchecked" (fail open: alerts are
+    human-verified, and a veto only removes suggestions).
     """
     kept, vetoed = [], []
     day_reports = dsm.reports_for_date(reports, summary_date)
@@ -253,9 +258,13 @@ def apply_dsm_veto(findings: list[dict], reports: list[dsm.DSMReport],
         if extreme is None:
             kept.append({**f, "dsm": "unchecked"})
         elif dsm.contradicts(f["ladder_kind"], f["printed"], extreme[0]):
-            vetoed.append({**f, "kind": "dsm_veto",
-                           "dsm_extreme": extreme[0],
-                           "dsm_time_lst": extreme[1]})
+            bounds = parse_subtitle(f["subtitle"])
+            if bounds and contains(*bounds, extreme[0]):
+                kept.append({**f, "dsm": extreme[0]})
+            else:
+                vetoed.append({**f, "kind": "dsm_veto",
+                               "dsm_extreme": extreme[0],
+                               "dsm_time_lst": extreme[1]})
         else:
             kept.append({**f, "dsm": extreme[0]})
     return kept, vetoed
