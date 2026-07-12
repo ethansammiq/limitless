@@ -47,6 +47,7 @@ EXPECTED_INTERVALS = {
     "live_watch": 2,            # Runs every 10 min (read-only live journal). Allow 2h.
     "weekly_digest": 192,       # Runs Sundays 18:00. Allow 8 days.
     "cli_sniper": 0.5,          # Runs every 2 min (beats even out of window). Allow 30 min.
+    "metar_sniper": 1,          # Runs every 5 min (beats even out of window). Allow 1h.
     "sniper_scorecard": 192,    # Runs Sundays 17:45 (before the digest). Allow 8 days.
     "audit_coverage": 192,      # Runs Sundays 17:30. Allow 8 days.
     "wall_fingerprint": 192,    # Runs Sundays 17:15 (wall win rates). Allow 8 days.
