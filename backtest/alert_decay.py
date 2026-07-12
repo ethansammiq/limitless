@@ -43,6 +43,7 @@ from log_setup import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 CACHE = HERE / "alert_decay_cache.json"
+METAR_JOURNAL_DIR = PROJECT_ROOT / "logs" / "metar_sniper"
 OFFSETS_MIN = (1, 2, 5, 10, 20)
 WINDOW_BEFORE_S = 120
 WINDOW_AFTER_S = 25 * 60
@@ -118,6 +119,38 @@ def summarize(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def load_metar_findings(journal_dir: Path = METAR_JOURNAL_DIR,
+                        since: datetime | None = None) -> list[dict]:
+    """Flatten metar_sniper journal rows to the shape decay_rows expects.
+
+    The metar journal has no floor/final split — every 6-hr group is a
+    floor-class print (is_final=False), so its buys land in the 'floor'
+    row of the summary. Suppressed low-ladder buys are excluded: they
+    were never alerted, so their decay says nothing about the race.
+    """
+    out: list[dict] = []
+    if not journal_dir.exists():
+        return out
+    for path in sorted(journal_dir.glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = row.get("ts", "")
+            if since is not None:
+                try:
+                    if datetime.fromisoformat(ts) < since:
+                        continue
+                except ValueError:
+                    pass
+            for f in row.get("findings") or []:
+                if f.get("suppressed"):
+                    continue
+                out.append({"ts": ts, "is_final": False, **f, "final": False})
+    return out
+
+
 async def fetch_candles(findings: list[dict]) -> dict[str, list[dict]]:
     import os
 
@@ -159,11 +192,12 @@ async def fetch_candles(findings: list[dict]) -> dict[str, list[dict]]:
     return {k.split("@")[0]: v for k, v in cache.items()}
 
 
-async def run(days: int) -> None:
+async def run(days: int, journal: str = "cli") -> None:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    findings = load_findings(since=since)
+    findings = (load_metar_findings(since=since) if journal == "metar"
+                else load_findings(since=since))
     if not findings:
-        print(f"no findings in the last {days} day(s)")
+        print(f"no {journal} findings in the last {days} day(s)")
         return
     candles = await fetch_candles(findings)
     rows = decay_rows(findings, candles)
@@ -173,8 +207,10 @@ async def run(days: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--days", type=int, default=14)
+    ap.add_argument("--journal", choices=("cli", "metar"), default="cli",
+                    help="which sniper journal to measure (default: cli)")
     args = ap.parse_args()
-    asyncio.run(run(args.days))
+    asyncio.run(run(args.days, args.journal))
 
 
 if __name__ == "__main__":

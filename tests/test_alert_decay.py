@@ -50,3 +50,22 @@ class TestDecayRows:
         out = summarize(rows)
         assert "+2m: +24¢ (n=1)" in out
         assert "final buys (1)" in out
+
+
+class TestMetarJournalLoader:
+    def test_flatten_and_suppressed_excluded(self, tmp_path):
+        import json
+        from backtest.alert_decay import load_metar_findings
+        row = {"ts": "2026-07-12T05:50:00+00:00", "station": "KMSP",
+               "kind": "max", "findings": [
+                   {"ticker": "KXHIGHTMIN-26JUL12-B90.5", "kind": "buy_winner",
+                    "ask": 14, "ladder_kind": "high"},
+                   {"ticker": "KXLOWTMIN-26JUL12-B68.5", "kind": "buy_winner",
+                    "ask": 9, "ladder_kind": "low",
+                    "suppressed": "low_ceiling_forecast"}]}
+        (tmp_path / "2026-07-12.jsonl").write_text(json.dumps(row) + "\n")
+        out = load_metar_findings(journal_dir=tmp_path)
+        assert len(out) == 1
+        f = out[0]
+        assert f["ticker"] == "KXHIGHTMIN-26JUL12-B90.5"
+        assert f["ts"] == row["ts"] and f["final"] is False and f["ask"] == 14
