@@ -47,6 +47,25 @@ cap without `--yes`. Alerts print the exact take.py command to run.
   CLI on all four prints that evening (MIA/ATL/DCA/MDW); the document outranks
   every feed.
 
+### METAR 6-HR SNIPER (earlier leak, same edge class)
+Discovered 2026-07-11: the `1sTTT`/`2sTTT` remark groups in the synoptic-window
+METARs (~2353Z/0553Z/1153Z/1753Z obs) carry the 6-hr max/min in tenths of °C,
+hours before the CLI — KMSP 112353Z `10322` (32.2°C = 89.96°F → CLI printed 90)
+and the 99¢×119k wall repriced B88.5 immediately after. `core/metar.py` parses
+(precise-tenths °F rounding — 89.96 → 90, never integer-°C), `metar_sniper.py`
+(cron */5) classifies: 6-hr max = FLOOR on the high, 6-hr min = CEILING on the
+low. Low-ladder buys are journal-only (same open-forecast class as CLI low
+floors); buys cap at 20¢ ask (the standing rule, doubling as the
+already-repriced filter). Alert-only; windows straddling local midnight skip.
+**Sized from the archives 2026-07-11** (`backtest/metar_leak_study.py`, IEM
+AFOS CLI + ASOS METAR, 828 station-days × 20 stations): HIGH ladders —
+day-max of 6-hr groups == final CLI **98.4%** (815/828), and on the 52
+floor≠final drift days it named the final **50/52** — the METAR resolves the
+CLI sniper's ~14% drift uncertainty ~8h (median 477 min) before the final.
+LOW ladders only 82.2% (misses are +1..+3: the true min falls in the skipped
+midnight-straddle window or later) — confirms the low-buy suppression.
+Results in `backtest/metar_leak.jsonl` (ignored data; rerun to refresh).
+
 ### DEAD-BRACKET SWEEPER
 Brackets the station's own observations have already killed but still holding
 bids — riskless sells, all 40 ladders, cron */15.
@@ -107,7 +126,9 @@ away from production: keep every commit importable and test-verified.
 | `core/dsm.py` | ASOS Daily Summary Message fetch/parse (IEM AFOS) — the settlement oracle behind the sniper's DSM veto |
 | `core/drift.py` | Floor→final drift distribution from the journal — prices floor buy_winners (win prob + EV in alerts) |
 | `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
+| `core/metar.py` | METAR 6-hourly climate group (1sTTT/2sTTT) fetch/parse — tenths-°C settlement precision |
 | `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
+| `metar_sniper.py` | Race the METAR 6-hourly extremes — the pre-CLI leak (cron */5, synoptic windows) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
 | `peak_monitor.py` | Post-peak lock-in alerts, original 5 cities (cron */10, 13-22 ET) |
 | `live_watch.py` | Read-only live-account journal + sell-into-strength alert (cron */10) |
