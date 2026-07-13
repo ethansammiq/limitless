@@ -100,7 +100,10 @@ away from production: keep every commit importable and test-verified.
 
 ## 4. MEASUREMENT DISCIPLINE (how decisions get made)
 - `backtest/sniper_scorecard.py` joins every journaled finding to Kalshi
-  settlement. **Pre-registered pivot gate (Aug 2, 2026):** upper 80% CI
+  settlement; 80% CIs are cluster-bootstrapped by STATION-NIGHT (same-night
+  findings are correlated — iid intervals are overconfident) and reported
+  per edge class (kind × finality) plus explicit gate readouts.
+  **Pre-registered pivot gate (Aug 2, 2026):** upper 80% CI
   < +2¢/contract OR <6 settled findings → stop optimizing weather and pivot.
   Marginal → extend 2 weeks. Do not tune thresholds before the gate answers.
 - `backtest/alert_decay.py` measures edge half-life AND the reaction budget

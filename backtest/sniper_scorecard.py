@@ -19,7 +19,11 @@ Per finding, settlement comes from Kalshi's per-ticker market `result`
               big loss it would have been.
 
 Splits: is_final (floor vs final — tests whether final-CLI winners settle too
-fast to trade), kind, high/low ladder, station. Alert-only; never trades.
+fast to trade), kind, edge class (kind × finality — the unit the gates reason
+in), high/low ladder, station. Means carry an 80% cluster-bootstrap CI
+resampled by STATION-NIGHT (same-night findings are correlated; iid intervals
+are overconfident) — the pivot and daemon gates read these bounds.
+Alert-only; never trades.
 
 Usage:
     python3 backtest/sniper_scorecard.py               # all journal days
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import statistics
 import sys
 from datetime import datetime, timedelta, timezone
@@ -142,23 +147,73 @@ def score_finding(finding: dict, result: str | None) -> dict | None:
     return {
         "ticker": finding.get("ticker"), "kind": kind,
         "is_final": finding.get("is_final"), "awips": finding.get("awips"),
+        "summary_date": finding.get("summary_date"),
         "ladder": ladder_kind(finding.get("series", "")),
         "won": won, "per_contract_cents": round(per, 2),
         "size": size, "realized_dollars": round(per * size / 100, 2),
     }
 
 
+BOOTSTRAP_LEVEL = 0.80   # the pre-registered gates speak in 80% CIs
+BOOTSTRAP_N = 2000
+BOOTSTRAP_SEED = 7       # fixed: the weekly report must be reproducible
+
+
+def cluster_bootstrap_ci(scored: list[dict], level: float = BOOTSTRAP_LEVEL,
+                         n_boot: int = BOOTSTRAP_N,
+                         seed: int = BOOTSTRAP_SEED) -> dict | None:
+    """CI on mean ¢/contract, resampling STATION-NIGHTS, not findings.
+
+    Same-night findings are correlated (2026-07-11: the sample unit is
+    nights/regimes — one convective evening moves every bracket it touched),
+    so an iid bootstrap over findings understates the interval and lets both
+    pre-registered gates mis-fire. Clusters = (awips, summary_date); fewer
+    than two clusters has no between-night variance to measure → None.
+    """
+    clusters: dict[str, list[float]] = {}
+    for s in scored:
+        key = f"{s.get('awips')}:{s.get('summary_date')}"
+        clusters.setdefault(key, []).append(s["per_contract_cents"])
+    groups = list(clusters.values())
+    if len(groups) < 2:
+        return None
+    rng = random.Random(seed)
+    means = []
+    for _ in range(n_boot):
+        sample: list[float] = []
+        for _ in range(len(groups)):
+            sample.extend(rng.choice(groups))
+        means.append(statistics.fmean(sample))
+    means.sort()
+    alpha = (1 - level) / 2
+    lo = means[int(alpha * (n_boot - 1))]
+    hi = means[int((1 - alpha) * (n_boot - 1))]
+    return {"level": level, "lo": round(lo, 1), "hi": round(hi, 1),
+            "clusters": len(groups)}
+
+
 def aggregate(scored: list[dict]) -> dict:
     if not scored:
         return {"n": 0, "hit_rate": 0.0, "mean_per_contract_cents": 0.0,
-                "total_dollars": 0.0}
+                "total_dollars": 0.0, "ci80": None}
     return {
         "n": len(scored),
         "hit_rate": round(sum(1 for s in scored if s["won"]) / len(scored), 3),
         "mean_per_contract_cents": round(
             statistics.fmean(s["per_contract_cents"] for s in scored), 2),
         "total_dollars": round(sum(s["realized_dollars"] for s in scored), 2),
+        "ci80": cluster_bootstrap_ci(scored),
     }
+
+
+def finding_class(s: dict) -> str:
+    """The edge class a finding belongs to — the unit the gates reason in.
+
+    buy_winner/final = the CLI-FINAL class the daemon gate is registered on;
+    buy_winner/floor = the drift class; sell_dead/* = the dead-bracket class.
+    A blended overall mean can hide one good class and one bad one.
+    """
+    return f"{s['kind']}/{'final' if s['is_final'] else 'floor'}"
 
 
 def split_by(scored: list[dict], key) -> dict:
@@ -208,10 +263,18 @@ def build(findings: list[dict], results: dict[str, str | None]) -> dict:
         "overall": aggregate(scored), "pending": pending,
         "by_certainty": split_by(scored, lambda s: "final" if s["is_final"] else "floor"),
         "by_kind": split_by(scored, lambda s: s["kind"]),
+        "by_class": split_by(scored, finding_class),
         "by_ladder": split_by(scored, lambda s: s["ladder"]),
         "by_station": split_by(scored, lambda s: s["awips"]),
         "scored": scored,
     }
+
+
+def _ci_str(agg: dict) -> str:
+    ci = agg.get("ci80")
+    if not ci:
+        return ""
+    return f" CI[{ci['lo']:+.0f},{ci['hi']:+.0f}]¢ ({ci['clusters']} stn-nights)"
 
 
 def format_report(result: dict) -> str:
@@ -219,12 +282,24 @@ def format_report(result: dict) -> str:
     lines = [f"**Sniper scorecard — {o['n']} settled findings ({result['pending']} pending)**"]
     if o["n"]:
         lines.append(f"overall: hit {o['hit_rate']:.0%}, mean **{o['mean_per_contract_cents']:+.1f}¢**/contract, "
-                     f"realized **${o['total_dollars']:+.2f}**")
+                     f"realized **${o['total_dollars']:+.2f}**{_ci_str(o)}")
+        for k, v in result.get("by_class", {}).items():
+            lines.append(f"  class {k}: hit {v['hit_rate']:.0%}, "
+                         f"{v['mean_per_contract_cents']:+.1f}¢×{v['n']}{_ci_str(v)}")
         for label, split in (("certainty", "by_certainty"), ("kind", "by_kind"),
                              ("ladder", "by_ladder")):
             parts = [f"{k} {v['mean_per_contract_cents']:+.0f}¢×{v['n']}"
                      for k, v in result[split].items()]
             lines.append(f"  {label}: " + ", ".join(parts))
+        # Pre-registered gate readouts — informational until their dates;
+        # the thresholds themselves are NOT renegotiated here.
+        if o.get("ci80"):
+            lines.append(f"  pivot-gate readout (2026-08-02): overall upper "
+                         f"bound {o['ci80']['hi']:+.1f}¢ vs +2¢ threshold")
+        daemon = result.get("by_class", {}).get("buy_winner/final", {})
+        if daemon.get("ci80"):
+            lines.append(f"  daemon-gate readout: buy_winner/final lower "
+                         f"bound {daemon['ci80']['lo']:+.1f}¢ vs >0 threshold")
         pay = {k: v for k, v in result["by_station"].items() if v["total_dollars"] != 0}
         top = sorted(pay.items(), key=lambda kv: -kv[1]["total_dollars"])[:5]
         if top:

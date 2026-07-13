@@ -76,6 +76,88 @@ class TestAggregateAndSplit:
         assert split["floor"]["n"] == 1
 
 
+class TestClusterBootstrap:
+    def _night(self, awips, date, values):
+        return [{"won": v > 0, "per_contract_cents": v, "realized_dollars": v / 100,
+                 "is_final": False, "kind": "buy_winner", "ladder": "high",
+                 "awips": awips, "summary_date": date} for v in values]
+
+    def test_single_cluster_has_no_between_night_variance(self):
+        assert sc.cluster_bootstrap_ci(self._night("MDW", "2026-07-04",
+                                                   [10, 20, 30])) is None
+        assert sc.cluster_bootstrap_ci([]) is None
+
+    def test_two_degenerate_clusters_span_the_cluster_means(self):
+        # night A is all +50, night B is all -50: a resample draws whole
+        # nights, so the only possible means are -50, 0, +50 — the 80% CI
+        # must reach both extremes (each occurs with p=0.25)
+        scored = (self._night("MDW", "2026-07-04", [50, 50]) +
+                  self._night("NYC", "2026-07-05", [-50, -50]))
+        ci = sc.cluster_bootstrap_ci(scored)
+        assert ci["lo"] == -50 and ci["hi"] == 50
+        assert ci["clusters"] == 2 and ci["level"] == 0.8
+
+    def test_clustering_widens_vs_iid_on_correlated_nights(self):
+        # identical values: grouped into 2 correlated nights vs 4 independent
+        # singleton nights — the clustered interval must be wider
+        two = sc.cluster_bootstrap_ci(
+            self._night("MDW", "2026-07-04", [50, 50]) +
+            self._night("NYC", "2026-07-05", [-50, -50]))
+        four = sc.cluster_bootstrap_ci(
+            self._night("MDW", "2026-07-04", [50]) +
+            self._night("MDW", "2026-07-05", [50]) +
+            self._night("NYC", "2026-07-04", [-50]) +
+            self._night("NYC", "2026-07-05", [-50]))
+        assert two["hi"] - two["lo"] > four["hi"] - four["lo"]
+
+    def test_fixed_seed_is_reproducible(self):
+        scored = (self._night("MDW", "2026-07-04", [44, -10]) +
+                  self._night("NYC", "2026-07-05", [-50, 12, 3]))
+        assert sc.cluster_bootstrap_ci(scored) == sc.cluster_bootstrap_ci(scored)
+
+    def test_aggregate_carries_the_ci(self):
+        scored = (self._night("MDW", "2026-07-04", [50]) +
+                  self._night("NYC", "2026-07-05", [-50]))
+        a = sc.aggregate(scored)
+        assert a["ci80"]["clusters"] == 2
+        assert sc.aggregate([])["ci80"] is None
+
+
+class TestFindingClass:
+    def test_labels_kind_by_finality(self):
+        assert sc.finding_class({"kind": "buy_winner", "is_final": True}) == "buy_winner/final"
+        assert sc.finding_class({"kind": "buy_winner", "is_final": False}) == "buy_winner/floor"
+        assert sc.finding_class({"kind": "sell_dead", "is_final": False}) == "sell_dead/floor"
+
+    def test_build_reports_by_class(self):
+        findings = [
+            {"ticker": "A", "kind": "buy_winner", "ask": 48, "ask_depth": 4,
+             "series": "KXLOWTCHI", "is_final": False, "awips": "MDW",
+             "summary_date": "2026-07-04"},
+            {"ticker": "B", "kind": "buy_winner", "ask": 20, "ask_depth": 1,
+             "series": "KXHIGHNY", "is_final": True, "awips": "NYC",
+             "summary_date": "2026-07-04"},
+        ]
+        result = sc.build(findings, {"A": "yes", "B": "no"})
+        assert set(result["by_class"]) == {"buy_winner/floor", "buy_winner/final"}
+        assert result["by_class"]["buy_winner/floor"]["n"] == 1
+
+    def test_report_carries_ci_class_and_gate_readouts(self):
+        findings = [
+            {"ticker": "A", "kind": "buy_winner", "ask": 48, "ask_depth": 4,
+             "series": "KXLOWTCHI", "is_final": True, "awips": "MDW",
+             "summary_date": "2026-07-04"},
+            {"ticker": "B", "kind": "buy_winner", "ask": 20, "ask_depth": 1,
+             "series": "KXHIGHNY", "is_final": True, "awips": "NYC",
+             "summary_date": "2026-07-05"},
+        ]
+        out = sc.format_report(sc.build(findings, {"A": "yes", "B": "no"}))
+        assert "class buy_winner/final" in out
+        assert "stn-nights" in out
+        assert "pivot-gate readout" in out and "+2¢ threshold" in out
+        assert "daemon-gate readout" in out
+
+
 class TestBuildAndLoad:
     def test_build_buckets_pending(self):
         findings = [
