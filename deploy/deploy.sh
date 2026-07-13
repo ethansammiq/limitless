@@ -60,7 +60,8 @@ fi
 STATE_FILES=(
     heartbeats.json peak_state.json
     dead_bracket_state.json watchdog_catchup.json
-    live_watch_state.json cli_sniper_state.json
+    live_watch_state.json cli_sniper_state.json metar_sniper_state.json
+    take_queue.json
     price_history.json temp_history.json dashboard_watchlist.json
 )
 
