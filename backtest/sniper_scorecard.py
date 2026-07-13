@@ -11,12 +11,18 @@ Per finding, settlement comes from Kalshi's per-ticker market `result`
 (daily_data.jsonl only has the 5 original high cities). Scoring, per contract:
 
   buy_winner  bought the printed bracket at `ask`; realized =
-              (100 if result==yes else 0) - ask - taker_fee(ask).
+              (100 if result==yes else 0) - ask - kalshi_taker_fee(ask).
   sell_dead   sold the dead bracket's bids for `net_cents` (already fee-net);
               realized = +net_cents if result==no, else the swept collateral
               is called: -(contracts*100 - net_cents). This is where a
               settlement-source misfire (the KAUS/$348 class) shows up as the
               big loss it would have been.
+
+Sizes are capped at the take.py notional clamp (TAKE_MAX_NOTIONAL, $50):
+alerts quote full book depth (154k×1¢ walls, 2026-07-12), but no order past
+the clamp is executable, so uncapped "realized $" was fiction dominated by
+walls nobody could sweep. Per-contract means (the gate currency) are
+unaffected.
 
 Splits: is_final (floor vs final — tests whether final-CLI winners settle too
 fast to trade), kind, edge class (kind × finality — the unit the gates reason
@@ -121,6 +127,23 @@ def ladder_kind(series: str) -> str:
     return "low" if (series or "").startswith("KXLOWT") else "high"
 
 
+def max_notional_dollars() -> float:
+    """The executable-size cap — same env override as scripts/take.py."""
+    import os
+    try:
+        return float(os.getenv("TAKE_MAX_NOTIONAL", 50.0))
+    except ValueError:
+        return 50.0
+
+
+def clamp_size(size: int, collateral_per_contract_c: float) -> int:
+    """Largest executable count: worst-case collateral fits the notional cap."""
+    if collateral_per_contract_c <= 0:
+        return size
+    return max(1, min(size, int(max_notional_dollars() * 100
+                                / collateral_per_contract_c)))
+
+
 def score_finding(finding: dict, result: str | None) -> dict | None:
     """Realized outcome for one finding; None while the market is pending."""
     if result not in ("yes", "no"):
@@ -130,7 +153,8 @@ def score_finding(finding: dict, result: str | None) -> dict | None:
         ask = finding.get("ask")
         if ask is None:
             return None
-        size = int(finding.get("ask_depth") or 0) or 1
+        # collateral per contract = entry cost (same leg take.py validates)
+        size = clamp_size(int(finding.get("ask_depth") or 0) or 1, ask)
         won = result == "yes"
         per = (100 if won else 0) - ask - kalshi_taker_fee_cents(ask)
     elif kind == "sell_dead":
@@ -138,7 +162,9 @@ def score_finding(finding: dict, result: str | None) -> dict | None:
         contracts = int(finding.get("contracts") or 0)
         if net is None or contracts <= 0:
             return None
-        size = contracts
+        # collateral per contract = the complement actually at risk if the
+        # "dead" bracket settles YES — the scorecard's own loss model
+        size = clamp_size(contracts, 100 - net / contracts)
         won = result == "no"
         total = net if won else -(contracts * 100 - net)   # cents
         per = total / contracts

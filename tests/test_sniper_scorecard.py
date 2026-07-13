@@ -37,19 +37,49 @@ class TestScoreSellDead:
                 "net_cents": net, "contracts": contracts, "series": "KXHIGHNY",
                 "is_final": False, "awips": "NYC"}
 
-    def test_win_books_net(self):
+    def test_win_books_net_at_executable_size(self):
         s = sc.score_finding(self._f(net=10828, contracts=437), "no")
         assert s["won"] is True
-        assert s["realized_dollars"] == round(10828 / 100 * 1, 2)  # per*size/100 == net/100
+        # collateral 100 - 10828/437 = 75.22¢/contract → 66 fit under $50;
+        # realized = per(24.78¢) × 66 — the wall's other 371 were never takeable
+        assert s["size"] == 66
+        assert s["realized_dollars"] == round((10828 / 437) * 66 / 100, 2)
         assert s["ladder"] == "high"
 
     def test_dead_bracket_that_actually_wins_is_a_big_loss(self):
         # the KAUS/$348 settlement-source misfire class: sold 387 for net,
-        # they settle YES -> pay 100 each
+        # they settle YES -> pay 100 each. Collateral is only ~9.8¢/contract
+        # (rich bids), so all 387 fit under the clamp — loss stays full-size.
         s = sc.score_finding(self._f(net=34889, contracts=387), "yes")
         assert s["won"] is False
+        assert s["size"] == 387
         # -(387*100 - 34889) cents = -(38700-34889) = -3811c = -$38.11
         assert s["realized_dollars"] == round(-(387 * 100 - 34889) / 100, 2)
+
+
+class TestNotionalClamp:
+    def test_wall_depth_buy_caps_at_the_clamp(self):
+        # the 2026-07-12 AUS class: 1¢ ask × 154,899 wall — only $50 worth
+        # (5000 contracts) was ever executable
+        f = {"ticker": "T", "kind": "buy_winner", "ask": 1, "ask_depth": 154899,
+             "series": "KXHIGHAUS", "is_final": False, "awips": "AUS"}
+        s = sc.score_finding(f, "no")
+        assert s["size"] == 5000
+        assert s["realized_dollars"] == round(
+            (0 - 1 - sc.kalshi_taker_fee_cents(1)) * 5000 / 100, 2)
+
+    def test_small_findings_unaffected(self):
+        assert sc.clamp_size(4, 48) == 4
+        assert sc.clamp_size(23, 18) == 23
+
+    def test_env_override_matches_take_py(self, monkeypatch):
+        monkeypatch.setenv("TAKE_MAX_NOTIONAL", "100")
+        assert sc.clamp_size(154899, 1) == 10000
+        monkeypatch.delenv("TAKE_MAX_NOTIONAL")
+        assert sc.clamp_size(154899, 1) == 5000
+
+    def test_zero_collateral_passes_through(self):
+        assert sc.clamp_size(437, 0) == 437
 
 
 class TestAggregateAndSplit:
