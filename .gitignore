@@ -70,3 +70,5 @@ cli_sniper_state.json
 .claude/
 backtest/alert_decay_cache.json
 dashboard_watchlist.json
+take_queue.json
+metar_sniper_state.json

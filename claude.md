@@ -10,6 +10,13 @@ deleted outright on 2026-07-06. Do not rebuild it.)
 **Core Rule:** Human-in-the-Loop ONLY. Every automated job is alert-only.
 `scripts/take.py` is the ONLY order-placing entry point — human-run, $50 notional
 cap without `--yes`. Alerts print the exact take.py command to run.
+One-tap approve (2026-07-12, built after the MSP T91 18¢→99¢ alert went
+unbought inside its measured ~11-min window): snipers stage alerted commands
+in `take_queue.json`; `take_approver.py` (cron */1) posts each to Discord and
+a ✅ from an allow-listed user fires the EXACT staged take.py command — IOC
+only, notional-clamped, 15-min TTL, live-book re-check. Every order is still
+individually human-authorized; without DISCORD_BOT_TOKEN the queue is inert
+(keys documented in take_approver.py's docstring).
 
 ## 2. THE WORKING STRATEGIES (settlement-source, 2026-07)
 
@@ -96,9 +103,13 @@ away from production: keep every commit importable and test-verified.
   settlement. **Pre-registered pivot gate (Aug 2, 2026):** upper 80% CI
   < +2¢/contract OR <6 settled findings → stop optimizing weather and pivot.
   Marginal → extend 2 weeks. Do not tune thresholds before the gate answers.
-- `backtest/alert_decay.py` measures edge half-life via 1-min candles — the
-  event-daemon go/no-go evidence. First read: floor-class asks FELL post-alert
-  (no latency race) — evidence AGAINST building a resident daemon.
+- `backtest/alert_decay.py` measures edge half-life AND the reaction budget
+  (minutes the ask stays ≤ the entry cap post-alert, `--cap`, default 20¢) via
+  1-min candles — the event-daemon go/no-go evidence. First read: floor-class
+  asks FELL post-alert (no latency race) — evidence AGAINST a resident daemon.
+  2026-07-12 counterexample: the MSP T91 winner rose monotonically (11-min
+  budget, then gone) — accumulate reaction-budget rows before re-litigating;
+  the one-tap approver covers the human leg meanwhile.
 - Point estimates at n≤15 are coin flips (SD≈50¢/contract). Gates use CIs.
 
 ## 5. OPERATIONS
@@ -127,8 +138,10 @@ away from production: keep every commit importable and test-verified.
 | `core/drift.py` | Floor→final drift distribution from the journal — prices floor buy_winners (win prob + EV in alerts) |
 | `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
 | `core/metar.py` | METAR 6-hourly climate group (1sTTT/2sTTT) fetch/parse — tenths-°C settlement precision |
+| `core/take_queue.py` | Staged one-tap approvals: snipers enqueue alerted take.py commands (fcntl-locked, notional-clamped, TTL) |
 | `cli_sniper.py` | Race the NWS CLI climate report to its own repricing (cron */2) |
 | `metar_sniper.py` | Race the METAR 6-hourly extremes — the pre-CLI leak (cron */5, synoptic windows) |
+| `take_approver.py` | One-tap Discord approval → take.py subprocess (cron */1; ✅ allow-list, IOC only, live-book re-check) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
 | `peak_monitor.py` | Post-peak lock-in alerts, original 5 cities (cron */10, 13-22 ET) |
 | `live_watch.py` | Read-only live-account journal + sell-into-strength alert (cron */10) |
@@ -138,7 +151,7 @@ away from production: keep every commit importable and test-verified.
 | `backtest/poly_gate_analyzer.py` | Poly go/no-go verdict from shadow books (ad-hoc) |
 | `backtest/sniper_scorecard.py` | Joins sniper journal → Kalshi settlement: does the alert win, by how much (cron Sun 17:45) |
 | `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
-| `backtest/alert_decay.py` | Edge half-life after an alert via 1-min candles — the daemon go/no-go evidence (ad-hoc) |
+| `backtest/alert_decay.py` | Edge half-life + reaction budget (min ≤ cap post-alert) via 1-min candles — the daemon go/no-go evidence (ad-hoc) |
 | `scripts/take.py` | The ONLY order-placing entry point — human-run; alerts print the exact command |
 | `scripts/audit_coverage.py` | Series-drift / parse-health / office-silence self-audit (cron Sun 17:30) |
 | `scripts/export_public_stats.py` | Sanitized public snapshot for ethansam.io (cron */30; whitelist + secret-assertions) |

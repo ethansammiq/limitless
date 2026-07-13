@@ -48,6 +48,7 @@ EXPECTED_INTERVALS = {
     "weekly_digest": 192,       # Runs Sundays 18:00. Allow 8 days.
     "cli_sniper": 0.5,          # Runs every 2 min (beats even out of window). Allow 30 min.
     "metar_sniper": 1,          # Runs every 5 min (beats even out of window). Allow 1h.
+    "take_approver": 0.5,       # Runs every 1 min (beats even unconfigured/idle). Allow 30 min.
     "sniper_scorecard": 192,    # Runs Sundays 17:45 (before the digest). Allow 8 days.
     "audit_coverage": 192,      # Runs Sundays 17:30. Allow 8 days.
     "wall_fingerprint": 192,    # Runs Sundays 17:15 (wall win rates). Allow 8 days.

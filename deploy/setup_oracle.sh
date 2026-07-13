@@ -183,6 +183,9 @@ cat << EOF
 # CLI Sniper — race the NWS climate report to its own repricing
 */2 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/cli_sniper.py --once >> $LOG_DIR/cli_sniper.log 2>&1
 
+# Take Approver — one-tap Discord approval for staged sniper commands (idle without DISCORD_BOT_TOKEN)
+* * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/take_approver.py --once >> $LOG_DIR/take_approver.log 2>&1
+
 # Shadow Logger — dual-venue L2 depth capture (Poly gate data)
 */30 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/shadow_logger.py --once >> $LOG_DIR/shadow_logger.log 2>&1
 

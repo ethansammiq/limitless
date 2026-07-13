@@ -331,6 +331,16 @@ async def run(dry_run: bool, replay: str | None) -> None:
                                      color=0x3498DB, context="metar_sniper")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"discord alert failed: {exc}")
+        try:
+            from core import take_queue
+
+            staged = take_queue.enqueue_findings(fresh, source="metar_sniper",
+                                                 now_utc=now_utc)
+            if staged:
+                logger.info(f"take queue: staged {staged} command(s) "
+                            f"for one-tap approve")
+        except Exception as exc:  # noqa: BLE001 — staging must not break alerting
+            logger.warning(f"take queue enqueue failed: {exc}")
         for o in fresh:
             state["alerted"][o["ticker"]] = {
                 "ts": now_utc.isoformat(timespec="seconds"),
