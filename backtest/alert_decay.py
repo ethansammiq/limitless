@@ -47,6 +47,8 @@ METAR_JOURNAL_DIR = PROJECT_ROOT / "logs" / "metar_sniper"
 OFFSETS_MIN = (1, 2, 5, 10, 20)
 WINDOW_BEFORE_S = 120
 WINDOW_AFTER_S = 25 * 60
+FILLABLE_HORIZON_MIN = 25
+DEFAULT_CAP_C = 20  # the standing 20¢ max-entry rule
 
 
 def _cents(candle_side: dict | None, field: str = "close_dollars") -> float | None:
@@ -81,7 +83,37 @@ def price_at_offsets(candles: list[dict], alert_ts: int, side_key: str,
     return out
 
 
-def decay_rows(findings: list[dict], candles_by_ticker: dict[str, list[dict]]) -> list[dict]:
+def fillable_minutes(candles: list[dict], alert_ts: int, cap_c: float,
+                     horizon_min: int = FILLABLE_HORIZON_MIN) -> dict:
+    """How long a reacting human still fills at ≤ cap after the alert.
+
+    Minute-by-minute carried ask (same last-known-at-cutoff semantics as
+    price_at_offsets, so gaps and flicker are handled): counts the minutes
+    at or under the cap and the LAST such minute — the reaction budget. The
+    2026-07-12 MSP T91 winner flickered 18-26¢ for ~13 min post-alert before
+    leaving for good; a simple first-crossing metric would have read that
+    window as 2 minutes.
+    """
+    series = sorted(
+        ((c.get("end_period_ts", 0), _cents(c.get("yes_ask"))) for c in candles or []),
+        key=lambda x: x[0],
+    )
+    count, last = 0, None
+    val, idx = None, 0
+    for m in range(1, horizon_min + 1):
+        cutoff = alert_ts + m * 60
+        while idx < len(series) and series[idx][0] <= cutoff:
+            if series[idx][1] is not None:
+                val = series[idx][1]
+            idx += 1
+        if val is not None and val <= cap_c:
+            count += 1
+            last = m
+    return {"minutes_fillable": count, "last_fillable_min": last}
+
+
+def decay_rows(findings: list[dict], candles_by_ticker: dict[str, list[dict]],
+               cap_c: float = DEFAULT_CAP_C) -> list[dict]:
     rows = []
     for f in findings:
         ticker, kind = f.get("ticker"), f.get("kind")
@@ -91,14 +123,21 @@ def decay_rows(findings: list[dict], candles_by_ticker: dict[str, list[dict]]) -
         except (KeyError, ValueError):
             continue
         side_key = "yes_ask" if kind == "buy_winner" else "yes_bid"
-        at = price_at_offsets(candles_by_ticker.get(ticker, []), alert_ts, side_key)
-        rows.append({"ticker": ticker, "kind": kind,
-                     "final": bool(f.get("is_final")),
-                     "detected_cents": detected, "at_offsets": at})
+        candles = candles_by_ticker.get(ticker, [])
+        at = price_at_offsets(candles, alert_ts, side_key)
+        row = {"ticker": ticker, "kind": kind,
+               "final": bool(f.get("is_final")),
+               "detected_cents": detected, "at_offsets": at}
+        # Reaction budget only where the entry rule applies: an alert
+        # detected over the cap was never takeable, so its window is
+        # definitionally empty and would poison the median with zeros.
+        if kind == "buy_winner" and detected is not None and detected <= cap_c:
+            row["fillable"] = fillable_minutes(candles, alert_ts, cap_c)
+        rows.append(row)
     return rows
 
 
-def summarize(rows: list[dict]) -> str:
+def summarize(rows: list[dict], cap_c: float = DEFAULT_CAP_C) -> str:
     lines = [f"**Alert decay — {len(rows)} finding(s)** "
              f"(entry price at +N min vs detection)"]
     for label, grp in (("final", [r for r in rows if r["final"]]),
@@ -114,8 +153,18 @@ def summarize(rows: list[dict]) -> str:
             parts.append(f"+{off}m: {statistics.median(deltas):+.0f}¢ (n={len(deltas)})"
                          if deltas else f"+{off}m: —")
         lines.append(f"  {label} buys ({len(buys)}): " + "  ".join(parts))
+        capped = [r["fillable"] for r in buys if "fillable" in r]
+        if capped:
+            lasts = [c["last_fillable_min"] or 0 for c in capped]
+            counts = [c["minutes_fillable"] for c in capped]
+            lines.append(
+                f"  {label} reaction budget ≤{cap_c:.0f}¢ (n={len(capped)}): "
+                f"last fillable minute med +{statistics.median(lasts):.0f}m "
+                f"(min +{min(lasts)}m), fillable {statistics.median(counts):.0f}"
+                f"/{FILLABLE_HORIZON_MIN} min")
     lines.append("_Positive Δ = the ask rose after the alert = edge that "
-                 "detection latency would have cost._")
+                 "detection latency would have cost. Reaction budget = how "
+                 "long a human could still fill at or under the entry cap._")
     return "\n".join(lines)
 
 
@@ -192,7 +241,8 @@ async def fetch_candles(findings: list[dict]) -> dict[str, list[dict]]:
     return {k.split("@")[0]: v for k, v in cache.items()}
 
 
-async def run(days: int, journal: str = "cli") -> None:
+async def run(days: int, journal: str = "cli",
+              cap_c: float = DEFAULT_CAP_C) -> None:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     findings = (load_metar_findings(since=since) if journal == "metar"
                 else load_findings(since=since))
@@ -200,8 +250,8 @@ async def run(days: int, journal: str = "cli") -> None:
         print(f"no {journal} findings in the last {days} day(s)")
         return
     candles = await fetch_candles(findings)
-    rows = decay_rows(findings, candles)
-    print(summarize(rows))
+    rows = decay_rows(findings, candles, cap_c=cap_c)
+    print(summarize(rows, cap_c=cap_c))
 
 
 def main() -> None:
@@ -209,8 +259,11 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--journal", choices=("cli", "metar"), default="cli",
                     help="which sniper journal to measure (default: cli)")
+    ap.add_argument("--cap", type=float, default=DEFAULT_CAP_C,
+                    help="entry cap in cents for the reaction-budget metric "
+                         f"(default: {DEFAULT_CAP_C})")
     args = ap.parse_args()
-    asyncio.run(run(args.days, args.journal))
+    asyncio.run(run(args.days, args.journal, args.cap))
 
 
 if __name__ == "__main__":
