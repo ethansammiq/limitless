@@ -122,6 +122,24 @@ away from production: keep every commit importable and test-verified.
   the one-tap approver covers the human leg meanwhile.
 - Point estimates at n≤15 are coin flips (SD≈50¢/contract). Gates use CIs.
 
+### PRE-REGISTERED GOALS (set 2026-07-13 — hold future sessions to these)
+Baseline at registration: bal $147.37, 34 settled findings grading
++10.3¢/contract, 80% CI [−0,+21], button conversion ~0% (T91 went unbought).
+1. **Aug 2:** CI lower bound > 0 on ≥50 settled findings (first defensible
+   edge claim), AND ≥50% of takeable alerts converted via the one-tap
+   button with ZERO trap-class buys taken (obs_kill/obs_warn/wall).
+2. **~Sept 1:** four consecutive positive weeks (Stage-4 capital step-up is
+   EARNED, not wished), and the two Poly blockers resolved: US eligibility
+   answered + shadow-book depth gate run.
+3. **December:** Kalshi-only branch = **$1,000+ verified realized P&L**
+   (~600% at standing caps — ambitious because the caps stay). The Poly
+   branch is the ONLY sanctioned path to more; "$10k by December" is NOT a
+   goal on Kalshi weather — the capacity studies (Stage 2.5, $0.40–2.40/day
+   deployable) already falsified it, and chasing it would pressure the caps
+   and the never-fade-walls rule. A goal that degrades the system is a bug.
+Anti-goal clause: no threshold above may be relaxed mid-sample; a miss is
+information, not an excuse to tune (same rule as every other gate here).
+
 ## 5. OPERATIONS
 - **Everything runs on the VPS** (Hetzner CX23, deployed 2026-07-05). The Mac is
   a dev machine; it must never run the crons (dual-writer corruption class).
