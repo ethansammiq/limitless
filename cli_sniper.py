@@ -59,7 +59,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from core import drift, dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
-from core.obs import certain_min_settle, corroborated_extreme, fetch_day_obs  # noqa: E402
+from core.obs import annotate_floor_buys, corroborated_extreme, fetch_day_obs  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_awips  # noqa: E402
@@ -381,41 +381,9 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
     return priced
 
 
-def _annotate_obs_context(entries: list[dict], corroborated_max: float | None,
-                          raw_max: float | None) -> None:
-    """Stamp floor high-ladder buys with what the station ALREADY observed.
-
-    2026-07-12: two top-of-bracket floor buys (DAL 95-96, AUS 94-95) alerted
-    at 1¢ while post-4PM obs already guaranteed a higher settle — the manual
-    check that killed them becomes part of the alert. Two tiers, because the
-    sweeper's corroboration guard is tuned for placing riskless ORDERS while
-    this is a WARNING with inverted costs: a corroborated exceedance is a
-    hard obs_kill; a lone precise ob beating the bracket (KDFW's real 96.98
-    peak sat 3.1°F above the next hourly ob — the guard alone would have
-    missed the exact trap this exists for) is a soft obs_warn. Either keeps
-    the alert (the human may want the other side) but neither is ever staged
-    for one-tap execution. Annotation is fail-open.
-    """
-    if raw_max is None:
-        return
-    for e in entries:
-        if (e.get("kind") != "buy_winner" or e.get("final")
-                or e.get("ladder_kind") != "high"):
-            continue
-        e["obs_max_f"] = round(raw_max, 1)
-        bounds = parse_subtitle(e.get("subtitle"))
-        hi = bounds[1] if bounds else None
-        if hi is None:
-            continue
-        if (corroborated_max is not None
-                and certain_min_settle(corroborated_max) > hi):
-            e["obs_kill"] = (f"obs already {corroborated_max:.1f}° ⇒ settle "
-                             f"≥{certain_min_settle(corroborated_max)}° — "
-                             f"bracket dead")
-        elif certain_min_settle(raw_max) > hi:
-            e["obs_warn"] = (f"lone ob {raw_max:.1f}° ⇒ would settle "
-                             f"≥{certain_min_settle(raw_max)}° — uncorroborated, "
-                             f"verify before buying")
+# The obs-vs-floor annotation moved to core.obs 2026-07-13 so the METAR
+# sniper shares it (its 6-hr-group floor buys carry the same warming risk).
+_annotate_obs_context = annotate_floor_buys
 
 
 _DRIFT_DIST: drift.DriftDist | None = None

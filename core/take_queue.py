@@ -136,12 +136,14 @@ def _prune(entries: dict, now_utc: datetime) -> None:
 def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | None:
     """A queue entry from one alerted sniper finding, or None if not stageable.
 
-    An obs_kill/obs_warn finding stays in the alert (the human may want the
-    other side, or to verify a lone spike) but a one-tap buy button on an
-    observed-dead bracket is a trap dispenser — never staged.
+    An obs_kill/obs_warn/wall_ask finding stays in the alert (the human may
+    want the other side, or to verify) but a one-tap buy button on an
+    observed-dead bracket — or INTO a certainty wall (5-0, never fade; the
+    2026-07-13 CHI T87 5000×1¢ button was a fade dispenser) — is never staged.
     """
     if (finding.get("kind") not in ENQUEUEABLE_KINDS or finding.get("suppressed")
-            or finding.get("obs_kill") or finding.get("obs_warn")):
+            or finding.get("obs_kill") or finding.get("obs_warn")
+            or finding.get("wall_ask")):
         return None
     parsed = parse_take_cmd(finding.get("cmd", ""))
     if parsed is None:

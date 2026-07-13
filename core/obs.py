@@ -87,6 +87,42 @@ def is_precise_celsius(celsius: float) -> bool:
     return abs(celsius - round(celsius)) > 1e-6
 
 
+def annotate_floor_buys(entries: list[dict], corroborated_max: float | None,
+                        raw_max: float | None) -> None:
+    """Stamp floor high-ladder buy findings with what the station ALREADY
+    observed. Shared by both snipers (2026-07-13: the METAR path staged a
+    day of warming-trap buttons because only cli_sniper had this).
+
+    Two tiers — the corroboration guard is tuned for placing ORDERS, but a
+    warning has inverted costs: corroborated exceedance of the bracket is a
+    hard obs_kill; a lone precise ob beating it is a soft obs_warn (KDFW's
+    real 96.98 peak sat 3.1°F above the next hourly ob and named the final).
+    Either keeps the alert but is never staged for one-tap execution.
+    """
+    from core.brackets import parse_subtitle
+
+    if raw_max is None:
+        return
+    for e in entries:
+        if (e.get("kind") != "buy_winner" or e.get("final")
+                or e.get("ladder_kind") != "high"):
+            continue
+        e["obs_max_f"] = round(raw_max, 1)
+        bounds = parse_subtitle(e.get("subtitle"))
+        hi = bounds[1] if bounds else None
+        if hi is None:
+            continue
+        if (corroborated_max is not None
+                and certain_min_settle(corroborated_max) > hi):
+            e["obs_kill"] = (f"obs already {corroborated_max:.1f}° ⇒ settle "
+                             f"≥{certain_min_settle(corroborated_max)}° — "
+                             f"bracket dead")
+        elif certain_min_settle(raw_max) > hi:
+            e["obs_warn"] = (f"lone ob {raw_max:.1f}° ⇒ would settle "
+                             f"≥{certain_min_settle(raw_max)}° — uncorroborated, "
+                             f"verify before buying")
+
+
 def fetch_day_obs(station_id: str, tz: ZoneInfo, user_agent: str = "WeatherEdgeObs/1.0") -> list[float]:
     """Precise valid temps (°F) for the station's current CLI climate day."""
     start = climate_day_start(tz).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -90,11 +90,14 @@ class TestEntryFromFinding:
         del f["cmd"]
         assert take_queue.entry_from_finding(f, "s", NOW) is None
 
-    def test_obs_killed_or_warned_finding_never_gets_a_button(self):
+    def test_obs_killed_warned_or_walled_finding_never_gets_a_button(self):
         f = _finding(obs_kill="obs already 97.0° ⇒ settle ≥97° — bracket dead")
         assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
         f = _finding(obs_warn="lone ob 97.0° — uncorroborated, verify")
         assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
+        # 2026-07-13: CHI T87 5000×1¢ got a button — a fade dispenser
+        f = _finding(wall_ask=True)
+        assert take_queue.entry_from_finding(f, "metar_sniper", NOW) is None
 
 
 class TestEnqueue:

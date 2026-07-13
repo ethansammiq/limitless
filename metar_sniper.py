@@ -43,6 +43,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -52,6 +53,7 @@ from core import metar  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.fees import kalshi_taker_fee_cents  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
+from core.obs import annotate_floor_buys, corroborated_extreme, fetch_day_obs  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_station  # noqa: E402
@@ -189,12 +191,20 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
         if o["kind"] == "buy_winner":
             risk = ("post-window warming risk" if o["ladder_kind"] == "high"
                     else "min can still fall")
-            wall = (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — walls are "
-                    f"5-0 vs floor signals, never fade" if o.get("wall_ask") else "")
+            warn = ""
+            if o.get("obs_kill"):
+                warn = f"\n  🚫 **{o['obs_kill']}** — do not buy"
+            elif o.get("obs_warn"):
+                warn = f"\n  ⚠️ **{o['obs_warn']}**"
+            elif "obs_max_f" in o:
+                warn = f" | obs so far {o['obs_max_f']}°"
+            if o.get("wall_ask"):
+                warn += (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — walls are "
+                         f"5-0 vs floor signals, never fade")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — {provenance} "
                 f"[floor, {risk}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}, "
-                f"fee {o['fee_c']}¢{wall}\n  `{o['cmd']}`")
+                f"fee {o['fee_c']}¢{warn}\n  `{o['cmd']}`")
         else:
             levels = ", ".join(f"{p}¢×{q}" for p, q in o["levels"])
             lines.append(
@@ -276,6 +286,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
     opportunities: list[dict] = []
     await client.start()
     try:
+        obs_cache: dict[str, tuple[float | None, float | None]] = {}
         for extreme in extremes:
             key = _seen_key(extreme)
             entry = {"ts": now_utc.isoformat(timespec="seconds"),
@@ -301,6 +312,24 @@ async def run(dry_run: bool, replay: str | None) -> None:
                     continue
                 findings = classify(extreme, ladder, markets)
                 priced = await _price_findings(client, findings)
+                # Obs-vs-floor stamps (shared with cli_sniper): a 6-hr max
+                # is a FLOOR with the same post-window warming risk — the
+                # 2026-07-13 morning batch staged T-threshold buttons the
+                # day then warmed straight through.
+                if (extreme.station not in obs_cache
+                        and any(p.get("kind") == "buy_winner"
+                                and p.get("ladder_kind") == "high"
+                                and not p.get("suppressed") for p in priced)):
+                    try:
+                        temps = await asyncio.to_thread(
+                            fetch_day_obs, extreme.station, ZoneInfo(ladder.tz))
+                        obs_cache[extreme.station] = (
+                            corroborated_extreme(temps, "high"),
+                            max(temps) if temps else None)
+                    except Exception as exc:  # noqa: BLE001 — fail-open
+                        logger.warning(f"{extreme.station}: obs fetch failed: {exc}")
+                        obs_cache[extreme.station] = (None, None)
+                annotate_floor_buys(priced, *obs_cache.get(extreme.station, (None, None)))
                 entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += [p for p in priced if not p.get("suppressed")]
