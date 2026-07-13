@@ -90,6 +90,12 @@ class TestEntryFromFinding:
         del f["cmd"]
         assert take_queue.entry_from_finding(f, "s", NOW) is None
 
+    def test_obs_killed_or_warned_finding_never_gets_a_button(self):
+        f = _finding(obs_kill="obs already 97.0° ⇒ settle ≥97° — bracket dead")
+        assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
+        f = _finding(obs_warn="lone ob 97.0° — uncorroborated, verify")
+        assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
+
 
 class TestEnqueue:
     def test_enqueue_and_reload(self):

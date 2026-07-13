@@ -120,6 +120,73 @@ class TestClassify:
         assert cs.classify(p, MDW_HIGH, CHI_MARKETS) == []
 
 
+class TestObsAnnotation:
+    """The 2026-07-12 DAL/AUS trap class: post-print obs already beat the
+    floor bracket. The manual check that killed them, as code."""
+
+    def _entry(self, subtitle="95° to 96°", final=False, ladder_kind="high"):
+        return {"kind": "buy_winner", "ticker": "KXHIGHTDAL-26JUL12-B95.5",
+                "subtitle": subtitle, "printed": 96, "final": final,
+                "ladder_kind": ladder_kind, "ask": 1, "ask_depth": 60134}
+
+    def test_corroborated_exceedance_stamps_hard_kill(self):
+        e = self._entry()   # bracket 95-96
+        cs._annotate_obs_context([e], 96.98, 96.98)
+        assert e["obs_max_f"] == 97.0
+        assert "settle ≥97°" in e["obs_kill"]
+        assert "obs_warn" not in e
+
+    def test_lone_spike_exceedance_stamps_soft_warn(self):
+        # KDFW's REAL 2026-07-12 day: 96.98 peak, next hourly ob 93.92 —
+        # corroboration returns None, but the spike named the final (97)
+        e = self._entry()
+        cs._annotate_obs_context([e], None, 96.98)
+        assert e["obs_max_f"] == 97.0
+        assert "obs_kill" not in e
+        assert "uncorroborated" in e["obs_warn"]
+
+    def test_obs_inside_bracket_annotates_without_kill(self):
+        e = self._entry(subtitle="90° or below")
+        cs._annotate_obs_context([e], 89.96, 89.96)   # MSP T91: held by 0.04°F
+        assert e["obs_max_f"] == 90.0
+        assert "obs_kill" not in e and "obs_warn" not in e
+
+    def test_final_low_and_missing_obs_untouched(self):
+        e_final = self._entry(final=True)
+        e_low = self._entry(ladder_kind="low")
+        cs._annotate_obs_context([e_final, e_low], 99.0, 99.0)
+        assert "obs_max_f" not in e_final and "obs_max_f" not in e_low
+        e = self._entry()
+        cs._annotate_obs_context([e], None, None)
+        assert "obs_max_f" not in e
+
+
+class TestWallFlag:
+    class _Client:
+        def __init__(self, books):
+            self._books = books
+
+        async def get_orderbook(self, ticker):
+            return self._books[ticker]
+
+    def _find(self):
+        return {"ticker": "KXHIGHCHI-26JUL04-B84.5", "subtitle": "84° to 85°",
+                "series": "KXHIGHCHI", "ladder_kind": "high", "printed": 85,
+                "final": False, "kind": "buy_winner"}
+
+    def test_deep_ask_flags_wall(self):
+        import asyncio as aio
+        books = {"KXHIGHCHI-26JUL04-B84.5": {"yes": [], "no": [[99, 154899]]}}
+        out = aio.run(cs._price_findings(self._Client(books), [self._find()]))
+        assert out[0]["wall_ask"] is True
+
+    def test_thin_ask_has_no_flag(self):
+        import asyncio as aio
+        books = {"KXHIGHCHI-26JUL04-B84.5": {"yes": [], "no": [[84, 40]]}}
+        out = aio.run(cs._price_findings(self._Client(books), [self._find()]))
+        assert "wall_ask" not in out[0]
+
+
 class TestFormatAlert:
     def test_alert_carries_command(self):
         opps = [{"kind": "buy_winner", "ticker": "KXHIGHCHI-26JUL04-B84.5",
@@ -131,6 +198,25 @@ class TestFormatAlert:
         assert "1 winner buy" in title
         assert "take.py KXHIGHCHI-26JUL04-B84.5 buy yes 40 16" in body
         assert "floor" in body and "warming" in body
+
+    def test_obs_kill_and_wall_render_in_alert(self):
+        opps = [{"kind": "buy_winner", "ticker": "KXHIGHTDAL-26JUL12-B95.5",
+                 "subtitle": "95° to 96°", "printed": 96, "final": False,
+                 "ladder_kind": "high", "ask": 1, "ask_depth": 60134.0,
+                 "wall_ask": True, "obs_max_f": 97.0,
+                 "obs_kill": "obs already 97.0° ⇒ settle ≥97° — bracket dead",
+                 "cmd": ".venv/bin/python scripts/take.py KXHIGHTDAL-26JUL12-B95.5 buy yes 60134 1"}]
+        _, body = cs.format_alert(opps)
+        assert "🚫" in body and "bracket dead" in body
+        assert "🧱" in body and "never fade" in body
+
+    def test_safe_obs_renders_inline(self):
+        opps = [{"kind": "buy_winner", "ticker": "T", "subtitle": "90° or below",
+                 "printed": 90, "final": False, "ladder_kind": "high",
+                 "ask": 18, "ask_depth": 23.0, "obs_max_f": 90.0,
+                 "cmd": ".venv/bin/python scripts/take.py T buy yes 23 18"}]
+        _, body = cs.format_alert(opps)
+        assert "obs so far 90.0°" in body and "🚫" not in body
 
 
 class TestEffectiveFinality:

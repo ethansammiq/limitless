@@ -47,6 +47,13 @@ individually human-authorized; without DISCORD_BOT_TOKEN the queue is inert
   Floors are FIRST prints (re-issued floors launder drift out of the sample).
   2026-07-09 lesson: three such brackets at 51-66¢ went unbought for lack of a
   number in the alert; the winning OKC skip graded +45¢ EV.
+- **Obs annotation (2026-07-12):** floor high-ladder buys carry what the
+  station already observed. Corroborated exceedance of the bracket = 🚫
+  `obs_kill`; a LONE precise ob beating it = ⚠️ `obs_warn` (the sweeper's
+  corroboration guard is tuned for orders, not warnings — KDFW's real 96.98
+  peak sat 3.1°F above the next hourly ob and named the final 97). Either
+  keeps the alert but blocks one-tap staging. Asks ≥10k deep are flagged 🧱
+  (certainty-wall signature, 5-0 — same-side oracle, never the counterparty).
 - **Journal-first rule (manual trades):** before ANY manual bracket trade, grep
   the journal for an existing print on that station/day. 2026-07-09: a 1¢
   "leading bracket" was bought 29 min after its kill-print was already on disk.
@@ -156,6 +163,7 @@ away from production: keep every commit importable and test-verified.
 | `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
 | `backtest/alert_decay.py` | Edge half-life + reaction budget (min ≤ cap post-alert) via 1-min candles — the daemon go/no-go evidence (ad-hoc) |
 | `scripts/take.py` | The ONLY order-placing entry point — human-run; alerts print the exact command |
+| `scripts/position_brief.py` | One-shot evidence pack for a ticker: journal prints, live obs, DSM, book, house-rules checklist — paste-ready for a Claude chat (ad-hoc, read-only) |
 | `scripts/audit_coverage.py` | Series-drift / parse-health / office-silence self-audit (cron Sun 17:30) |
 | `scripts/export_public_stats.py` | Sanitized public snapshot for ethansam.io (cron */30; whitelist + secret-assertions) |
 | `weekly_digest.py` | Live summary + dead-bracket base rate + scorecard line (cron Sun 18:00) |

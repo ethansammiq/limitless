@@ -76,6 +76,7 @@ ALERTED_MAX_AGE_H = 48
 MAX_BUY_ASK_C = 20        # user standing rule: 20¢ max suggested entry —
                           # doubles as the repriced-already filter
 MIN_SELL_NET_C = 100      # dead-bid alert floor, cents ($1)
+WALL_ASK_DEPTH = 10_000   # certainty-wall signature (5-0 through 2026-07-12)
 
 
 def in_fetch_window(now_utc: datetime) -> bool:
@@ -167,6 +168,8 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
                 entry = {**f, "ask": ask, "ask_depth": depth,
                          "fee_c": kalshi_taker_fee_cents(ask),
                          "cmd": _take_cmd("buy", f["ticker"], qty, ask)}
+                if depth >= WALL_ASK_DEPTH:
+                    entry["wall_ask"] = True
                 if f["ladder_kind"] == "low":
                     entry.pop("cmd")
                     entry["suppressed"] = "low_ceiling_forecast"
@@ -186,10 +189,12 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
         if o["kind"] == "buy_winner":
             risk = ("post-window warming risk" if o["ladder_kind"] == "high"
                     else "min can still fall")
+            wall = (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — walls are "
+                    f"5-0 vs floor signals, never fade" if o.get("wall_ask") else "")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — {provenance} "
                 f"[floor, {risk}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}, "
-                f"fee {o['fee_c']}¢\n  `{o['cmd']}`")
+                f"fee {o['fee_c']}¢{wall}\n  `{o['cmd']}`")
         else:
             levels = ", ".join(f"{p}¢×{q}" for p, q in o["levels"])
             lines.append(

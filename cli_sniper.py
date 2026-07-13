@@ -59,6 +59,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from core import drift, dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
+from core.obs import certain_min_settle, corroborated_extreme, fetch_day_obs  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_awips  # noqa: E402
@@ -86,6 +87,9 @@ ALERTED_MAX_AGE_H = 48
 BUY_MAX_ASK_FINAL_C = 85          # certain winner: buy up to this ask
 BUY_MAX_ASK_FLOOR_C = 70          # floor leader: residual warming risk
 MIN_SELL_NET_C = 100              # dead-bid alert floor, cents ($1)
+# A deep opposing ask on a "winner" is the certainty-wall signature (5-0 vs
+# floor signals through 2026-07-12: MIA, MSP×2, DAL, AUS) — flag, never fade.
+WALL_ASK_DEPTH = 10_000
 # A LOW ladder's afternoon print locks nothing — the min can still fall until
 # midnight LST, so "bracket contains printed min" is an open forecast bet.
 # Scorecard 2026-07-08: this class realized -30.8¢/contract over 6 settles
@@ -365,6 +369,8 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
                 qty = max(1, int(depth))
                 entry = {**f, "ask": ask, "ask_depth": depth,
                          "cmd": _take_cmd("buy", f["ticker"], qty, ask)}
+                if depth >= WALL_ASK_DEPTH:
+                    entry["wall_ask"] = True
                 _attach_drift_economics(entry)
                 if (SUPPRESS_LOW_FLOOR_BUYS and f["ladder_kind"] == "low"
                         and not f["final"]):
@@ -373,6 +379,43 @@ async def _price_findings(client, findings: list[dict]) -> list[dict]:
                     entry["suppressed"] = "low_floor_forecast"
                 priced.append(entry)
     return priced
+
+
+def _annotate_obs_context(entries: list[dict], corroborated_max: float | None,
+                          raw_max: float | None) -> None:
+    """Stamp floor high-ladder buys with what the station ALREADY observed.
+
+    2026-07-12: two top-of-bracket floor buys (DAL 95-96, AUS 94-95) alerted
+    at 1¢ while post-4PM obs already guaranteed a higher settle — the manual
+    check that killed them becomes part of the alert. Two tiers, because the
+    sweeper's corroboration guard is tuned for placing riskless ORDERS while
+    this is a WARNING with inverted costs: a corroborated exceedance is a
+    hard obs_kill; a lone precise ob beating the bracket (KDFW's real 96.98
+    peak sat 3.1°F above the next hourly ob — the guard alone would have
+    missed the exact trap this exists for) is a soft obs_warn. Either keeps
+    the alert (the human may want the other side) but neither is ever staged
+    for one-tap execution. Annotation is fail-open.
+    """
+    if raw_max is None:
+        return
+    for e in entries:
+        if (e.get("kind") != "buy_winner" or e.get("final")
+                or e.get("ladder_kind") != "high"):
+            continue
+        e["obs_max_f"] = round(raw_max, 1)
+        bounds = parse_subtitle(e.get("subtitle"))
+        hi = bounds[1] if bounds else None
+        if hi is None:
+            continue
+        if (corroborated_max is not None
+                and certain_min_settle(corroborated_max) > hi):
+            e["obs_kill"] = (f"obs already {corroborated_max:.1f}° ⇒ settle "
+                             f"≥{certain_min_settle(corroborated_max)}° — "
+                             f"bracket dead")
+        elif certain_min_settle(raw_max) > hi:
+            e["obs_warn"] = (f"lone ob {raw_max:.1f}° ⇒ would settle "
+                             f"≥{certain_min_settle(raw_max)}° — uncorroborated, "
+                             f"verify before buying")
 
 
 _DRIFT_DIST: drift.DriftDist | None = None
@@ -442,6 +485,15 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
             if "drift_prob" in o:
                 econ = (f" | drift {o['drift_prob']:.0%} win "
                         f"(n={o['drift_n']}), EV {o['drift_ev_c']:+.0f}¢")
+            if o.get("obs_kill"):
+                econ += f"\n  🚫 **{o['obs_kill']}** — do not buy"
+            elif o.get("obs_warn"):
+                econ += f"\n  ⚠️ **{o['obs_warn']}**"
+            elif "obs_max_f" in o:
+                econ += f" | obs so far {o['obs_max_f']}°"
+            if o.get("wall_ask"):
+                econ += (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — "
+                         f"walls are 5-0 vs floor signals, never fade")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — CLI printed **{o['printed']}°** "
                 f"[{cert}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}{econ}\n  `{o['cmd']}`")
@@ -535,6 +587,8 @@ async def run(dry_run: bool, replay: str | None) -> None:
                              **asdict(parsed), "findings": []}
             read_ok = True
             dsm_reports: list[dsm.DSMReport] | None = None  # lazy, once per product
+            obs_pair: tuple[float | None, float | None] = (None, None)
+            obs_checked = False                # lazy, once per station
             for ladder in group:
                 markets, ok = await client.get_markets_checked(series_ticker=ladder.series)
                 if not ok:
@@ -562,6 +616,20 @@ async def run(dry_run: bool, replay: str | None) -> None:
                     journal_entry["findings"] += vetoed
                     opportunities += vetoed
                 priced = await _price_findings(client, findings)
+                if (not obs_checked
+                        and any(p.get("kind") == "buy_winner" and not p["final"]
+                                and p.get("ladder_kind") == "high"
+                                and not p.get("suppressed") for p in priced)):
+                    obs_checked = True
+                    try:
+                        temps = await asyncio.to_thread(
+                            fetch_day_obs, ladder.station_icao,
+                            ZoneInfo(ladder.tz))
+                        obs_pair = (corroborated_extreme(temps, "high"),
+                                    max(temps) if temps else None)
+                    except Exception as exc:  # noqa: BLE001 — annotation is fail-open
+                        logger.warning(f"{parsed.awips}: obs fetch failed: {exc}")
+                _annotate_obs_context(priced, *obs_pair)
                 journal_entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += [p for p in priced if not p.get("suppressed")]
