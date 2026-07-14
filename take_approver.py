@@ -20,6 +20,16 @@ Guardrails: allow-list only (DISCORD_TAKE_APPROVER_IDS), at-most-once (the
 surfaced, never retried), IOC only (automation never leaves resting
 orders), notional capped at enqueue AND re-validated by take.py itself.
 
+AUTO-TAKE, 00Z class only (2026-07-14, ships in SHADOW mode): entries the
+queue marked `auto_eligible` (METAR high-ladder buy_winner from the 00Z
+synoptic group — day-max == final CLI 98.4%, all four groups in) can skip
+the tap. Default is shadow: the would-fire decision (live-book re-check +
+caps) is journaled once per entry to logs/take_approver/YYYY-MM-DD.jsonl
+and the button still works normally. AUTO_TAKE_00Z=on flips to live
+auto-fire behind extra caps (fires/day + daily auto notional, on top of
+the per-order clamp) — pre-registered flip-on gate in claude.md §1; do not
+set it before the shadow week grades.
+
 Unconfigured (no DISCORD_BOT_TOKEN) the job exits cleanly and the queue
 drains by TTL — the feature is strictly additive to the existing alerts.
 
@@ -28,6 +38,9 @@ drains by TTL — the feature is strictly additive to the existing alerts.
     DISCORD_TAKE_CHANNEL_ID=...      # channel the TAKE? prompts post to
     DISCORD_TAKE_APPROVER_IDS=1,2    # Discord user ids allowed to fire
     TAKE_APPROVE_TTL_MIN=15          # optional
+    AUTO_TAKE_00Z=on                 # optional: live auto-fire (default shadow)
+    AUTO_TAKE_MAX_PER_DAY=3          # optional: auto-fires allowed per UTC day
+    AUTO_TAKE_DAILY_CAP=30           # optional: $ auto notional per UTC day
 Suggested crontab (NOT auto-installed):
     * * * * * $VENV $PROJ/take_approver.py --once >> /tmp/take_approver.log 2>&1
 """
@@ -56,9 +69,33 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 TAKE_SCRIPT = PROJECT_ROOT / "scripts" / "take.py"
+SHADOW_JOURNAL_DIR = PROJECT_ROOT / "logs" / "take_approver"
 DISCORD_API = "https://discord.com/api/v10"
 CHECK = "✅"  # ✅
 SUBPROCESS_TIMEOUT_S = 90
+
+AUTO_MAX_FIRES_PER_DAY = 3
+AUTO_DAILY_CAP_DOLLARS = 30.0
+
+
+def auto_mode() -> str:
+    """"on" fires the 00Z class without a tap; anything else is shadow."""
+    return "on" if os.getenv("AUTO_TAKE_00Z", "").strip().lower() == "on" \
+        else "shadow"
+
+
+def auto_max_fires() -> int:
+    try:
+        return int(os.getenv("AUTO_TAKE_MAX_PER_DAY", AUTO_MAX_FIRES_PER_DAY))
+    except ValueError:
+        return AUTO_MAX_FIRES_PER_DAY
+
+
+def auto_daily_cap() -> float:
+    try:
+        return float(os.getenv("AUTO_TAKE_DAILY_CAP", AUTO_DAILY_CAP_DOLLARS))
+    except ValueError:
+        return AUTO_DAILY_CAP_DOLLARS
 
 
 def _config() -> dict | None:
@@ -68,7 +105,56 @@ def _config() -> dict | None:
                  os.getenv("DISCORD_TAKE_APPROVER_IDS", "").split(",") if u.strip()}
     if not (token and channel and approvers):
         return None
-    return {"token": token, "channel": channel, "approvers": approvers}
+    return {"token": token, "channel": channel, "approvers": approvers,
+            "auto_mode": auto_mode()}
+
+
+def auto_allowance(entry: dict, all_entries: dict, now_utc: datetime,
+                   ) -> tuple[bool, str]:
+    """(ok, reason): would auto-firing this entry stay inside the auto caps?
+
+    Auto caps sit ON TOP of the per-order notional clamp: fires per UTC day
+    and total auto notional per UTC day, both counted from `auto_fired`
+    entries in the queue itself (48h retention covers a day). An entry
+    stuck in "executing" counts as spent — a crash mid-order is treated as
+    money out the door until a human reconciles fills.
+    """
+    today = now_utc.date().isoformat()
+    fired = [e for e in all_entries.values()
+             if e.get("auto_fired") and (e.get("resolved_ts") or "").startswith(today)]
+    max_fires = auto_max_fires()
+    if len(fired) >= max_fires:
+        return False, f"{len(fired)} auto-fires already today (max {max_fires})"
+    cost = order_cost_dollars(entry["action"], entry["side"],
+                              entry["count"], entry["price_c"])
+    spent = sum(order_cost_dollars(e["action"], e["side"],
+                                   e["count"], e["price_c"]) for e in fired)
+    cap = auto_daily_cap()
+    if spent + cost > cap:
+        return False, f"${spent + cost:.2f} would exceed ${cap:.2f} daily auto cap"
+    return True, f"{len(fired)} fire(s) / ${spent:.2f} auto-spent today"
+
+
+def shadow_record(entry: dict, live_px: int | None, verdict: str, reason: str,
+                  caps_ok: bool, caps_reason: str, now_utc: datetime) -> dict:
+    """One graded auto-shadow row: what live auto mode WOULD have done."""
+    return {"ts": now_utc.isoformat(timespec="seconds"), "kind": "auto_shadow",
+            "id": entry["id"], "ticker": entry["ticker"],
+            "action": entry["action"], "side": entry["side"],
+            "count": entry["count"], "price_c": entry["price_c"],
+            "live_px": live_px,
+            "cost_dollars": round(order_cost_dollars(
+                entry["action"], entry["side"],
+                entry["count"], entry["price_c"]), 2),
+            "would": verdict, "reason": reason,
+            "caps_ok": caps_ok, "caps_reason": caps_reason}
+
+
+def _journal_shadow(record: dict) -> None:
+    SHADOW_JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+    path = SHADOW_JOURNAL_DIR / f"{record['ts'][:10]}.jsonl"
+    with path.open("a") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def format_prompt(entry: dict, ttl_min: int) -> str:
@@ -81,21 +167,30 @@ def format_prompt(entry: dict, ttl_min: int) -> str:
              f"worst-case ${cost:.2f} [{entry['source']}]"]
     if entry.get("summary"):
         lines.append(entry["summary"])
+    if entry.get("auto_eligible"):
+        lines.append("🤖 auto-eligible (00Z day-max class) — "
+                     + ("fires on live-book check, no tap needed"
+                        if auto_mode() == "on"
+                        else "shadow mode: tap still required"))
     lines.append(f"React {CHECK} to fire (IOC via take.py) — expires <t:{expires}:R>")
     return "\n".join(lines)
 
 
 def decide(entry: dict, now_utc: datetime, reactor_ids: set[str],
            approver_ids: set[str], live_px: int | None,
-           ttl_min: int) -> tuple[str, str]:
+           ttl_min: int, *, auto_approved: bool = False) -> tuple[str, str]:
     """(verdict, reason) for one posted entry. Pure — the whole guardrail
     stack in one testable place.
 
     verdicts: "expire" | "wait" | "reprice" | "execute"
+
+    auto_approved substitutes ONLY for the human tap (caller has already
+    verified auto-eligibility, live auto mode, and the auto caps); expiry,
+    the fail-closed book check, and the reprice guard apply unchanged.
     """
     if take_queue.is_expired(entry, now_utc, ttl_min):
         return "expire", f"no approval within {ttl_min} min"
-    if not (reactor_ids & approver_ids):
+    if not auto_approved and not (reactor_ids & approver_ids):
         return "wait", "no allow-listed reaction yet"
     if live_px is None:
         # Book unreadable — fail closed on the order, retry inside the TTL.
@@ -104,7 +199,7 @@ def decide(entry: dict, now_utc: datetime, reactor_ids: set[str],
         return "reprice", f"ask now {live_px}¢ > staged {entry['price_c']}¢"
     if entry["action"] == "sell" and live_px < entry["price_c"]:
         return "reprice", f"bid now {live_px}¢ < staged {entry['price_c']}¢"
-    return "execute", "approved"
+    return "execute", "auto-approved (00Z class)" if auto_approved else "approved"
 
 
 def build_take_argv(entry: dict) -> list[str]:
@@ -223,54 +318,95 @@ async def run(dry_run: bool) -> None:
 
     mutations: dict[str, dict] = {}
     kalshi = None
+
+    def _mut(eid: str, **fields) -> None:
+        # Merge, never replace — an auto_shadow stamp and a status change
+        # can land on the same entry in one run.
+        mutations.setdefault(eid, {}).update(fields)
+
+    async def ensure_kalshi():
+        nonlocal kalshi
+        if kalshi is None:
+            from kalshi_client import KalshiClient
+
+            kalshi = KalshiClient(
+                api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
+                private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
+                demo_mode=False)
+            await kalshi.start()
+        return kalshi
+
     async with aiohttp.ClientSession() as session:
         for entry in sorted(entries, key=lambda e: e.get("ts", "")):
             eid = entry["id"]
 
             if entry["status"] == "pending":
                 if take_queue.is_expired(entry, now_utc, ttl):
-                    mutations[eid] = {"status": "expired",
-                                      "resolved_ts": now_utc.isoformat(timespec="seconds")}
+                    _mut(eid, status="expired",
+                         resolved_ts=now_utc.isoformat(timespec="seconds"))
                     continue
                 if dry_run:
                     print(f"would post: {format_prompt(entry, ttl)}")
                     continue
                 mid = await post_prompt(session, cfg, entry, ttl)
                 if mid:
-                    mutations[eid] = {"status": "posted", "message_id": mid,
-                                      "posted_ts": now_utc.isoformat(timespec="seconds")}
+                    _mut(eid, status="posted", message_id=mid,
+                         posted_ts=now_utc.isoformat(timespec="seconds"))
                     logger.info(f"{entry['ticker']}: TAKE? posted ({eid})")
                 continue
 
             # status == "posted"
             reactors = None if dry_run else await get_reactors(
                 session, cfg, entry["message_id"])
-            live_px = None
-            if reactors and (reactors & cfg["approvers"]):
-                if kalshi is None:
-                    from kalshi_client import KalshiClient
 
-                    kalshi = KalshiClient(
-                        api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
-                        private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
-                        demo_mode=False)
-                    await kalshi.start()
-                live_px = await fetch_live_px(kalshi, entry)
+            auto_entry = bool(entry.get("auto_eligible"))
+            caps_ok, caps_reason = (auto_allowance(entry, queue["entries"], now_utc)
+                                    if auto_entry else (False, "not auto-eligible"))
+            auto_fire = auto_entry and cfg["auto_mode"] == "on" and caps_ok
+            shadow_due = (auto_entry and cfg["auto_mode"] != "on"
+                          and not entry.get("auto_shadow") and not dry_run)
+            if auto_entry and cfg["auto_mode"] == "on" and not caps_ok:
+                logger.info(f"{entry['ticker']}: auto-fire blocked — {caps_reason}"
+                            " (button still live)")
+
+            live_px = None
+            tapped = bool(reactors and (reactors & cfg["approvers"]))
+            if not dry_run and (tapped or auto_fire or shadow_due):
+                live_px = await fetch_live_px(await ensure_kalshi(), entry)
+
+            if shadow_due:
+                if live_px is None:
+                    # Book unreadable — leave the shadow unstamped so the
+                    # next tick retries inside the TTL.
+                    logger.info(f"{entry['ticker']}: auto-shadow deferred — "
+                                f"book unreadable")
+                else:
+                    w_verdict, w_reason = decide(
+                        entry, now_utc, set(), cfg["approvers"], live_px, ttl,
+                        auto_approved=True)
+                    _journal_shadow(shadow_record(
+                        entry, live_px, w_verdict, w_reason,
+                        caps_ok, caps_reason, now_utc))
+                    _mut(eid, auto_shadow=now_utc.isoformat(timespec="seconds"))
+                    logger.info(f"{entry['ticker']}: auto-shadow would_{w_verdict}"
+                                f" ({w_reason}; caps: {caps_reason})")
+
             verdict, reason = decide(entry, now_utc, reactors or set(),
-                                     cfg["approvers"], live_px, ttl)
+                                     cfg["approvers"], live_px, ttl,
+                                     auto_approved=auto_fire)
 
             if verdict == "wait":
                 continue
             if verdict == "expire":
-                mutations[eid] = {"status": "expired",
-                                  "resolved_ts": now_utc.isoformat(timespec="seconds")}
+                _mut(eid, status="expired",
+                     resolved_ts=now_utc.isoformat(timespec="seconds"))
                 if not dry_run and entry.get("message_id"):
                     await edit_message(session, cfg, entry["message_id"],
                                        f"⌛ EXPIRED — {reason}\n~~{format_prompt(entry, ttl)}~~")
                 continue
             if verdict == "reprice":
-                mutations[eid] = {"status": "repriced", "result": reason,
-                                  "resolved_ts": now_utc.isoformat(timespec="seconds")}
+                _mut(eid, status="repriced", result=reason,
+                     resolved_ts=now_utc.isoformat(timespec="seconds"))
                 if not dry_run:
                     await edit_message(session, cfg, entry["message_id"],
                                        f"↕ NOT EXECUTED — {reason}\n"
@@ -283,17 +419,24 @@ async def run(dry_run: bool) -> None:
             if dry_run:
                 print(f"would execute: {' '.join(build_take_argv(entry))}")
                 continue
-            take_queue.update_entries(
-                {eid: {"status": "executing",
-                       "resolved_ts": now_utc.isoformat(timespec="seconds")}})
+            marker = {"status": "executing", "auto_fired": auto_fire,
+                      "resolved_ts": now_utc.isoformat(timespec="seconds")}
+            take_queue.update_entries({eid: marker})
+            # Same dict object as queue["entries"][eid] — keeps this run's
+            # auto_allowance arithmetic honest for later entries.
+            entry.update(marker)
             ok, output = run_take(entry)
-            mutations[eid] = {"status": "executed" if ok else "failed",
-                              "result": output,
-                              "resolved_ts": now_utc.isoformat(timespec="seconds")}
-            logger.info(f"{entry['ticker']}: take.py {'ok' if ok else 'FAILED'}")
+            _mut(eid, status="executed" if ok else "failed", result=output,
+                 auto_fired=auto_fire,
+                 resolved_ts=now_utc.isoformat(timespec="seconds"))
+            logger.info(f"{entry['ticker']}: take.py "
+                        f"{'ok' if ok else 'FAILED'}"
+                        f"{' (auto-fired)' if auto_fire else ''}")
+            header = ("🤖 AUTO-FIRED" if auto_fire else "✅ EXECUTED") if ok \
+                else f"❌ {'AUTO-' if auto_fire else ''}FAILED"
             await edit_message(
                 session, cfg, entry["message_id"],
-                f"{'✅ EXECUTED' if ok else '❌ FAILED'} `{entry['ticker']}` "
+                f"{header} `{entry['ticker']}` "
                 f"{entry['action']} {entry['count']}× @ {entry['price_c']}¢\n"
                 f"```\n{output[-800:]}\n```")
 

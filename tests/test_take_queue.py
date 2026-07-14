@@ -100,6 +100,39 @@ class TestEntryFromFinding:
         assert take_queue.entry_from_finding(f, "metar_sniper", NOW) is None
 
 
+class TestAutoEligible:
+    def _metar_finding(self, **over):
+        return _finding(**{"ladder_kind": "high", "synoptic_anchor_utc": 0,
+                           **over})
+
+    def test_00z_metar_high_buy_winner_is_eligible(self):
+        assert take_queue.is_auto_eligible(self._metar_finding(), "metar_sniper")
+        e = take_queue.entry_from_finding(self._metar_finding(),
+                                          "metar_sniper", NOW)
+        assert e["auto_eligible"] is True
+
+    def test_earlier_anchors_are_not(self):
+        # 2026-07-13: the 18Z batch would have gone 1-for-5 vs the finals
+        for anchor in (6, 12, 18):
+            f = self._metar_finding(synoptic_anchor_utc=anchor)
+            assert not take_queue.is_auto_eligible(f, "metar_sniper")
+
+    def test_missing_anchor_low_ladder_and_other_sources_are_not(self):
+        f = self._metar_finding()
+        del f["synoptic_anchor_utc"]
+        assert not take_queue.is_auto_eligible(f, "metar_sniper")
+        assert not take_queue.is_auto_eligible(
+            self._metar_finding(ladder_kind="low"), "metar_sniper")
+        assert not take_queue.is_auto_eligible(
+            self._metar_finding(kind="sell_dead"), "metar_sniper")
+        assert not take_queue.is_auto_eligible(self._metar_finding(),
+                                               "cli_sniper")
+
+    def test_non_metar_entries_stage_as_not_eligible(self):
+        e = take_queue.entry_from_finding(_finding(), "cli_sniper", NOW)
+        assert e["auto_eligible"] is False
+
+
 class TestEnqueue:
     def test_enqueue_and_reload(self):
         assert take_queue.enqueue_findings([_finding()], "cli_sniper", NOW) == 1

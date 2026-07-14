@@ -17,6 +17,19 @@ a ✅ from an allow-listed user fires the EXACT staged take.py command — IOC
 only, notional-clamped, 15-min TTL, live-book re-check. Every order is still
 individually human-authorized; without DISCORD_BOT_TOKEN the queue is inert
 (keys documented in take_approver.py's docstring).
+**Auto-take carve-out (2026-07-14, SHADOW — the one amendment to the Core
+Rule, pre-registered before any live fire):** the 00Z-anchor METAR
+high-ladder buy_winner class ONLY (all four 6-hr groups in; day-max == final
+98.4%, 815/828 — vs the 18Z batch that would have gone 1-for-5 on
+2026-07-13). The queue marks these `auto_eligible`; take_approver journals
+the would-fire decision (live-book re-check + caps) to
+logs/take_approver/*.jsonl while the button keeps working. AUTO_TAKE_00Z=on
+enables live auto-fire behind extra caps (default 3 fires/$30 per UTC day,
+on top of the per-order clamp; take.py stays the only order path, IOC only).
+**Flip-on gate (do not relax):** ≥7 days of shadow rows, would-execute
+entries grade ≥ +5¢/contract against settlement, zero trap-class
+would-fires. Auto fills grade in the scorecard as their own edge class,
+separate from button conversion (Goal 1 keeps counting taps only).
 
 ## 2. THE WORKING STRATEGIES (settlement-source, 2026-07)
 

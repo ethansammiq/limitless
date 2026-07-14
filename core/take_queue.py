@@ -45,6 +45,25 @@ ACTIVE_STATUSES = ("pending", "posted")
 TERMINAL_STATUSES = ("executed", "expired", "repriced", "failed", "executing")
 ENQUEUEABLE_KINDS = ("buy_winner", "sell_dead")
 
+# The only class pre-cleared for auto-execution (shadow-graded first): a
+# METAR high-ladder buy_winner from the 00Z synoptic group — the one anchor
+# at which all four of the day's 6-hr groups exist (day-max == final CLI
+# 98.4%, 815/828). Earlier anchors carry post-window warming risk: the
+# 2026-07-13 18Z batch would have gone 1-for-5 against the finals.
+AUTO_ANCHOR_UTC = 0
+
+
+def is_auto_eligible(finding: dict, source: str) -> bool:
+    """Does this finding fall in the pre-cleared auto-take class?
+
+    Trap flags (obs_kill/obs_warn/wall_ask) never reach here — they block
+    staging entirely in entry_from_finding.
+    """
+    return (source == "metar_sniper"
+            and finding.get("kind") == "buy_winner"
+            and finding.get("ladder_kind") == "high"
+            and finding.get("synoptic_anchor_utc") == AUTO_ANCHOR_UTC)
+
 
 def ttl_minutes() -> int:
     try:
@@ -162,6 +181,7 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
             "ts": ts, "source": source, "kind": finding["kind"],
             **parsed, "count": count,
             "summary": " · ".join(b for b in summary_bits if b),
+            "auto_eligible": is_auto_eligible(finding, source),
             "status": "pending", "message_id": None,
             "posted_ts": None, "resolved_ts": None, "result": None}
 

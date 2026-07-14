@@ -72,6 +72,19 @@ def round_f(f: float) -> int:
     return math.floor(f + 0.5)
 
 
+def synoptic_anchor_utc(obs_time_utc: datetime) -> int:
+    """Nearest synoptic hour (0/6/12/18 UTC) for a group-bearing ob.
+
+    The groups ride the :53 ob BEFORE the synoptic hour (2353Z → 0), with
+    stragglers and corrections trailing up to ~45 min after it — both must
+    resolve to the same anchor. The 00Z anchor is the only one at which all
+    four of a climate day's groups exist (the day-max == final 98.4% class);
+    earlier anchors carry post-window warming risk (2026-07-13: the 18Z
+    batch would have gone 1-for-5 against the finals).
+    """
+    return int(6 * round((obs_time_utc.hour + obs_time_utc.minute / 60) / 6)) % 24
+
+
 def metar_time_to_utc(day: int, hour: int, minute: int,
                       now_utc: datetime) -> datetime | None:
     """Resolve a METAR ddhhmmZ stamp against now (month/year not encoded).

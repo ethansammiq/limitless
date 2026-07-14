@@ -89,6 +89,20 @@ class TestClimateDate:
         assert metar.climate_date(self._extreme(11, day=12), "America/Chicago") == "2026-07-12"
 
 
+class TestSynopticAnchor:
+    def test_the_53_ob_before_each_synoptic_hour(self):
+        for hh, anchor in ((23, 0), (5, 6), (11, 12), (17, 18)):
+            t = datetime(2026, 7, 12, hh, 53, tzinfo=timezone.utc)
+            assert metar.synoptic_anchor_utc(t) == anchor
+
+    def test_stragglers_and_corrections_resolve_to_the_same_anchor(self):
+        # fetch window runs until HH:45 — a 0015Z correction is still 00Z
+        assert metar.synoptic_anchor_utc(
+            datetime(2026, 7, 12, 0, 15, tzinfo=timezone.utc)) == 0
+        assert metar.synoptic_anchor_utc(
+            datetime(2026, 7, 12, 18, 45, tzinfo=timezone.utc)) == 18
+
+
 class TestStampResolution:
     def test_month_rollover(self):
         now = datetime(2026, 8, 1, 0, 10, tzinfo=timezone.utc)
