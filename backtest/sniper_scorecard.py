@@ -54,7 +54,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core.fees import kalshi_taker_fee_cents  # noqa: E402
 
 JOURNAL_DIR = PROJECT_ROOT / "logs" / "cli_sniper"
+METAR_JOURNAL_DIR = PROJECT_ROOT / "logs" / "metar_sniper"
 VERDICT_FILE = HERE / "sniper_scorecard_verdict.json"
+METAR_VERDICT_FILE = HERE / "metar_scorecard_verdict.json"
 
 
 def _row_finality(row: dict, tz_by_awips: dict[str, str]) -> str | None:
@@ -119,6 +121,48 @@ def load_findings(journal_dir: Path = JOURNAL_DIR, since: datetime | None = None
                     "summary_date": row.get("summary_date"),
                     "is_final": is_final,
                     **{**f, "final": is_final},
+                })
+    return out
+
+
+def load_metar_findings(journal_dir: Path = METAR_JOURNAL_DIR,
+                        since: datetime | None = None) -> list[dict]:
+    """Flatten metar_sniper journal rows to the scorecard's finding shape.
+
+    Suppressed low-ladder buys are KEPT (unlike alert_decay's loader):
+    the scorecard measures every journaled finding uncensored — that is
+    exactly how the CLI low-floor class was condemned at -30.8¢. Every
+    METAR finding is floor-class (is_final=False); cluster keys come from
+    the row's station (→ awips) and the finding's own ticker date.
+    """
+    from ladders import by_station
+    from market_timeseries import extract_target_date_from_ticker
+
+    awips_by_icao = {icao: g[0].awips for icao, g in by_station().items()}
+    out: list[dict] = []
+    if not journal_dir.exists():
+        return out
+    for path in sorted(journal_dir.glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = row.get("ts", "")
+            if since is not None:
+                try:
+                    if datetime.fromisoformat(ts) < since:
+                        continue
+                except ValueError:
+                    pass
+            for f in row.get("findings") or []:
+                out.append({
+                    "ts": ts,
+                    "awips": awips_by_icao.get(row.get("station", "")),
+                    "summary_date": extract_target_date_from_ticker(
+                        f.get("ticker", "")),
+                    "is_final": False,
+                    **{**f, "final": False},
                 })
     return out
 
@@ -337,15 +381,20 @@ def format_report(result: dict) -> str:
     return "\n".join(lines)
 
 
-async def main_async(days: int | None, report: str) -> None:
+async def main_async(days: int | None, report: str,
+                     journal: str = "cli") -> None:
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
-    findings = load_findings(since=since)
+    findings = (load_metar_findings(since=since) if journal == "metar"
+                else load_findings(since=since))
     tickers = sorted({f["ticker"] for f in findings if f.get("ticker")})
     results = await fetch_results(tickers)
     result = build(findings, results)
-    VERDICT_FILE.write_text(json.dumps(
+    verdict_file = METAR_VERDICT_FILE if journal == "metar" else VERDICT_FILE
+    verdict_file.write_text(json.dumps(
         {k: v for k, v in result.items() if k != "scored"}, indent=1) + "\n")
     text = format_report(result)
+    if journal == "metar":
+        text = text.replace("Sniper scorecard", "METAR sniper scorecard", 1)
     if report == "discord":
         try:
             from notifications import send_discord_alert
@@ -354,20 +403,23 @@ async def main_async(days: int | None, report: str) -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"discord send failed: {exc}", file=sys.stderr)
     print(text)
-    try:
-        from heartbeat import write_heartbeat
-        write_heartbeat("sniper_scorecard")
-    except Exception:  # noqa: BLE001 — heartbeat must never block the report
-        pass
+    if journal == "cli":   # the watchdog's weekly service is the CLI run
+        try:
+            from heartbeat import write_heartbeat
+            write_heartbeat("sniper_scorecard")
+        except Exception:  # noqa: BLE001 — heartbeat must never block the report
+            pass
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--days", type=int, default=None, help="only findings newer than N days")
     ap.add_argument("--report", choices=("stdout", "discord"), default="stdout")
+    ap.add_argument("--journal", choices=("cli", "metar"), default="cli",
+                    help="which sniper journal to score (default: cli)")
     args = ap.parse_args()
     import asyncio
-    asyncio.run(main_async(args.days, args.report))
+    asyncio.run(main_async(args.days, args.report, args.journal))
 
 
 if __name__ == "__main__":

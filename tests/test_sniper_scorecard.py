@@ -256,3 +256,25 @@ class TestBugEraExclusion:
             '[{"ticker":"T1","series":"KXHIGHCHI","kind":"buy_winner","ask":10}]}\n')
         out = sc.load_findings(d)
         assert len(out) == 1 and out[0]["is_final"] is False
+
+
+class TestMetarJournalLoader:
+    def test_flatten_keeps_suppressed_and_derives_cluster_keys(self, tmp_path):
+        import json
+        from backtest.sniper_scorecard import load_metar_findings
+        row = {"ts": "2026-07-12T05:50:00+00:00", "station": "KMSP",
+               "kind": "max", "findings": [
+                   {"ticker": "KXHIGHTMIN-26JUL12-B90.5", "kind": "buy_winner",
+                    "ask": 14, "ask_depth": 50, "series": "KXHIGHTMIN",
+                    "ladder_kind": "high"},
+                   {"ticker": "KXLOWTMIN-26JUL12-B68.5", "kind": "buy_winner",
+                    "ask": 9, "ask_depth": 10, "series": "KXLOWTMIN",
+                    "ladder_kind": "low",
+                    "suppressed": "low_ceiling_forecast"}]}
+        (tmp_path / "2026-07-12.jsonl").write_text(json.dumps(row) + "\n")
+        out = load_metar_findings(journal_dir=tmp_path)
+        assert len(out) == 2                       # suppressed KEPT (uncensored)
+        for f in out:
+            assert f["is_final"] is False and f["final"] is False
+            assert f["summary_date"] == "2026-07-12"
+            assert f["awips"] == "MSP"             # ICAO -> awips via ladders
