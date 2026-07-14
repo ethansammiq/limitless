@@ -123,12 +123,88 @@ def classify(extreme: metar.SixHrExtreme, ladder: Ladder,
                 "printed": value, "precise_c": extreme.temp_c,
                 "precise_f": round(extreme.temp_f, 2),
                 "obs_time": extreme.obs_time_utc.isoformat(timespec="minutes"),
+                "synoptic_anchor_utc": metar.synoptic_anchor_utc(
+                    extreme.obs_time_utc),
                 "final": False}
         if is_dead(ladder.kind, bounds[0], bounds[1], value):
             findings.append({**base, "kind": "sell_dead"})
         elif contains(bounds[0], bounds[1], value):
             findings.append({**base, "kind": "buy_winner"})
     return findings
+
+
+def cli_floor_crosscheck(extreme: metar.SixHrExtreme, awips: str, tz: str,
+                         cli_entries: list[dict]) -> list[dict]:
+    """Confirm or bust journaled CLI floor buys against a new 6-hr max group.
+
+    The archive study (backtest/metar_leak_study.py, 828 station-days):
+    the day-max of 6-hr groups == final CLI 98.4%, and on floor≠final
+    drift days it named the final 50/52 — ~8h before the final CLI. The
+    live scorecard killed this feed as an ENTRY generator (PM buys 0/12:
+    anything still cheap after the walls read the METAR is adversely
+    selected), so its value flows to positions ALREADY taken off the CLI
+    floor print:
+
+      cli_bust    — the group exceeds the bought bracket's hi: the final
+                    follows the METAR out of the bracket (floor semantics,
+                    certain) → exit while bids last.
+      cli_confirm — the 00Z-anchor group (the only anchor with the full
+                    day's group set) lands inside the bracket → the ~86%
+                    floor-at-top drift risk collapses to the archive's
+                    ~98% class.
+
+    Checks are incremental — every new max group can bust; only the 00Z
+    anchor confirms — so an 18Z group that already left the bracket fires
+    the bust hours before the confirm window. Station-days whose final CLI
+    is already journaled are skipped (the document itself has resolved
+    drift; live_watch owns settled positions).
+    """
+    if extreme.kind != "max":
+        return []
+    target_date = metar.climate_date(extreme, tz)
+    if target_date is None:
+        return []
+    finals = {(e.get("awips"), e.get("summary_date"))
+              for e in cli_entries if e.get("is_final")}
+    if (awips, target_date) in finals:
+        return []
+    v = extreme.temp_f_rounded
+    anchor = metar.synoptic_anchor_utc(extreme.obs_time_utc)
+    out, seen_tickers = [], set()
+    for e in cli_entries:
+        if (e.get("awips") != awips or e.get("summary_date") != target_date
+                or e.get("is_final")):
+            continue
+        for f in e.get("findings") or []:
+            if (f.get("kind") != "buy_winner"
+                    or f.get("ladder_kind") != "high"
+                    or f.get("suppressed")
+                    or f.get("ticker") in seen_tickers):
+                continue
+            bounds = parse_subtitle(f.get("subtitle"))
+            if bounds is None:
+                continue
+            seen_tickers.add(f["ticker"])
+            base = {"ticker": f["ticker"], "subtitle": f.get("subtitle"),
+                    "series": f.get("series"), "ladder_kind": "high",
+                    "cli_floor": f.get("printed"), "printed": v,
+                    "precise_c": extreme.temp_c,
+                    "precise_f": round(extreme.temp_f, 2),
+                    "obs_time": extreme.obs_time_utc.isoformat(timespec="minutes"),
+                    "synoptic_anchor_utc": anchor, "final": False}
+            if bounds[1] is not None and v > bounds[1]:
+                out.append({**base, "kind": "cli_bust"})
+            elif anchor == 0 and contains(bounds[0], bounds[1], v):
+                out.append({**base, "kind": "cli_confirm"})
+    return out
+
+
+def _alert_key(o: dict) -> str:
+    """Dedup key: crosscheck kinds are per-(kind, ticker) — a bust must not
+    be swallowed because the same ticker confirmed (or alerted) earlier."""
+    if o["kind"] in ("cli_bust", "cli_confirm"):
+        return f"{o['kind']}:{o['ticker']}"
+    return o["ticker"]
 
 
 def _take_cmd(action: str, ticker: str, qty: int, price_c: int) -> str:
@@ -183,11 +259,29 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
     n_buy = sum(1 for o in opps if o["kind"] == "buy_winner")
     n_sell = sum(1 for o in opps if o["kind"] == "sell_dead")
     title = f"📡 METAR 6-HR SNIPER — {n_buy} winner buy(s), {n_sell} dead-bid sell(s)"
+    n_bust = sum(1 for o in opps if o["kind"] == "cli_bust")
+    n_conf = sum(1 for o in opps if o["kind"] == "cli_confirm")
+    if n_bust or n_conf:
+        title += f", {n_bust} CLI bust(s), {n_conf} CLI confirm(s)"
     lines = []
     for o in opps:
         provenance = (f"6-hr {'max' if o['ladder_kind'] == 'high' else 'min'} "
                       f"{o['precise_c']}°C = {o['precise_f']}°F → **{o['printed']}°** "
                       f"(ob {o['obs_time']})")
+        if o["kind"] == "cli_bust":
+            lines.append(
+                f"⛔ **{o['ticker']}** ({o['subtitle']}) — CLI floor buy "
+                f"BUSTED: floor was {o['cli_floor']}° but {provenance} — the "
+                f"final follows the METAR out of this bracket (archive "
+                f"50/52 on drift days). Exit bids while they last.")
+            continue
+        if o["kind"] == "cli_confirm":
+            lines.append(
+                f"✅ **{o['ticker']}** ({o['subtitle']}) — CLI floor buy "
+                f"CONFIRMED: 00Z day-max group {provenance} lands in-bracket "
+                f"→ drift risk collapses to the ~98% archive class "
+                f"(day-max == final 815/828). Hold to settlement.")
+            continue
         if o["kind"] == "buy_winner":
             risk = ("post-window warming risk" if o["ladder_kind"] == "high"
                     else "min can still fall")
@@ -284,6 +378,10 @@ async def run(dry_run: bool, replay: str | None) -> None:
         demo_mode=False,
     )
     opportunities: list[dict] = []
+    # CLI journal read once per run (VPS-local; empty on the dev Mac).
+    from cli_sniper import _recent_journal_entries
+
+    cli_entries = _recent_journal_entries(now_utc)
     await client.start()
     try:
         obs_cache: dict[str, tuple[float | None, float | None]] = {}
@@ -333,6 +431,17 @@ async def run(dry_run: bool, replay: str | None) -> None:
                 entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += [p for p in priced if not p.get("suppressed")]
+            # Confirm/bust journaled CLI floor buys against this group —
+            # no market read needed; the METAR is the information.
+            crosschecks = cli_floor_crosscheck(
+                extreme, groups[extreme.station][0].awips,
+                groups[extreme.station][0].tz, cli_entries)
+            for c in crosschecks:
+                logger.warning(f"{c['ticker']}: {c['kind'].upper()} — CLI "
+                               f"floor {c['cli_floor']}° vs 6-hr max "
+                               f"{c['printed']}°")
+            entry["findings"] += crosschecks
+            opportunities += crosschecks
             # Mark seen only on a clean sweep — a degraded read leaves the
             # extreme for the next cron to retry (fail closed on state).
             if read_ok and not replay:
@@ -346,7 +455,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
         await client.stop()
 
     fresh = [o for o in opportunities
-             if replay or o["ticker"] not in state["alerted"]]
+             if replay or _alert_key(o) not in state["alerted"]]
     if dry_run or replay:
         if fresh:
             title, body = format_alert(fresh)
@@ -376,7 +485,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
         except Exception as exc:  # noqa: BLE001 — staging must not break alerting
             logger.warning(f"take queue enqueue failed: {exc}")
         for o in fresh:
-            state["alerted"][o["ticker"]] = {
+            state["alerted"][_alert_key(o)] = {
                 "ts": now_utc.isoformat(timespec="seconds"),
                 "printed": o["printed"]}
         logger.info(f"metar sniper: alerted {len(fresh)} opportunity(ies)")

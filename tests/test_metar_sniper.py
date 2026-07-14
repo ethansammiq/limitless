@@ -130,3 +130,95 @@ class TestFormatAlert:
 class TestGates:
     def test_max_ask_is_the_standing_rule(self):
         assert ms.MAX_BUY_ASK_C == 20
+
+
+class TestCliFloorCrosscheck:
+    """The fusion path: METAR groups confirm/bust journaled CLI floor buys."""
+
+    CLI_ENTRIES = [
+        {"awips": "MSP", "summary_date": "2026-07-11", "is_final": False,
+         "findings": [
+             {"ticker": "KXHIGHTMIN-26JUL11-B88.5", "subtitle": "88° to 89°",
+              "series": "KXHIGHTMIN", "kind": "buy_winner",
+              "ladder_kind": "high", "printed": 88, "ask": 55},
+             {"ticker": "KXLOWTMIN-26JUL11-B68.5", "subtitle": "68° to 69°",
+              "series": "KXLOWTMIN", "kind": "buy_winner",
+              "ladder_kind": "low", "printed": 69, "ask": 30,
+              "suppressed": "low_floor_forecast"}]},
+    ]
+
+    def _extreme(self, hour, tenths, day=11):
+        from datetime import datetime, timezone
+        from core.metar import SixHrExtreme
+        return SixHrExtreme(
+            station="KMSP",
+            obs_time_utc=datetime(2026, 7, day, hour, 53, tzinfo=timezone.utc),
+            kind="max", tenths_c=tenths)
+
+    def test_00z_in_bracket_confirms(self):
+        # 31.7°C = 89.06°F → 89, inside 88-89; 2353Z = 00Z anchor
+        out = ms.cli_floor_crosscheck(
+            self._extreme(23, 317), "MSP", "America/Chicago", self.CLI_ENTRIES)
+        assert [o["kind"] for o in out] == ["cli_confirm"]
+        o = out[0]
+        assert o["ticker"] == "KXHIGHTMIN-26JUL11-B88.5"
+        assert o["cli_floor"] == 88 and o["printed"] == 89
+
+    def test_group_above_bracket_busts_any_anchor(self):
+        # 32.2°C → 90 > hi 89, from the 18Z group (1753Z): bust immediately
+        out = ms.cli_floor_crosscheck(
+            self._extreme(17, 322), "MSP", "America/Chicago", self.CLI_ENTRIES)
+        assert [o["kind"] for o in out] == ["cli_bust"]
+
+    def test_non_00z_in_bracket_does_not_confirm(self):
+        # 1753Z group inside the bracket: too early to confirm, no bust
+        out = ms.cli_floor_crosscheck(
+            self._extreme(17, 317), "MSP", "America/Chicago", self.CLI_ENTRIES)
+        assert out == []
+
+    def test_final_already_journaled_skips(self):
+        entries = self.CLI_ENTRIES + [
+            {"awips": "MSP", "summary_date": "2026-07-11", "is_final": True,
+             "findings": [{"ticker": "X", "kind": "buy_winner"}]}]
+        assert ms.cli_floor_crosscheck(
+            self._extreme(23, 317), "MSP", "America/Chicago", entries) == []
+
+    def test_suppressed_and_low_and_other_station_ignored(self):
+        out = ms.cli_floor_crosscheck(
+            self._extreme(23, 317), "MIA", "America/New_York", self.CLI_ENTRIES)
+        assert out == []
+
+    def test_min_group_no_op(self):
+        from datetime import datetime, timezone
+        from core.metar import SixHrExtreme
+        e = SixHrExtreme(station="KMSP",
+                         obs_time_utc=datetime(2026, 7, 11, 23, 53,
+                                               tzinfo=timezone.utc),
+                         kind="min", tenths_c=200)
+        assert ms.cli_floor_crosscheck(
+            e, "MSP", "America/Chicago", self.CLI_ENTRIES) == []
+
+
+class TestAlertKey:
+    def test_crosscheck_kinds_prefixed(self):
+        assert ms._alert_key({"kind": "cli_bust", "ticker": "T"}) == "cli_bust:T"
+        assert ms._alert_key({"kind": "cli_confirm", "ticker": "T"}) == "cli_confirm:T"
+        assert ms._alert_key({"kind": "buy_winner", "ticker": "T"}) == "T"
+
+
+class TestCrosscheckAlertFormat:
+    def test_bust_and_confirm_lines(self):
+        opps = [
+            {"kind": "cli_bust", "ticker": "KXHIGHTMIN-26JUL11-B88.5",
+             "subtitle": "88° to 89°", "ladder_kind": "high", "cli_floor": 88,
+             "printed": 90, "precise_c": 32.2, "precise_f": 89.96,
+             "obs_time": "2026-07-11T17:53+00:00", "synoptic_anchor_utc": 18},
+            {"kind": "cli_confirm", "ticker": "KXHIGHTMIN-26JUL11-B88.5",
+             "subtitle": "88° to 89°", "ladder_kind": "high", "cli_floor": 88,
+             "printed": 89, "precise_c": 31.7, "precise_f": 89.06,
+             "obs_time": "2026-07-11T23:53+00:00", "synoptic_anchor_utc": 0},
+        ]
+        title, body = ms.format_alert(opps)
+        assert "1 CLI bust(s), 1 CLI confirm(s)" in title
+        assert "BUSTED" in body and "Exit bids" in body
+        assert "CONFIRMED" in body and "Hold to settlement" in body
