@@ -43,6 +43,7 @@ DEAD_DIR = PROJECT_ROOT / "logs" / "dead_brackets"
 # Written by backtest/sniper_scorecard.py (its own cron); read here so the
 # digest stays network-free (no settlement lookups from this job).
 SCORECARD_VERDICT = PROJECT_ROOT / "backtest" / "sniper_scorecard_verdict.json"
+METAR_VERDICT = PROJECT_ROOT / "backtest" / "metar_scorecard_verdict.json"
 
 
 def _parse_ts(value) -> datetime | None:
@@ -122,6 +123,9 @@ def build_digest(days: int) -> tuple[str, str]:
     lines.append("\n**CLI sniper scorecard:**")
     lines.append("• " + sniper_scorecard_line())
 
+    lines.append("\n**METAR sniper scorecard:**")
+    lines.append("• " + metar_scorecard_line())
+
     return f"📊 Weather Edge weekly digest — last {days}d", "\n".join(lines)
 
 
@@ -140,6 +144,32 @@ def sniper_scorecard_line() -> str:
     return (f"{o['n']} settled: hit {o['hit_rate']:.0%}, "
             f"{o['mean_per_contract_cents']:+.1f}¢/contract, "
             f"${o['total_dollars']:+.2f} realized ({cert_str})")
+
+
+def metar_scorecard_line() -> str:
+    """One-line headline from the METAR verdict artifact (network-free).
+
+    All METAR findings are floor-class, so the informative split is the
+    ladder (high buys are the live question; low buys are suppressed and
+    ride along as the control group), plus the 80% CI the gates read.
+    """
+    try:
+        v = json.loads(METAR_VERDICT.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ("no METAR verdict yet — run backtest/sniper_scorecard.py "
+                "--journal metar")
+    o = v.get("overall") or {}
+    if not o.get("n"):
+        return f"no settled findings yet ({v.get('pending', 0)} pending)"
+    ladder = v.get("by_ladder") or {}
+    ladder_str = ", ".join(f"{k} {c['mean_per_contract_cents']:+.0f}¢×{c['n']}"
+                           for k, c in ladder.items())
+    ci = o.get("ci80") or {}
+    ci_str = (f", CI80 [{ci['lo']:+.0f},{ci['hi']:+.0f}]¢ "
+              f"({ci['clusters']} stn-nights)" if ci else "")
+    return (f"{o['n']} settled: hit {o['hit_rate']:.0%}, "
+            f"{o['mean_per_contract_cents']:+.1f}¢/contract "
+            f"({ladder_str}){ci_str}")
 
 
 def main() -> None:

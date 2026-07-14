@@ -204,6 +204,9 @@ cat << EOF
 # Sniper Scorecard — did the CLI alerts have edge? (writes the verdict the digest reads)
 45 17 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest/sniper_scorecard.py --report discord >> $LOG_DIR/sniper_scorecard.log 2>&1
 
+# METAR Scorecard — settle-join the 6-hr-group journal (verdict feeds the digest; no Discord of its own)
+40 17 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest/sniper_scorecard.py --journal metar >> $LOG_DIR/metar_scorecard.log 2>&1
+
 # Weekly Digest — live summary + dead-bracket base rate + scorecard
 0 18 * * 0 $VENV_DIR/bin/python3 $DEPLOY_DIR/weekly_digest.py >> $LOG_DIR/weekly_digest.log 2>&1
 

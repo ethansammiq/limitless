@@ -38,3 +38,34 @@ class TestDigestBuilds:
         assert "Paper" not in body      # KDE paper section retired 2026-07-06
         assert "Live account" in body
         assert "Dead-bracket base rate" in body
+
+
+class TestMetarScorecardLine:
+    def test_missing_verdict(self, monkeypatch, tmp_path):
+        import weekly_digest as wd
+        monkeypatch.setattr(wd, "METAR_VERDICT", tmp_path / "nope.json")
+        assert "no METAR verdict yet" in wd.metar_scorecard_line()
+
+    def test_headline_with_ladder_split_and_ci(self, monkeypatch, tmp_path):
+        import json
+        import weekly_digest as wd
+        verdict = {"overall": {"n": 96, "hit_rate": 0.052,
+                               "mean_per_contract_cents": 0.9,
+                               "total_dollars": -5555.87,
+                               "ci80": {"lo": -2.0, "hi": 4.0, "clusters": 41}},
+                   "pending": 12,
+                   "by_ladder": {"high": {"n": 51, "mean_per_contract_cents": 2.1},
+                                 "low": {"n": 45, "mean_per_contract_cents": -0.4}}}
+        p = tmp_path / "metar_scorecard_verdict.json"
+        p.write_text(json.dumps(verdict))
+        monkeypatch.setattr(wd, "METAR_VERDICT", p)
+        line = wd.metar_scorecard_line()
+        assert "96 settled" in line and "hit 5%" in line
+        assert "high +2¢×51" in line and "low -0¢×45" in line
+        assert "CI80 [-2,+4]¢ (41 stn-nights)" in line
+
+    def test_digest_includes_metar_section(self, monkeypatch, tmp_path):
+        import weekly_digest as wd
+        monkeypatch.setattr(wd, "METAR_VERDICT", tmp_path / "nope.json")
+        _, body = wd.build_digest(7)
+        assert "METAR sniper scorecard" in body
