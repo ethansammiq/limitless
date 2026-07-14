@@ -157,6 +157,44 @@ $SUDO systemctl enable weather-edge-dashboard.service
 # ─────────────────────────────────────────────
 # 7. CRON JOBS (for scheduled scans)
 # ─────────────────────────────────────────────
+echo "[6.5/7] Stage-1 hardening (idempotent; live-applied 2026-07-14)..."
+
+# SSH: key-only (fail2ban's first scan on 2026-07-14 found 80 failed
+# password attempts — the hole was being actively probed).
+printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nMaxAuthTries 4\n" \
+    > /etc/ssh/sshd_config.d/90-hardening.conf
+sshd -t && systemctl reload ssh
+
+# Firewall: deny inbound except rate-limited SSH + caddy's 80/443
+# (distress.*.sslip.io reverse proxy shares this box).
+ufw default deny incoming
+ufw default allow outgoing
+ufw limit 22/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
+
+# fail2ban: sshd jail, 4 tries → 1h ban
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q fail2ban
+printf "[sshd]\nenabled = true\nmaxretry = 4\nbantime = 1h\n" \
+    > /etc/fail2ban/jail.d/sshd.local
+systemctl enable --now fail2ban
+
+# Nightly data backup: journals (the uncensored record every model and
+# scorecard reads), state, creds. Code lives in git; this is the data.
+cat > /root/backup_limitless.sh << 'BACKUP'
+#!/bin/bash
+set -euo pipefail
+cd /root/limitless
+STAMP=$(date +%Y-%m-%d)
+tar czf "/root/backups/limitless-${STAMP}.tgz" \
+    logs/ backtest/*.jsonl backtest/*.json \
+    *.json *.jsonl .env kalshi_private_key.pem 2>/dev/null || true
+find /root/backups -name "limitless-*.tgz" -mtime +14 -delete
+BACKUP
+chmod 700 /root/backup_limitless.sh
+mkdir -p /root/backups
+
 echo "[7/7] Installing cron jobs..."
 
 # Write crontab (preserves any existing non-weather-edge entries)
@@ -182,6 +220,15 @@ cat << EOF
 
 # CLI Sniper — race the NWS climate report to its own repricing
 */2 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/cli_sniper.py --once >> $LOG_DIR/cli_sniper.log 2>&1
+
+# METAR Sniper — 6-hourly climate groups, the pre-CLI leak (synoptic windows only)
+*/5 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/metar_sniper.py --once >> $LOG_DIR/metar_sniper.log 2>&1
+
+# Funding Logger — perps funding vs spot
+*/10 * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/funding_logger.py --once >> $LOG_DIR/funding_logger.log 2>&1
+
+# Pre-Window Briefing — daily 16:27 ET, before the afternoon CLI window
+27 16 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/scripts/pre_window_briefing.py >> $LOG_DIR/pre_window_briefing.log 2>&1
 
 # Take Approver — one-tap Discord approval for staged sniper commands (idle without DISCORD_BOT_TOKEN)
 * * * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/take_approver.py --once >> $LOG_DIR/take_approver.log 2>&1
@@ -212,6 +259,9 @@ cat << EOF
 
 # Backtest Collector — 8:00 AM (settlement ground truth for daily_data.jsonl)
 0 8 * * * $VENV_DIR/bin/python3 $DEPLOY_DIR/backtest_collector.py >> $LOG_DIR/backtest_collector.log 2>&1
+
+# Nightly data backup (journals/state/creds → /root/backups, rotate 14d; stage-1 hardening 2026-07-14)
+50 7 * * * /root/backup_limitless.sh >> $LOG_DIR/backup.log 2>&1
 EOF
 ) | crontab -
 
