@@ -59,7 +59,8 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from core import drift, dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
-from core.obs import annotate_floor_buys, corroborated_extreme, fetch_day_obs  # noqa: E402
+from core.obs import (  # noqa: E402
+    annotate_floor_buys, corroborated_extreme, fetch_day_obs_timed, trend_class)
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_awips  # noqa: E402
@@ -459,6 +460,13 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
                 econ += f"\n  ⚠️ **{o['obs_warn']}**"
             elif "obs_max_f" in o:
                 econ += f" | obs so far {o['obs_max_f']}°"
+            if o.get("obs_trend") == "still_hot":
+                econ += (f"\n  🌡 **still hot at print** — drift risk "
+                         f"{o['trend_drift_p']:.0%} vs 3% post-peak "
+                         f"(archive n={o['trend_drift_n']})")
+            elif o.get("obs_trend") == "post_peak":
+                econ += (f" | post-peak, drift {o['trend_drift_p']:.0%} "
+                         f"(archive n={o['trend_drift_n']})")
             if o.get("wall_ask"):
                 econ += (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — "
                          f"walls are 5-0 vs floor signals, never fade")
@@ -556,6 +564,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
             read_ok = True
             dsm_reports: list[dsm.DSMReport] | None = None  # lazy, once per product
             obs_pair: tuple[float | None, float | None] = (None, None)
+            obs_trend: dict | None = None
             obs_checked = False                # lazy, once per station
             for ladder in group:
                 markets, ok = await client.get_markets_checked(series_ticker=ladder.series)
@@ -590,14 +599,16 @@ async def run(dry_run: bool, replay: str | None) -> None:
                                 and not p.get("suppressed") for p in priced)):
                     obs_checked = True
                     try:
-                        temps = await asyncio.to_thread(
-                            fetch_day_obs, ladder.station_icao,
+                        timed = await asyncio.to_thread(
+                            fetch_day_obs_timed, ladder.station_icao,
                             ZoneInfo(ladder.tz))
+                        temps = [f for _, f in timed]
                         obs_pair = (corroborated_extreme(temps, "high"),
                                     max(temps) if temps else None)
+                        obs_trend = trend_class(timed, now_utc)
                     except Exception as exc:  # noqa: BLE001 — annotation is fail-open
                         logger.warning(f"{parsed.awips}: obs fetch failed: {exc}")
-                _annotate_obs_context(priced, *obs_pair)
+                _annotate_obs_context(priced, *obs_pair, trend=obs_trend)
                 journal_entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += [p for p in priced if not p.get("suppressed")]

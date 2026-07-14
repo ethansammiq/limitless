@@ -158,6 +158,7 @@ def parse_cli_archive(blob: str, tz: str) -> dict[str, dict]:
         else:
             slot.setdefault("floor_max", p.max_f)
             slot.setdefault("floor_min", p.min_f)
+            slot.setdefault("floor_issued", issued)
     return dict(out)
 
 

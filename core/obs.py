@@ -42,6 +42,20 @@ NWS_OBS_URL = "https://api.weather.gov/stations/{sid}/observations?start={start}
 CORROBORATION_F = 1.0
 ROUNDING_BACKOFF_F = 0.1
 
+# Post-peak classification at floor-print time (peak_monitor's live
+# thresholds, reused so studies and alerts measure the same classifier).
+POST_PEAK_MIN_LAG_MIN = 45
+POST_PEAK_MIN_DROP_F = 1.5
+TREND_MIN_OBS = 6
+# Archive-measured P(final > floor) by trend class at floor print
+# (backtest/drift_conditioning.py, 2026-07-14, n=817 station-days across
+# 20 stations: post_peak 3.1% CI80[1.3,5.1], still_hot 8.6% CI80[6.5,10.8]
+# — separated under the registered ship rule). Frozen reference for alert
+# ANNOTATION only: drift_prob itself stays the unconditioned journal
+# distribution until the pivot gate answers (§4 — no threshold tuning).
+TREND_DRIFT_P = {"post_peak": 0.031, "still_hot": 0.086}
+TREND_DRIFT_N = {"post_peak": 327, "still_hot": 490}
+
 
 def certain_min_settle(runmax_f: float) -> int:
     """Lowest integer the CLI max can settle at, given the observed running max."""
@@ -87,8 +101,35 @@ def is_precise_celsius(celsius: float) -> bool:
     return abs(celsius - round(celsius)) > 1e-6
 
 
+def trend_class(series: list[tuple[datetime, float]],
+                at_utc: datetime) -> dict | None:
+    """post_peak vs still_hot at a moment, from the day's timed obs.
+
+    Peak time is the LAST occurrence of the running max — a station
+    plateauing at its high is still hot, not post-peak. None when the
+    obs are too thin to classify (fail open: no annotation, no claim).
+    The HOU 2026-07-10 drift_prob=1.0 miss (+4°F post-print) and the MSP
+    wall night were both still_hot stations; this is the conditioning
+    variable that separates them (drift_conditioning.py, n=817).
+    """
+    day = [(t, f) for t, f in series if t <= at_utc]
+    if len(day) < TREND_MIN_OBS:
+        return None
+    peak_f = max(f for _, f in day)
+    peak_time = max(t for t, f in day if f == peak_f)
+    lag_min = (at_utc - peak_time).total_seconds() / 60
+    drop_f = peak_f - day[-1][1]
+    post_peak = (lag_min >= POST_PEAK_MIN_LAG_MIN
+                 and drop_f >= POST_PEAK_MIN_DROP_F)
+    klass = "post_peak" if post_peak else "still_hot"
+    return {"klass": klass, "lag_min": round(lag_min),
+            "drop_f": round(drop_f, 1), "drift_p": TREND_DRIFT_P[klass],
+            "drift_n": TREND_DRIFT_N[klass]}
+
+
 def annotate_floor_buys(entries: list[dict], corroborated_max: float | None,
-                        raw_max: float | None) -> None:
+                        raw_max: float | None,
+                        trend: dict | None = None) -> None:
     """Stamp floor high-ladder buy findings with what the station ALREADY
     observed. Shared by both snipers (2026-07-13: the METAR path staged a
     day of warming-trap buttons because only cli_sniper had this).
@@ -108,6 +149,10 @@ def annotate_floor_buys(entries: list[dict], corroborated_max: float | None,
                 or e.get("ladder_kind") != "high"):
             continue
         e["obs_max_f"] = round(raw_max, 1)
+        if trend is not None:
+            e["obs_trend"] = trend["klass"]
+            e["trend_drift_p"] = trend["drift_p"]
+            e["trend_drift_n"] = trend["drift_n"]
         bounds = parse_subtitle(e.get("subtitle"))
         hi = bounds[1] if bounds else None
         if hi is None:
@@ -123,16 +168,30 @@ def annotate_floor_buys(entries: list[dict], corroborated_max: float | None,
                              f"verify before buying")
 
 
-def fetch_day_obs(station_id: str, tz: ZoneInfo, user_agent: str = "WeatherEdgeObs/1.0") -> list[float]:
-    """Precise valid temps (°F) for the station's current CLI climate day."""
+def fetch_day_obs_timed(station_id: str, tz: ZoneInfo,
+                        user_agent: str = "WeatherEdgeObs/1.0") -> list[tuple[datetime, float]]:
+    """(utc_time, precise °F) obs for the station's current CLI climate day,
+    oldest first — the timed series trend_class needs."""
     start = climate_day_start(tz).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = NWS_OBS_URL.format(sid=station_id, start=start)
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read())
-    temps = []
+    out = []
     for feat in payload.get("features", []):
-        val = (feat.get("properties", {}).get("temperature") or {}).get("value")
-        if val is not None and is_precise_celsius(val):
-            temps.append(val * 9 / 5 + 32)
-    return temps
+        props = feat.get("properties", {})
+        val = (props.get("temperature") or {}).get("value")
+        ts = props.get("timestamp")
+        if val is None or ts is None or not is_precise_celsius(val):
+            continue
+        try:
+            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        out.append((t.astimezone(timezone.utc), val * 9 / 5 + 32))
+    return sorted(out)
+
+
+def fetch_day_obs(station_id: str, tz: ZoneInfo, user_agent: str = "WeatherEdgeObs/1.0") -> list[float]:
+    """Precise valid temps (°F) for the station's current CLI climate day."""
+    return [f for _, f in fetch_day_obs_timed(station_id, tz, user_agent)]

@@ -53,7 +53,8 @@ from core import metar  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.fees import kalshi_taker_fee_cents  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
-from core.obs import annotate_floor_buys, corroborated_extreme, fetch_day_obs  # noqa: E402
+from core.obs import (  # noqa: E402
+    annotate_floor_buys, corroborated_extreme, fetch_day_obs_timed, trend_class)
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_station  # noqa: E402
@@ -384,7 +385,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
     cli_entries = _recent_journal_entries(now_utc)
     await client.start()
     try:
-        obs_cache: dict[str, tuple[float | None, float | None]] = {}
+        obs_cache: dict[str, tuple[float | None, float | None, dict | None]] = {}
         for extreme in extremes:
             key = _seen_key(extreme)
             entry = {"ts": now_utc.isoformat(timespec="seconds"),
@@ -419,15 +420,20 @@ async def run(dry_run: bool, replay: str | None) -> None:
                                 and p.get("ladder_kind") == "high"
                                 and not p.get("suppressed") for p in priced)):
                     try:
-                        temps = await asyncio.to_thread(
-                            fetch_day_obs, extreme.station, ZoneInfo(ladder.tz))
+                        timed = await asyncio.to_thread(
+                            fetch_day_obs_timed, extreme.station,
+                            ZoneInfo(ladder.tz))
+                        temps = [f for _, f in timed]
                         obs_cache[extreme.station] = (
                             corroborated_extreme(temps, "high"),
-                            max(temps) if temps else None)
+                            max(temps) if temps else None,
+                            trend_class(timed, now_utc))
                     except Exception as exc:  # noqa: BLE001 — fail-open
                         logger.warning(f"{extreme.station}: obs fetch failed: {exc}")
-                        obs_cache[extreme.station] = (None, None)
-                annotate_floor_buys(priced, *obs_cache.get(extreme.station, (None, None)))
+                        obs_cache[extreme.station] = (None, None, None)
+                cmax, rmax, trend = obs_cache.get(extreme.station,
+                                                  (None, None, None))
+                annotate_floor_buys(priced, cmax, rmax, trend=trend)
                 entry["findings"] += [
                     {k: v for k, v in f.items() if k != "cmd"} for f in priced]
                 opportunities += [p for p in priced if not p.get("suppressed")]

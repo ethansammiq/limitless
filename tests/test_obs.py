@@ -84,3 +84,80 @@ class TestPreciseCelsius:
     def test_tenth_celsius_accepted(self):
         assert obs.is_precise_celsius(24.4)       # 11:53Z METAR 75.9°F
         assert obs.is_precise_celsius(23.9)
+
+
+class TestTrendClass:
+    def _series(self, *pairs):
+        from datetime import datetime, timezone
+        return [(datetime(2026, 7, 14, h, m, tzinfo=timezone.utc), f)
+                for h, m, f in pairs]
+
+    AT = None  # set per-test
+
+    def test_post_peak(self):
+        from datetime import datetime, timezone
+        from core.obs import trend_class
+        s = self._series((15, 53, 88.0), (16, 53, 90.1), (17, 53, 90.1),
+                         (18, 53, 89.2), (19, 53, 88.3), (20, 53, 87.4))
+        at = datetime(2026, 7, 14, 21, 40, tzinfo=timezone.utc)
+        t = trend_class(s, at)
+        # peak = LAST occurrence of 90.1 (17:53); lag 227 min, drop 2.7°F
+        assert t["klass"] == "post_peak"
+        assert t["lag_min"] == 227 and t["drop_f"] == 2.7
+        assert t["drift_p"] == 0.031 and t["drift_n"] == 327
+
+    def test_plateau_is_still_hot(self):
+        from datetime import datetime, timezone
+        from core.obs import trend_class
+        s = self._series((15, 53, 88.0), (16, 53, 90.1), (17, 53, 90.1),
+                         (18, 53, 90.1), (19, 53, 90.1), (20, 53, 90.1))
+        at = datetime(2026, 7, 14, 21, 40, tzinfo=timezone.utc)
+        t = trend_class(s, at)
+        assert t["klass"] == "still_hot"    # sitting ON the max: no drop
+
+    def test_recent_peak_is_still_hot(self):
+        from datetime import datetime, timezone
+        from core.obs import trend_class
+        s = self._series((15, 53, 86.0), (16, 53, 87.0), (17, 53, 88.0),
+                         (18, 53, 89.0), (19, 53, 90.0), (21, 20, 90.5))
+        at = datetime(2026, 7, 14, 21, 40, tzinfo=timezone.utc)
+        assert trend_class(s, at)["klass"] == "still_hot"   # peak 20 min ago
+
+    def test_thin_obs_none(self):
+        from datetime import datetime, timezone
+        from core.obs import trend_class
+        s = self._series((19, 53, 88.3), (20, 53, 87.4))
+        at = datetime(2026, 7, 14, 21, 40, tzinfo=timezone.utc)
+        assert trend_class(s, at) is None
+
+    def test_future_obs_excluded(self):
+        from datetime import datetime, timezone
+        from core.obs import trend_class
+        s = self._series((15, 53, 88.0), (16, 53, 90.1), (17, 53, 89.0),
+                         (18, 53, 88.5), (19, 53, 88.0), (20, 53, 87.5),
+                         (22, 53, 95.0))   # after the print — invisible
+        at = datetime(2026, 7, 14, 21, 40, tzinfo=timezone.utc)
+        assert trend_class(s, at)["klass"] == "post_peak"
+
+
+class TestAnnotateTrend:
+    def test_trend_stamped_on_floor_high_buys_only(self):
+        from core.obs import annotate_floor_buys
+        entries = [
+            {"kind": "buy_winner", "final": False, "ladder_kind": "high",
+             "subtitle": "88° to 89°"},
+            {"kind": "sell_dead", "final": False, "ladder_kind": "high"},
+        ]
+        trend = {"klass": "still_hot", "lag_min": 10, "drop_f": 0.2,
+                 "drift_p": 0.086, "drift_n": 490}
+        annotate_floor_buys(entries, 88.0, 88.2, trend=trend)
+        assert entries[0]["obs_trend"] == "still_hot"
+        assert entries[0]["trend_drift_p"] == 0.086
+        assert "obs_trend" not in entries[1]
+
+    def test_no_trend_no_stamp(self):
+        from core.obs import annotate_floor_buys
+        entries = [{"kind": "buy_winner", "final": False,
+                    "ladder_kind": "high", "subtitle": "88° to 89°"}]
+        annotate_floor_buys(entries, 88.0, 88.2, trend=None)
+        assert "obs_trend" not in entries[0]
