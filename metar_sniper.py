@@ -473,11 +473,21 @@ async def run(dry_run: bool, replay: str | None) -> None:
 
     if fresh:
         title, body = format_alert(fresh)
+        # Phone-push (@mention) only when something is actually takeable —
+        # trap-stamped or suppressed findings stay silent embeds. cli_bust
+        # pings too: it's an exit-now signal on an open position.
+        actionable = any(
+            o["kind"] == "cli_bust"
+            or (o["kind"] in ("buy_winner", "sell_dead")
+                and not (o.get("suppressed") or o.get("obs_kill")
+                         or o.get("obs_warn") or o.get("wall_ask")))
+            for o in fresh)
         try:
             from notifications import send_discord_alert
 
             await send_discord_alert(title=title, description=body[:4096],
-                                     color=0x3498DB, context="metar_sniper")
+                                     color=0x3498DB, context="metar_sniper",
+                                     mention=actionable)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"discord alert failed: {exc}")
         try:

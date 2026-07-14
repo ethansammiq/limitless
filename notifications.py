@@ -44,6 +44,20 @@ def _get_discord_webhook() -> str:
     """
     return os.getenv("DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK") or ""
 
+
+def _mention_fields() -> tuple[str, dict] | None:
+    """(content, allowed_mentions) for actionable alerts, or None.
+
+    Discord mobile only pushes reliably on @mentions (server channels
+    default to "Only @mentions"), so embeds-only money alerts never reach
+    a phone. DISCORD_MENTION_USER_IDS (comma-separated) opts users in;
+    allowed_mentions is explicit so nothing else in the text can ping."""
+    ids = [u.strip() for u in
+           os.getenv("DISCORD_MENTION_USER_IDS", "").split(",") if u.strip()]
+    if not ids:
+        return None
+    return " ".join(f"<@{u}>" for u in ids), {"parse": [], "users": ids}
+
 # Retry config — backoff must outlast the transient DNS failures the Mac
 # hits right after wake ("Cannot connect to host discord.com:443 nodename
 # nor servname"), which can persist for a minute or more.
@@ -250,13 +264,15 @@ async def send_discord_alert(
     color: int = 0xFF6600,
     context: str = "",
     ledger: str | None = None,
+    mention: bool = False,
 ):
     """
     Send a single Discord embed alert with retry and fallback.
 
     `ledger` ("paper"|"live") tags the title so simulation noise can never
     be mistaken for real money; contexts with an unambiguous ledger are
-    tagged automatically.
+    tagged automatically. `mention` pings DISCORD_MENTION_USER_IDS — reserve
+    it for actionable money alerts, or phone pushes become noise.
     """
     embed = {
         "title": tag_title(title, context, ledger),
@@ -266,13 +282,14 @@ async def send_discord_alert(
         # Using ET here caused Discord to display incorrect times.
         "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
     }
-    await send_discord_embeds([embed], context=context)
+    await send_discord_embeds([embed], context=context, mention=mention)
 
 
 async def send_discord_embeds(
     embeds: list[dict],
     dry_run: bool = False,
     context: str = "",
+    mention: bool = False,
 ):
     """
     Send multiple Discord embeds with chunking, retry, and fallback.
@@ -304,8 +321,11 @@ async def send_discord_embeds(
     any_success = False
 
     async with aiohttp.ClientSession() as session:
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             payload = {"embeds": chunk}
+            if mention and i == 0 and (mf := _mention_fields()):
+                # First chunk only — a chunked alert must not ping N times.
+                payload["content"], payload["allowed_mentions"] = mf
             success = await _post_with_retry(session, webhook_url, payload)
 
             if success:

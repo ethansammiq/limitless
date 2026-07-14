@@ -210,6 +210,28 @@ class TestFormatAlert:
         assert "🚫" in body and "bracket dead" in body
         assert "🧱" in body and "never fade" in body
 
+    def test_wall_suppresses_the_ev_line(self):
+        # MIN T94 2026-07-14: "EV +87¢" printed beside "never fade" — the
+        # wall invalidates the drift base rate, so the stats are withheld.
+        opps = [{"kind": "buy_winner", "ticker": "KXHIGHTMIN-26JUL14-T94",
+                 "subtitle": "93° or below", "printed": 93, "final": False,
+                 "ladder_kind": "high", "ask": 1, "ask_depth": 47723.0,
+                 "wall_ask": True, "drift_prob": 0.89, "drift_n": 184,
+                 "drift_ev_c": 87.0,
+                 "cmd": ".venv/bin/python scripts/take.py KXHIGHTMIN-26JUL14-T94 buy yes 47723 1"}]
+        _, body = cs.format_alert(opps)
+        assert "🧱" in body and "never fade" in body
+        assert "EV" not in body and "drift 89%" not in body
+
+    def test_unwalled_alert_keeps_the_ev_line(self):
+        opps = [{"kind": "buy_winner", "ticker": "T", "subtitle": "81° or below",
+                 "printed": 80, "final": False, "ladder_kind": "high",
+                 "ask": 34, "ask_depth": 9.0, "drift_prob": 0.98,
+                 "drift_n": 184, "drift_ev_c": 62.0,
+                 "cmd": ".venv/bin/python scripts/take.py T buy yes 9 34"}]
+        _, body = cs.format_alert(opps)
+        assert "drift 98% win" in body and "EV +62¢" in body
+
     def test_safe_obs_renders_inline(self):
         opps = [{"kind": "buy_winner", "ticker": "T", "subtitle": "90° or below",
                  "printed": 90, "final": False, "ladder_kind": "high",

@@ -273,3 +273,58 @@ class TestLedgerTags:
     def test_idempotent(self):
         once = notifications.tag_title("t", ledger="paper")
         assert notifications.tag_title(once, ledger="paper") == once
+
+
+class TestMentions:
+    """Phone-push mentions (2026-07-14: two windows of buttons expired
+    unseen because bot embeds never push on Discord mobile defaults)."""
+
+    @pytest.fixture(autouse=True)
+    def _webhook(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.test/webhook")
+
+    def test_mention_adds_content_and_allowlist(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_MENTION_USER_IDS", "111, 222")
+        session = FakeSession()
+        monkeypatch.setattr(notifications.aiohttp, "ClientSession", lambda: session)
+
+        asyncio.run(send_discord_embeds([{"title": "Opp"}], mention=True))
+
+        payload = session.posts[0]["payload"]
+        assert payload["content"] == "<@111> <@222>"
+        assert payload["allowed_mentions"] == {"parse": [], "users": ["111", "222"]}
+
+    def test_mention_without_env_is_silent(self, monkeypatch):
+        monkeypatch.delenv("DISCORD_MENTION_USER_IDS", raising=False)
+        session = FakeSession()
+        monkeypatch.setattr(notifications.aiohttp, "ClientSession", lambda: session)
+
+        asyncio.run(send_discord_embeds([{"title": "Opp"}], mention=True))
+
+        assert "content" not in session.posts[0]["payload"]
+
+    def test_default_send_never_mentions(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_MENTION_USER_IDS", "111")
+        session = FakeSession()
+        monkeypatch.setattr(notifications.aiohttp, "ClientSession", lambda: session)
+
+        asyncio.run(send_discord_embeds([{"title": "Digest"}]))
+
+        assert "content" not in session.posts[0]["payload"]
+
+    def test_only_first_chunk_pings(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_MENTION_USER_IDS", "111")
+        session = FakeSession()
+        monkeypatch.setattr(notifications.aiohttp, "ClientSession", lambda: session)
+        monkeypatch.setattr(notifications.asyncio, "sleep", _noop_sleep)
+
+        many = [{"title": f"e{i}"} for i in range(11)]  # > one chunk
+        asyncio.run(send_discord_embeds(many, mention=True))
+
+        assert len(session.posts) >= 2
+        assert "content" in session.posts[0]["payload"]
+        assert all("content" not in p["payload"] for p in session.posts[1:])
+
+
+async def _noop_sleep(_seconds):
+    return None

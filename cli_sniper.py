@@ -451,7 +451,10 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
                 f"(85/85 archive) — revision side likely wins")
         elif o["kind"] == "buy_winner":
             econ = ""
-            if "drift_prob" in o:
+            # A wall invalidates the drift base rate (walls 5-0 vs floor
+            # signals) — printing "EV +87¢" next to "never fade" is a
+            # temptation dispenser (MIN T94, 2026-07-14).
+            if "drift_prob" in o and not o.get("wall_ask"):
                 econ = (f" | drift {o['drift_prob']:.0%} win "
                         f"(n={o['drift_n']}), EV {o['drift_ev_c']:+.0f}¢")
             if o.get("obs_kill"):
@@ -657,11 +660,20 @@ async def run(dry_run: bool, replay: str | None) -> None:
 
     if fresh:
         title, body = format_alert(fresh)
+        # Phone-push (@mention) only when something is actually takeable —
+        # trap-stamped or suppressed findings stay silent embeds.
+        actionable = any(
+            o["kind"] == "correction_notice"
+            or (o["kind"] in ("buy_winner", "sell_dead")
+                and not (o.get("suppressed") or o.get("obs_kill")
+                         or o.get("obs_warn") or o.get("wall_ask")))
+            for o in fresh)
         try:
             from notifications import send_discord_alert
 
             await send_discord_alert(title=title, description=body[:4096],
-                                     color=0x2ECC71, context="cli_sniper")
+                                     color=0x2ECC71, context="cli_sniper",
+                                     mention=actionable)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"discord alert failed: {exc}")
         try:

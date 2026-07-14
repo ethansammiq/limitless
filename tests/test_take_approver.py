@@ -300,3 +300,29 @@ class TestRunAutoIntegration:
         self.tq.update_entries({eid: {"status": "posted", "message_id": "m2"}})
         _asyncio.run(take_approver.run(dry_run=False))
         assert self.tq.load_queue()["entries"][eid]["status"] == "posted"
+
+
+class TestPostPromptMentions:
+    """The button must @mention approvers — Discord mobile only pushes on
+    mentions, and an unseen button is an expired button (2026-07-14)."""
+
+    def test_post_mentions_every_approver_and_allowlists_them(self, monkeypatch):
+        import asyncio
+
+        import take_approver as ta
+
+        calls = []
+
+        async def fake_discord(session, method, path, token, json_body=None):
+            calls.append({"method": method, "path": path, "body": json_body})
+            return {"id": "m1"}
+
+        monkeypatch.setattr(ta, "_discord", fake_discord)
+        cfg = {"token": "t", "channel": "c", "approvers": {"222", "111"}}
+        mid = asyncio.run(ta.post_prompt(None, cfg, _entry(), TTL))
+
+        assert mid == "m1"
+        body = calls[0]["body"]
+        assert body["content"].startswith("<@111> <@222>")
+        assert "TAKE?" in body["content"]
+        assert body["allowed_mentions"] == {"parse": [], "users": ["111", "222"]}

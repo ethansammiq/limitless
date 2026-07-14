@@ -161,6 +161,12 @@ information, not an excuse to tune (same rule as every other gate here).
   NO --delete: files deleted from git must be removed server-side by hand.
 - Discord alerts are ledger-tagged: 💰 REAL (live account surfaces) vs 🧪 SIM.
   System alerts (watchdog/digest/audit) stay untagged.
+- Phone pushes (2026-07-14): Discord mobile only pushes on @mentions, so
+  take buttons mention the approver allow-list and sniper alerts mention
+  `DISCORD_MENTION_USER_IDS` — but ONLY when a finding is actually takeable
+  (unsuppressed, no obs_kill/obs_warn/wall) or an exit signal
+  (correction/cli_bust). Walled alerts also suppress the drift-EV line —
+  the wall invalidates the base rate (MIN T94 "EV +87¢" temptation, walls 6-0).
 - `watchdog.py` (systemd */15) checks heartbeats vs EXPECTED_INTERVALS and
   respawns missed backtest_collector runs.
 - Dashboard: localhost:8787 on the VPS (ssh tunnel); public sanitized stats

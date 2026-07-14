@@ -256,8 +256,15 @@ async def _discord(session, method: str, path: str, token: str,
 
 
 async def post_prompt(session, cfg: dict, entry: dict, ttl_min: int) -> str | None:
+    # @mention the approvers: Discord mobile only pushes on mentions by
+    # default, and a button nobody's phone buzzes for expires unseen
+    # (2026-07-14: two full windows of buttons died untapped that way).
+    approvers = sorted(cfg["approvers"])
+    mentions = " ".join(f"<@{u}>" for u in approvers)
     msg = await _discord(session, "POST", f"/channels/{cfg['channel']}/messages",
-                         cfg["token"], {"content": format_prompt(entry, ttl_min)})
+                         cfg["token"],
+                         {"content": f"{mentions} {format_prompt(entry, ttl_min)}",
+                          "allowed_mentions": {"parse": [], "users": approvers}})
     if not msg or "id" not in msg:
         return None
     # Self-react so approval is a single tap on an existing reaction.
