@@ -403,12 +403,12 @@ async def main_async(days: int | None, report: str,
         except Exception as exc:  # noqa: BLE001
             print(f"discord send failed: {exc}", file=sys.stderr)
     print(text)
-    if journal == "cli":   # the watchdog's weekly service is the CLI run
-        try:
-            from heartbeat import write_heartbeat
-            write_heartbeat("sniper_scorecard")
-        except Exception:  # noqa: BLE001 — heartbeat must never block the report
-            pass
+    try:
+        from heartbeat import write_heartbeat
+        write_heartbeat("sniper_scorecard" if journal == "cli"
+                        else "metar_scorecard")
+    except Exception:  # noqa: BLE001 — heartbeat must never block the report
+        pass
 
 
 def main() -> None:

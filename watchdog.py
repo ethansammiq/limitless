@@ -50,6 +50,7 @@ EXPECTED_INTERVALS = {
     "metar_sniper": 1,          # Runs every 5 min (beats even out of window). Allow 1h.
     "take_approver": 0.5,       # Runs every 1 min (beats even unconfigured/idle). Allow 30 min.
     "sniper_scorecard": 192,    # Runs Sundays 17:45 (before the digest). Allow 8 days.
+    "metar_scorecard": 192,     # Runs Sundays 17:40 (verdict feeds the digest). Allow 8 days.
     "audit_coverage": 192,      # Runs Sundays 17:30. Allow 8 days.
     "wall_fingerprint": 192,    # Runs Sundays 17:15 (wall win rates). Allow 8 days.
     "export_public_stats": 2,   # Runs every 30 min (website snapshot). Allow 2h.
