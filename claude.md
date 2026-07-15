@@ -191,6 +191,7 @@ information, not an excuse to tune (same rule as every other gate here).
 | `market_timeseries.py` | Intraday orderbook snapshots + shared ticker-date parsing (ad-hoc) |
 | `backtest/poly_gate_analyzer.py` | Poly go/no-go verdict from shadow books (ad-hoc) |
 | `backtest/sniper_scorecard.py` | Joins sniper journal → Kalshi settlement: does the alert win, by how much (cron Sun 17:45) |
+| `trade_autopsy.py` | Reconstructs ONE real position (fills → settlement → the sniper alert that flagged it) into a how/why-it-won writeup — the win-side mirror of `postmortem_2026-01-20.md` (ad-hoc) |
 | `backtest/cli_timing.py` | Learns real per-office CLI issuance windows from the journal (ad-hoc) |
 | `backtest/alert_decay.py` | Edge half-life + reaction budget (min ≤ cap post-alert) via 1-min candles — the daemon go/no-go evidence (ad-hoc) |
 | `scripts/take.py` | The ONLY order-placing entry point — human-run; alerts print the exact command |
