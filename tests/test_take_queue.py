@@ -159,7 +159,7 @@ class TestEnqueue:
         take_queue.enqueue_findings(
             [_finding(ticker="T2",
                       cmd=".venv/bin/python scripts/take.py T2 buy yes 5 10")],
-            "metar_sniper", NOW + timedelta(minutes=1))
+            "cli_sniper", NOW + timedelta(minutes=1))
         take_queue.update_entries({eid: {"status": "posted", "message_id": "m1"}})
         q = take_queue.load_queue()
         assert len(q["entries"]) == 2
@@ -187,3 +187,88 @@ class TestExpiry:
         assert take_queue.is_expired(e, NOW + timedelta(minutes=16), 15)
         assert take_queue.is_expired({}, NOW, 15)
         assert take_queue.is_expired({"ts": "not-a-time"}, NOW, 15)
+
+
+class TestStageableClass:
+    """Buttons only from ≥95% classes — the raw feed grades 52%, the
+    selected book is the edge (scorecard 2026-07-14)."""
+
+    def test_cli_floor_at_bottom_stages(self):
+        f = _finding(drift_prob=0.98, ask=34)
+        assert take_queue.stageable_class(f, "cli_sniper") is True
+
+    def test_cli_floor_at_top_above_entry_cap_is_alert_only(self):
+        # the 2026-07-14 NYC T90: 64¢ at drift .886 — 34% of bankroll
+        f = _finding(drift_prob=0.886, ask=64)
+        assert take_queue.stageable_class(f, "cli_sniper") is False
+        assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
+
+    def test_cli_cheap_floor_at_top_stays_legal(self):
+        f = _finding(drift_prob=0.886, ask=18)
+        assert take_queue.stageable_class(f, "cli_sniper") is True
+
+    def test_metar_00z_anchor_stages_and_midday_does_not(self):
+        base = dict(_finding(), ladder_kind="high")
+        assert take_queue.stageable_class(
+            dict(base, synoptic_anchor_utc=0), "metar_sniper") is True
+        # a full day of 2026-07-14 morning/afternoon buttons graded as traps
+        assert take_queue.stageable_class(
+            dict(base, synoptic_anchor_utc=18), "metar_sniper") is False
+        assert take_queue.stageable_class(base, "metar_sniper") is False
+
+    def test_sell_dead_always_stages(self):
+        f = _finding(kind="sell_dead")
+        assert take_queue.stageable_class(f, "metar_sniper") is True
+        assert take_queue.stageable_class(f, "cli_sniper") is True
+
+
+class TestNightCap:
+    """Per-station-night exposure cap: same-night brackets are one
+    correlated bet — sizing, not winrate, is where ruin lives."""
+
+    def _f(self, ticker, count, price, **over):
+        return _finding(ticker=ticker, ask=price,
+                        cmd=f".venv/bin/python scripts/take.py {ticker} buy yes {count} {price}",
+                        **over)
+
+    def test_second_bracket_same_night_gets_trimmed(self, monkeypatch):
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "5")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-B89.5", 40, 10)], "cli_sniper", NOW)
+        by_ticker = {e["ticker"]: e for e in
+                     take_queue.load_queue()["entries"].values()}
+        assert by_ticker["KXHIGHNY-26JUL14-T90"]["count"] == 20
+        trimmed = by_ticker["KXHIGHNY-26JUL14-B89.5"]["count"]
+        assert 1 <= trimmed < 40  # clamped into the remaining night budget
+
+    def test_exhausted_night_refuses_to_stage(self, monkeypatch):
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-B89.5", 40, 99)], "cli_sniper", NOW) == 0
+
+    def test_other_station_night_unaffected(self, monkeypatch):
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "5")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", NOW) == 1
+        chi = [e for e in take_queue.load_queue()["entries"].values()
+               if e["ticker"].startswith("KXHIGHCHI")][0]
+        assert chi["count"] == 20  # full size — separate budget
+
+    def test_repriced_entry_releases_its_budget(self, monkeypatch):
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "5")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        eid = next(iter(take_queue.load_queue()["entries"]))
+        take_queue.update_entries({eid: {"status": "repriced"}}, NOW)
+        later = NOW + timedelta(hours=1)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-B89.5", 20, 18)], "cli_sniper", later) == 1
+        b = [e for e in take_queue.load_queue()["entries"].values()
+             if e["ticker"].endswith("B89.5")][0]
+        assert b["count"] == 20  # full budget back

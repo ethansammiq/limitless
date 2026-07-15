@@ -36,6 +36,8 @@ QUEUE_LOCK = PROJECT_ROOT / ".take_queue.lock"
 
 DEFAULT_TTL_MIN = 15
 DEFAULT_MAX_NOTIONAL = 50.0      # mirrors scripts/take.py's cap
+DEFAULT_NIGHT_CAP = 25.0         # $ per station-night ≈ 15% of the 07-2026 bankroll
+MAX_STAGE_ASK_C = 20             # the 2026-07-11 standing entry cap
 PRUNE_TERMINAL_AFTER_H = 48
 
 # Entry lifecycle. "executing" is the crash-safe marker persisted BEFORE the
@@ -65,6 +67,28 @@ def is_auto_eligible(finding: dict, source: str) -> bool:
             and finding.get("synoptic_anchor_utc") == AUTO_ANCHOR_UTC)
 
 
+def stageable_class(finding: dict, source: str) -> bool:
+    """Only classes with ≥95% measured base rates get a button; everything
+    else stays alert-only. The raw feed grades 52% (scorecard 2026-07-14)
+    — SELECTION is the edge, and it must be mechanical, not discipline:
+      - sell_dead: obs-certain by construction
+      - CLI floor buys: floor-at-bottom drift class (≥.95), or within the
+        20¢ standing entry cap (cheap asymmetric floor-at-top stays legal)
+      - METAR buys: the 00Z anchor only (day-max == final 98.4%) — the
+        11:53/17:53 groups are forecasts, not settlements (the 18Z batch
+        graded 1-for-5 on 2026-07-13; a full day of 7/14 morning buttons
+        graded as warming traps)
+    """
+    if finding.get("kind") == "sell_dead":
+        return True
+    if source == "metar_sniper":
+        return is_auto_eligible(finding, source)
+    if finding.get("drift_prob", 0.0) >= 0.95:
+        return True
+    ask = finding.get("ask")
+    return ask is not None and ask <= MAX_STAGE_ASK_C
+
+
 def ttl_minutes() -> int:
     try:
         return int(os.getenv("TAKE_APPROVE_TTL_MIN", DEFAULT_TTL_MIN))
@@ -77,6 +101,35 @@ def max_notional() -> float:
         return float(os.getenv("TAKE_MAX_NOTIONAL", DEFAULT_MAX_NOTIONAL))
     except ValueError:
         return DEFAULT_MAX_NOTIONAL
+
+
+def night_cap_dollars() -> float:
+    try:
+        return float(os.getenv("TAKE_NIGHT_CAP_DOLLARS", DEFAULT_NIGHT_CAP))
+    except ValueError:
+        return DEFAULT_NIGHT_CAP
+
+
+def event_key(ticker: str) -> str:
+    """KXHIGHNY-26JUL14-T90 → KXHIGHNY-26JUL14 — the station-night, i.e.
+    the cluster-bootstrap unit: same-night brackets are ONE correlated bet.
+    (High and low ladders of a city are separate events and count
+    separately — a v1 simplification, documented not accidental.)"""
+    return ticker.rsplit("-", 1)[0]
+
+
+# Statuses that hold or have spent money against the night budget. Expired,
+# repriced and failed entries release theirs.
+NIGHT_LEDGER_STATUSES = ("pending", "posted", "executing", "executed")
+
+
+def night_spent_dollars(entries: dict, ticker: str) -> float:
+    """Worst-case dollars already committed to this ticker's station-night."""
+    key = event_key(ticker)
+    return sum(order_cost_dollars(e["action"], e["side"], e["count"], e["price_c"])
+               for e in entries.values()
+               if e.get("ticker") and event_key(e["ticker"]) == key
+               and e.get("status") in NIGHT_LEDGER_STATUSES)
 
 
 def parse_take_cmd(cmd: str) -> dict | None:
@@ -164,6 +217,8 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
             or finding.get("obs_kill") or finding.get("obs_warn")
             or finding.get("wall_ask")):
         return None
+    if not stageable_class(finding, source):
+        return None
     parsed = parse_take_cmd(finding.get("cmd", ""))
     if parsed is None:
         return None
@@ -208,6 +263,22 @@ def enqueue_findings(findings: list[dict], source: str,
         for entry in staged:
             if entry["ticker"] in active_tickers:
                 continue
+            # Per-station-night exposure cap: same-night brackets are one
+            # correlated bet — three max-size losses on one bankroll is the
+            # ruin path, not the 52%-vs-98% winrate spread (2026-07-14: a
+            # single button offered 34% of the bankroll).
+            night_left = night_cap_dollars() - night_spent_dollars(
+                entries, entry["ticker"])
+            capped = clamp_count(entry["action"], entry["side"],
+                                 entry["count"], entry["price_c"], night_left)
+            if capped < 1:
+                logger.info(f"{entry['ticker']}: station-night cap "
+                            f"(${night_cap_dollars():.0f}) reached — not staged")
+                continue
+            if capped < entry["count"]:
+                logger.info(f"{entry['ticker']}: night cap trims "
+                            f"{entry['count']}→{capped}")
+                entry["count"] = capped
             entries[entry["id"]] = entry
             active_tickers.add(entry["ticker"])
             added += 1

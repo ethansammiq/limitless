@@ -292,10 +292,10 @@ class TestRunAutoIntegration:
                             lambda e: (_ for _ in ()).throw(
                                 AssertionError("order fired without a tap")))
         finding = {"kind": "buy_winner", "ticker": "T2", "subtitle": "89-90°",
-                   "printed": 90, "ladder_kind": "high",
+                   "printed": 90, "ladder_kind": "high", "ask": 18,
                    "synoptic_anchor_utc": 18,   # PM anchor: warming risk
                    "cmd": ".venv/bin/python scripts/take.py T2 buy yes 23 18"}
-        assert self.tq.enqueue_findings([finding], "metar_sniper") == 1
+        assert self.tq.enqueue_findings([finding], "cli_sniper") == 1
         eid = next(iter(self.tq.load_queue()["entries"]))
         self.tq.update_entries({eid: {"status": "posted", "message_id": "m2"}})
         _asyncio.run(take_approver.run(dry_run=False))
@@ -353,7 +353,7 @@ class TestPostNewEntries:
 
     def _stage(self):
         finding = {"kind": "buy_winner", "ticker": "T1", "subtitle": "89-90°",
-                   "printed": 90, "ladder_kind": "high",
+                   "printed": 90, "ladder_kind": "high", "ask": 18,
                    "cmd": ".venv/bin/python scripts/take.py T1 buy yes 23 18"}
         assert self.tq.enqueue_findings([finding], "cli_sniper") == 1
 
@@ -417,7 +417,7 @@ class TestRunActivitySignal:
         import asyncio as _asyncio
 
         finding = {"kind": "buy_winner", "ticker": "T1", "subtitle": "89-90°",
-                   "printed": 90, "ladder_kind": "high",
+                   "printed": 90, "ladder_kind": "high", "ask": 18,
                    "cmd": ".venv/bin/python scripts/take.py T1 buy yes 23 18"}
         self.tq.enqueue_findings([finding], "cli_sniper")
         eid = next(iter(self.tq.load_queue()["entries"]))
