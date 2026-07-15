@@ -326,3 +326,114 @@ class TestPostPromptMentions:
         assert body["content"].startswith("<@111> <@222>")
         assert "TAKE?" in body["content"]
         assert body["allowed_mentions"] == {"parse": [], "users": ["111", "222"]}
+
+
+class TestPostNewEntries:
+    """Stage-time posting (2026-07-14: the DC race repriced inside the
+    0-60s cron-boundary wait between staging and posting)."""
+
+    @pytest.fixture(autouse=True)
+    def _rig(self, tmp_path, monkeypatch):
+        from core import take_queue
+
+        monkeypatch.setattr(take_queue, "QUEUE_FILE", tmp_path / "q.json")
+        monkeypatch.setattr(take_queue, "QUEUE_LOCK", tmp_path / ".q.lock")
+        monkeypatch.setattr(take_approver, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("DISCORD_TAKE_CHANNEL_ID", "42")
+        monkeypatch.setenv("DISCORD_TAKE_APPROVER_IDS", "111")
+        self.posted = []
+
+        async def _post(session, cfg, entry, ttl):
+            self.posted.append(entry["ticker"])
+            return f"m{len(self.posted)}"
+
+        monkeypatch.setattr(take_approver, "post_prompt", _post)
+        self.tq = take_queue
+
+    def _stage(self):
+        finding = {"kind": "buy_winner", "ticker": "T1", "subtitle": "89-90°",
+                   "printed": 90, "ladder_kind": "high",
+                   "cmd": ".venv/bin/python scripts/take.py T1 buy yes 23 18"}
+        assert self.tq.enqueue_findings([finding], "cli_sniper") == 1
+
+    def test_posts_pending_entry_immediately(self):
+        import asyncio as _asyncio
+
+        self._stage()
+        assert _asyncio.run(take_approver.post_new_entries()) == 1
+        entry = next(iter(self.tq.load_queue()["entries"].values()))
+        assert entry["status"] == "posted"
+        assert entry["message_id"] == "m1"
+        assert self.posted == ["T1"]
+
+    def test_skips_while_approver_holds_the_lock(self):
+        import asyncio as _asyncio
+
+        self._stage()
+        held = take_approver.try_run_lock()
+        assert held is not None
+        try:
+            assert _asyncio.run(take_approver.post_new_entries()) == 0
+        finally:
+            held.close()
+        entry = next(iter(self.tq.load_queue()["entries"].values()))
+        assert entry["status"] == "pending"  # the cron instance will post it
+
+    def test_unconfigured_is_a_noop(self, monkeypatch):
+        import asyncio as _asyncio
+
+        monkeypatch.delenv("DISCORD_BOT_TOKEN")
+        self._stage()
+        assert _asyncio.run(take_approver.post_new_entries()) == 0
+
+
+class TestRunActivitySignal:
+    """run() tells main() whether to keep fast-polling this minute."""
+
+    @pytest.fixture(autouse=True)
+    def _rig(self, tmp_path, monkeypatch):
+        from core import take_queue
+
+        monkeypatch.setattr(take_queue, "QUEUE_FILE", tmp_path / "q.json")
+        monkeypatch.setattr(take_queue, "QUEUE_LOCK", tmp_path / ".q.lock")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("DISCORD_TAKE_CHANNEL_ID", "42")
+        monkeypatch.setenv("DISCORD_TAKE_APPROVER_IDS", "111")
+        monkeypatch.delenv("AUTO_TAKE_00Z", raising=False)
+
+        async def _no_reactors(session, cfg, mid):
+            return set()
+
+        monkeypatch.setattr(take_approver, "get_reactors", _no_reactors)
+        self.tq = take_queue
+
+    def test_empty_queue_reports_idle(self):
+        import asyncio as _asyncio
+
+        assert _asyncio.run(take_approver.run(dry_run=False)) is False
+
+    def test_untapped_posted_entry_keeps_polling(self):
+        import asyncio as _asyncio
+
+        finding = {"kind": "buy_winner", "ticker": "T1", "subtitle": "89-90°",
+                   "printed": 90, "ladder_kind": "high",
+                   "cmd": ".venv/bin/python scripts/take.py T1 buy yes 23 18"}
+        self.tq.enqueue_findings([finding], "cli_sniper")
+        eid = next(iter(self.tq.load_queue()["entries"]))
+        self.tq.update_entries({eid: {"status": "posted", "message_id": "m1"}})
+        assert _asyncio.run(take_approver.run(dry_run=False)) is True
+
+    def test_expiring_last_entry_reports_idle(self, monkeypatch):
+        import asyncio as _asyncio
+
+        async def _no_edit(session, cfg, mid, content):
+            return {}
+
+        monkeypatch.setattr(take_approver, "edit_message", _no_edit)
+        old = _entry(ts="2020-01-01T00:00:00+00:00")
+        self.tq.update_entries({old["id"]: old})
+        # update_entries only merges known ids — write directly instead
+        import json as _json
+        self.tq.QUEUE_FILE.write_text(_json.dumps({"entries": {old["id"]: old}}))
+        assert _asyncio.run(take_approver.run(dry_run=False)) is False

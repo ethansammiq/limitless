@@ -15,6 +15,13 @@ Per run (cron */1, one-shot — Principle 8: no resident daemon):
      re-checks the live book (buys: ask ≤ staged price; sells: bid ≥ staged
      price — else "repriced", no order), then runs take.py --ioc --yes and
      edits the message with the fill result
+While entries are active, the one-shot re-polls every POLL_INTERVAL_S
+inside its own minute (2026-07-14: three floor races were lost with taps
+landing inside 60s — the cron-boundary wait, not the human, was the
+latency). Still a cron one-shot: it exits the moment the queue is idle,
+and the run lock keeps ticks from overlapping. Snipers additionally call
+post_new_entries() right after staging, so the button (and its phone
+push) goes out at detection time instead of the next tick.
 Guardrails: allow-list only (DISCORD_TAKE_APPROVER_IDS), at-most-once (the
 "executing" status persists BEFORE the subprocess; a crash mid-order is
 surfaced, never retried), IOC only (automation never leaves resting
@@ -73,6 +80,10 @@ SHADOW_JOURNAL_DIR = PROJECT_ROOT / "logs" / "take_approver"
 DISCORD_API = "https://discord.com/api/v10"
 CHECK = "✅"  # ✅
 SUBPROCESS_TIMEOUT_S = 90
+# Tap→fire budget: keep polling reactions this long within one cron minute,
+# then exit before the next tick wants the lock.
+POLL_WINDOW_S = 45
+POLL_INTERVAL_S = 5
 
 AUTO_MAX_FIRES_PER_DAY = 3
 AUTO_DAILY_CAP_DOLLARS = 30.0
@@ -289,6 +300,61 @@ async def edit_message(session, cfg: dict, message_id: str, content: str) -> Non
                    cfg["token"], {"content": content[:1900]})
 
 
+def try_run_lock():
+    """The single-instance lock, non-blocking: an open fd (hold it until
+    done) or None if another instance is mid-run."""
+    import fcntl
+
+    fd = (PROJECT_ROOT / ".take_approver.lock").open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BlockingIOError:
+        fd.close()
+        return None
+
+
+async def post_new_entries() -> int:
+    """Post pending queue entries to Discord NOW — called by the snipers
+    right after staging so the button + phone push go out at detection
+    time, not up to 60s later at the next cron tick (2026-07-14: the DC
+    floor race repriced inside that gap). Returns buttons posted.
+
+    Takes the approver run lock non-blocking: if the cron instance holds
+    it, skip — it (or the next tick) posts the entry; never double-post."""
+    cfg = _config()
+    if cfg is None:
+        return 0
+    lock_fd = try_run_lock()
+    if lock_fd is None:
+        return 0
+    try:
+        import aiohttp
+
+        now_utc = datetime.now(timezone.utc)
+        ttl = take_queue.ttl_minutes()
+        queue = take_queue.load_queue()
+        pending = [e for e in queue["entries"].values()
+                   if e.get("status") == "pending"
+                   and not take_queue.is_expired(e, now_utc, ttl)]
+        if not pending:
+            return 0
+        mutations: dict[str, dict] = {}
+        async with aiohttp.ClientSession() as session:
+            for entry in sorted(pending, key=lambda e: e.get("ts", "")):
+                mid = await post_prompt(session, cfg, entry, ttl)
+                if mid:
+                    mutations[entry["id"]] = {
+                        "status": "posted", "message_id": mid,
+                        "posted_ts": now_utc.isoformat(timespec="seconds")}
+                    logger.info(f"{entry['ticker']}: TAKE? posted at stage time")
+        if mutations:
+            take_queue.update_entries(mutations, now_utc)
+        return len(mutations)
+    finally:
+        lock_fd.close()
+
+
 # --- live book re-check ------------------------------------------------------
 
 async def fetch_live_px(client, entry: dict) -> int | None:
@@ -305,12 +371,14 @@ async def fetch_live_px(client, entry: dict) -> int | None:
     return yes_bids[0][0] if yes_bids else None
 
 
-async def run(dry_run: bool) -> None:
+async def run(dry_run: bool, quiet_idle: bool = False) -> bool:
+    """One decision pass. Returns True while entries are still active —
+    the caller uses it to keep fast-polling inside the cron minute."""
     cfg = _config()
     if cfg is None:
         logger.info("take approver: not configured (DISCORD_BOT_TOKEN / "
                     "DISCORD_TAKE_CHANNEL_ID / DISCORD_TAKE_APPROVER_IDS) — idle")
-        return
+        return False
 
     import aiohttp
 
@@ -320,8 +388,9 @@ async def run(dry_run: bool) -> None:
     entries = [e for e in queue["entries"].values()
                if e.get("status") in take_queue.ACTIVE_STATUSES]
     if not entries:
-        logger.info("take approver: queue empty")
-        return
+        if not quiet_idle:
+            logger.info("take approver: queue empty")
+        return False
 
     mutations: dict[str, dict] = {}
     kalshi = None
@@ -451,6 +520,9 @@ async def run(dry_run: bool) -> None:
         await kalshi.stop()
     if mutations and not dry_run:
         take_queue.update_entries(mutations, now_utc)
+    # Anything unresolved this pass is worth another look in POLL_INTERVAL_S.
+    return any(mutations.get(e["id"], {}).get("status", e["status"])
+               in take_queue.ACTIVE_STATUSES for e in entries)
 
 
 def main() -> None:
@@ -464,15 +536,27 @@ def main() -> None:
     # Single-instance run lock (same overlap class as the snipers): a slow
     # Discord/Kalshi call must not overlap the next */1 tick — two instances
     # could both read "posted" before either persists "executing".
-    import fcntl
-    with (PROJECT_ROOT / ".take_approver.lock").open("w") as lock_fd:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            logger.info("take approver: previous run still active — skipping")
-            return
-        asyncio.run(run(args.dry_run))
+    import time
+
+    lock_fd = try_run_lock()
+    if lock_fd is None:
+        logger.info("take approver: previous run still active — skipping")
+        return
+    try:
+        # Fast-poll while entries are active so a tap fires in ≤POLL_INTERVAL_S
+        # instead of waiting for the next cron minute; exit as soon as the
+        # queue idles (one-shot semantics preserved).
+        deadline = time.monotonic() + POLL_WINDOW_S
+        first = True
+        while True:
+            active = asyncio.run(run(args.dry_run, quiet_idle=not first))
+            first = False
+            if args.dry_run or not active or time.monotonic() >= deadline:
+                break
+            time.sleep(POLL_INTERVAL_S)
         write_heartbeat("take_approver")
+    finally:
+        lock_fd.close()
 
 
 if __name__ == "__main__":

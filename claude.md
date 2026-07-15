@@ -17,6 +17,11 @@ a ✅ from an allow-listed user fires the EXACT staged take.py command — IOC
 only, notional-clamped, 15-min TTL, live-book re-check. Every order is still
 individually human-authorized; without DISCORD_BOT_TOKEN the queue is inert
 (keys documented in take_approver.py's docstring).
+Latency inside the pipeline (2026-07-14, after three <120s floor races lost
+to cron boundaries): snipers call `post_new_entries()` at stage time (button
++ push go out at detection), and the approver one-shot fast-polls reactions
+every 5s for up to 45s while entries are active — tap→fire is now ≤5s. Still
+cron one-shots under the run lock; exits when the queue idles.
 **Auto-take carve-out (2026-07-14, SHADOW — the one amendment to the Core
 Rule, pre-registered before any live fire):** the 00Z-anchor METAR
 high-ladder buy_winner class ONLY (all four 6-hr groups in; day-max == final

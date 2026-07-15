@@ -684,6 +684,11 @@ async def run(dry_run: bool, replay: str | None) -> None:
             if staged:
                 logger.info(f"take queue: staged {staged} command(s) "
                             f"for one-tap approve")
+                # Post the button NOW — the floor race reprices inside the
+                # 0-60s wait for the approver's next tick (2026-07-14 ×3).
+                from take_approver import post_new_entries
+
+                await post_new_entries()
         except Exception as exc:  # noqa: BLE001 — staging must not break alerting
             logger.warning(f"take queue enqueue failed: {exc}")
         for o in fresh:
