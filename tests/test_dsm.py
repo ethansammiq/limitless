@@ -159,3 +159,65 @@ class TestDateOrderUnambiguous:
         reports = dsm.parse_dsm_text(self.JUNE_14_DAILY)
         assert dsm.reports_for_date(reports, "2026-06-14")[0].max_f == 93
         assert dsm.reports_for_date(reports, "2026-12-06") == []  # MM/DD read
+
+
+class TestAfosGetter:
+    def test_afos_text_builds_the_shared_url(self, monkeypatch):
+        seen = {}
+
+        def fake_get(url, timeout):
+            seen["url"], seen["timeout"] = url, timeout
+            return "blob"
+        monkeypatch.setattr(dsm, "_get", fake_get)
+        assert dsm.afos_text("CLIBOS", limit=5, timeout=11) == "blob"
+        assert "pil=CLIBOS" in seen["url"] and "limit=5" in seen["url"]
+        assert seen["timeout"] == 11
+
+    def test_429_backs_off_once_then_succeeds(self, monkeypatch):
+        import io
+        import urllib.error
+        import urllib.request
+
+        calls = {"n": 0}
+        naps = []
+
+        def fake_urlopen(req, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(
+                    "u", 429, "Too Many Requests", None, io.BytesIO(b""))
+
+            class R:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return b"payload"
+            return R()
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dsm.time, "sleep", naps.append)
+        assert dsm._get("http://x", 5) == "payload"
+        assert calls["n"] == 2 and naps == [dsm.IEM_429_BACKOFF_S]
+
+    def test_second_429_and_other_codes_raise(self, monkeypatch):
+        import io
+        import urllib.error
+        import urllib.request
+
+        def always_429(req, timeout):
+            raise urllib.error.HTTPError(
+                "u", 429, "Too Many Requests", None, io.BytesIO(b""))
+        monkeypatch.setattr(urllib.request, "urlopen", always_429)
+        monkeypatch.setattr(dsm.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            dsm._get("http://x", 5)
+
+        def forbidden(req, timeout):
+            raise urllib.error.HTTPError(
+                "u", 403, "Forbidden", None, io.BytesIO(b""))
+        monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+        with pytest.raises(urllib.error.HTTPError):
+            dsm._get("http://x", 5)

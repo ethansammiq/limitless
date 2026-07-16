@@ -29,14 +29,19 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-DSM_URL = ("https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-           "?pil=DSM{awips}&fmt=text&limit=6")
+AFOS_URL = ("https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+            "?pil={pil}&fmt=text&limit={limit}")
 NWS_LIST_URL = "https://api.weather.gov/products/types/DSM/locations/{awips}"
 NWS_PRODUCT_LIMIT = 6
 USER_AGENT = "WeatherEdgeDSM/1.0"
+# IEM refuses bursts with 429s (2026-07-16: CHI/MIA/LAX/DEN all refused
+# inside the same second); one short backoff usually clears the window.
+IEM_429_BACKOFF_S = 3.0
 
 _REPORT = re.compile(
     r"^\s*K?(\w{3})\s+DS\s+(?:\d{4}\s+)?(\d{2})/(\d{2})\s+"
@@ -73,8 +78,24 @@ def parse_dsm_text(text: str) -> list[DSMReport]:
 
 def _get(url: str, timeout: int) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+    for attempt in (0, 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt == 0:
+                time.sleep(IEM_429_BACKOFF_S)
+                continue
+            raise
+    raise AssertionError("unreachable")
+
+
+def afos_text(pil: str, limit: int = 6, timeout: int = 20) -> str:
+    """Raw text of the newest AFOS products for one PIL (IEM archive).
+
+    Shared by the DSM veto (pil=DSM{awips}) and cli_sniper's reissue guard
+    (pil=CLI{awips}) — one getter, one 429 backoff, one User-Agent."""
+    return _get(AFOS_URL.format(pil=pil, limit=limit), timeout)
 
 
 def _fetch_nws_text(awips: str, timeout: int) -> str:
@@ -100,7 +121,7 @@ def fetch_dsm_reports(awips: str, timeout: int = 20) -> list[DSMReport]:
     to the NWS fallback the same as a transport error.
     """
     try:
-        reports = parse_dsm_text(_get(DSM_URL.format(awips=awips.upper()), timeout))
+        reports = parse_dsm_text(afos_text(f"DSM{awips.upper()}", timeout=timeout))
     except Exception:  # noqa: BLE001
         reports = []
     if reports:

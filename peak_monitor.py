@@ -67,6 +67,7 @@ logger = get_logger(__name__)
 
 NWS_OBS_LIMIT = 30             # Fetch last 30 observations (covers ~24h)
 IEM_BASE_URL = "https://mesonet.agron.iastate.edu"
+IEM_429_BACKOFF_S = 3.0        # IEM refuses same-second bursts; retry once
 
 # State file for tracking across cron invocations
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -209,14 +210,26 @@ async def fetch_iem_observations(
         f"&direct=no&report_type=3"
     )
 
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                logger.warning("IEM %s returned %d", city_key, resp.status)
-                return []
-            text = await resp.text()
-    except Exception as e:
-        logger.warning("IEM fetch failed for %s: %s", city_key, e)
+    text = None
+    for attempt in (0, 1):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 429 and attempt == 0:
+                    # IEM rate-limits the 5-city burst (all requests land in
+                    # the same second — CHI/MIA/LAX serially refused
+                    # 2026-07-16); one short backoff clears the window and
+                    # also staggers the remaining cities.
+                    await asyncio.sleep(IEM_429_BACKOFF_S)
+                    continue
+                if resp.status != 200:
+                    logger.warning("IEM %s returned %d", city_key, resp.status)
+                    return []
+                text = await resp.text()
+                break
+        except Exception as e:
+            logger.warning("IEM fetch failed for %s: %s", city_key, e)
+            return []
+    if text is None:
         return []
 
     observations = []
