@@ -302,3 +302,76 @@ class TestNightCap:
         b = [e for e in take_queue.load_queue()["entries"].values()
              if e["ticker"].endswith("B89.5")][0]
         assert b["count"] == 20  # full budget back
+
+
+class TestDailyCap:
+    """Portfolio-day cap: station-night budgets can stack across cities —
+    the day budget can't."""
+
+    def _f(self, ticker, count, price, **over):
+        return _finding(ticker=ticker, ask=price,
+                        cmd=f".venv/bin/python scripts/take.py {ticker} buy yes {count} {price}",
+                        **over)
+
+    def test_second_station_is_trimmed_into_the_day_budget(self, monkeypatch):
+        # night budgets are fresh per station; the $5 day budget is not:
+        # NY books $3.60, CHI gets the $1.40 remainder → 7×18¢
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "5")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", NOW)
+        chi = [e for e in take_queue.load_queue()["entries"].values()
+               if e["ticker"].startswith("KXHIGHCHI")][0]
+        assert chi["count"] == 7
+
+    def test_exhausted_day_refuses_to_stage(self, monkeypatch):
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 99)], "cli_sniper", NOW) == 0
+
+    def test_the_tighter_cap_binds(self, monkeypatch):
+        # night $2 < daily $100 → 11×18¢, not 20
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "2")
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "100")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        e = next(iter(take_queue.load_queue()["entries"].values()))
+        assert e["count"] == 11
+
+    def test_released_budget_returns_to_the_day(self, monkeypatch):
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        eid = next(iter(take_queue.load_queue()["entries"]))
+        take_queue.update_entries({eid: {"status": "expired"}}, NOW)
+        later = NOW + timedelta(hours=1)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", later) == 1
+        chi = [e for e in take_queue.load_queue()["entries"].values()
+               if e["ticker"].startswith("KXHIGHCHI")][0]
+        assert chi["count"] == 20
+
+    def test_yesterdays_spend_does_not_count(self, monkeypatch):
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "4")
+        yesterday = NOW - timedelta(days=1)
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL13-T90", 20, 18)], "cli_sniper", yesterday)
+        eid = next(iter(take_queue.load_queue()["entries"]))
+        take_queue.update_entries({eid: {"status": "executed"}}, yesterday)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", NOW) == 1
+        chi = [e for e in take_queue.load_queue()["entries"].values()
+               if e["ticker"].startswith("KXHIGHCHI")][0]
+        assert chi["count"] == 20
+
+    def test_overspent_day_negative_budget_stages_nothing(self, monkeypatch):
+        # env tightened mid-flight below what's already committed
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "100")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "2")
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", NOW) == 0

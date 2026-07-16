@@ -111,6 +111,54 @@ class TestAutoAllowance:
         assert not ok
 
 
+class TestDailyAllowance:
+    """The portfolio-day cap gates EVERY fire — manual tap and auto alike."""
+
+    def _committed(self, n, price_c=18, count=77, status="executed"):
+        # $13.86 each at the defaults
+        return {f"d{i}": {"action": "buy", "side": "yes", "count": count,
+                          "price_c": price_c, "status": status,
+                          "ts": NOW.isoformat(timespec="seconds")}
+                for i in range(n)}
+
+    def test_first_fire_of_the_day_is_allowed(self):
+        ok, reason = take_approver.daily_allowance(_entry(), {}, NOW)
+        assert ok and "$0.00 committed" in reason
+
+    def test_breach_is_blocked_with_the_cap_provenance(self, monkeypatch):
+        monkeypatch.delenv("TAKE_DAILY_CAP_DOLLARS", raising=False)
+        # 5 × $13.86 = $69.30 > the fixed $60 — already over; any fire blocked
+        entries = self._committed(5)
+        ok, reason = take_approver.daily_allowance(_entry(), entries, NOW)
+        assert not ok and "portfolio-day" in reason and "fixed" in reason
+
+    def test_candidate_is_not_double_counted(self, monkeypatch):
+        # $4.14 candidate already staged in the queue; $54 spent besides.
+        # 54 + 4.14 < 60 must pass — counting the candidate twice would fail.
+        monkeypatch.delenv("TAKE_DAILY_CAP_DOLLARS", raising=False)
+        entries = self._committed(1, price_c=90, count=60)  # $54.00
+        cand = _entry()
+        entries[cand["id"]] = dict(cand, ts=NOW.isoformat(timespec="seconds"))
+        ok, _ = take_approver.daily_allowance(cand, entries, NOW)
+        assert ok
+
+    def test_staged_and_executing_count_as_committed(self, monkeypatch):
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "20")
+        for status in ("posted", "executing"):
+            entries = self._committed(1, status=status)  # $13.86
+            ok, _ = take_approver.daily_allowance(
+                _entry(count=77), entries, NOW)  # +$13.86 > $20
+            assert not ok
+
+    def test_yesterdays_fires_do_not_count(self, monkeypatch):
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "20")
+        entries = self._committed(5)
+        for e in entries.values():
+            e["ts"] = (NOW - timedelta(days=1)).isoformat(timespec="seconds")
+        ok, _ = take_approver.daily_allowance(_entry(), entries, NOW)
+        assert ok
+
+
 class TestShadowRecord:
     def test_record_carries_the_would_verdict_and_caps(self):
         rec = take_approver.shadow_record(
@@ -284,6 +332,38 @@ class TestRunAutoIntegration:
         assert e["status"] == "executed" and e["auto_fired"] is True
         assert any("🤖 AUTO-FIRED" in c for c in self.edits)
         assert not self._shadow_rows()  # live mode does not shadow
+
+    def test_tapped_fire_past_the_daily_cap_resolves_capped(self, monkeypatch):
+        # the human tap does NOT bypass the portfolio-day cap
+        import asyncio as _asyncio
+
+        async def _tapped(session, cfg, mid):
+            return {"111"}
+
+        monkeypatch.setattr(take_approver, "get_reactors", _tapped)
+        monkeypatch.setattr(take_approver, "run_take",
+                            lambda e: (_ for _ in ()).throw(
+                                AssertionError("order fired past the daily cap")))
+        eid = self._stage_posted_auto_entry()
+        # cap tightened AFTER staging (env change mid-flight) — staging
+        # couldn't trim for it, so the fire-time backstop must refuse
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "1")  # cost is $4.14
+        _asyncio.run(take_approver.run(dry_run=False))
+        e = self.tq.load_queue()["entries"][eid]
+        assert e["status"] == "capped"
+        assert any("🧢 NOT EXECUTED" in c for c in self.edits)
+
+    def test_auto_fire_past_the_daily_cap_is_blocked_too(self, monkeypatch):
+        # auto's own $30 cap would pass — the portfolio cap still gates it
+        import asyncio as _asyncio
+        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
+        monkeypatch.setattr(take_approver, "run_take",
+                            lambda e: (_ for _ in ()).throw(
+                                AssertionError("auto-fired past the daily cap")))
+        eid = self._stage_posted_auto_entry()
+        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "1")  # tightened post-stage
+        _asyncio.run(take_approver.run(dry_run=False))
+        assert self.tq.load_queue()["entries"][eid]["status"] == "capped"
 
     def test_non_eligible_entry_never_auto_fires(self, monkeypatch):
         import asyncio as _asyncio

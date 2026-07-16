@@ -25,7 +25,10 @@ push) goes out at detection time instead of the next tick.
 Guardrails: allow-list only (DISCORD_TAKE_APPROVER_IDS), at-most-once (the
 "executing" status persists BEFORE the subprocess; a crash mid-order is
 surfaced, never retried), IOC only (automation never leaves resting
-orders), notional capped at enqueue AND re-validated by take.py itself.
+orders), notional capped at enqueue AND re-validated by take.py itself,
+and a portfolio-day cap on every fire — manual and auto (2026-07-16:
+staging keeps buttons inside it; the fire-time check catches env/bankroll
+moves mid-flight and resolves the entry "capped", order never placed).
 
 AUTO-TAKE, 00Z class only (2026-07-14, ships in SHADOW mode): entries the
 queue marked `auto_eligible` (METAR high-ladder buy_winner from the 00Z
@@ -48,6 +51,8 @@ drains by TTL — the feature is strictly additive to the existing alerts.
     TAKE_NIGHT_CAP_DOLLARS=25        # optional OVERRIDE: $ per station-night —
                                      # default derives from the live bankroll
                                      # (15%, never above $25; core/risk.py)
+    TAKE_DAILY_CAP_DOLLARS=60        # optional OVERRIDE: $ portfolio-wide per
+                                     # UTC day, all fires (35%, never above $60)
     AUTO_TAKE_00Z=on                 # optional: live auto-fire (default shadow)
     AUTO_TAKE_MAX_PER_DAY=3          # optional: auto-fires allowed per UTC day
     AUTO_TAKE_DAILY_CAP=30           # optional: $ auto notional per UTC day
@@ -70,7 +75,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from core import take_queue  # noqa: E402
+from core import risk, take_queue  # noqa: E402
 from core.risk import order_cost_dollars  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from log_setup import get_logger  # noqa: E402
@@ -121,6 +126,29 @@ def _config() -> dict | None:
         return None
     return {"token": token, "channel": channel, "approvers": approvers,
             "auto_mode": auto_mode()}
+
+
+def daily_allowance(entry: dict, all_entries: dict, now_utc: datetime,
+                    ) -> tuple[bool, str]:
+    """(ok, reason): would firing this entry keep the whole portfolio inside
+    the daily cap? Applies to EVERY fire — manual tap and auto alike (auto
+    keeps its own tighter fires/notional caps ON TOP).
+
+    Ledger = the queue itself (same source auto_allowance uses; the 48h
+    retention covers a UTC day). Staged entries count as committed money —
+    staging already enforced this cap, so a fire-time breach means the env
+    changed mid-flight, entries predate a deploy, or the bankroll dropped:
+    refuse, which is always the tighter answer. The candidate itself is
+    excluded from the spent sum (it is already staged in the queue)."""
+    cap, cap_why = risk.daily_cap_detail(now_utc)
+    cost = order_cost_dollars(entry["action"], entry["side"],
+                              entry["count"], entry["price_c"])
+    spent = take_queue.day_spent_dollars(all_entries, now_utc,
+                                         exclude_id=entry["id"])
+    if spent + cost > cap:
+        return False, (f"${spent + cost:.2f} would exceed the portfolio-day "
+                       f"cap ({cap_why})")
+    return True, f"${spent:.2f} committed today (cap {cap_why})"
 
 
 def auto_allowance(entry: dict, all_entries: dict, now_utc: datetime,
@@ -493,8 +521,25 @@ async def run(dry_run: bool, quiet_idle: bool = False) -> bool:
                 logger.info(f"{entry['ticker']}: repriced — {reason}")
                 continue
 
-            # verdict == "execute" — persist the marker BEFORE the order so a
-            # crash mid-subprocess can never double-fire (at-most-once).
+            # verdict == "execute" — the portfolio-day cap gates EVERY fire
+            # (manual tap and auto alike; staging already enforced it, so a
+            # breach here means env/bankroll moved mid-flight — refuse).
+            day_ok, day_reason = daily_allowance(entry, queue["entries"],
+                                                 now_utc)
+            if not day_ok:
+                if dry_run:
+                    print(f"would cap: {entry['ticker']} — {day_reason}")
+                    continue
+                _mut(eid, status="capped", result=day_reason,
+                     resolved_ts=now_utc.isoformat(timespec="seconds"))
+                await edit_message(session, cfg, entry["message_id"],
+                                   f"🧢 NOT EXECUTED — {day_reason}\n"
+                                   f"~~{format_prompt(entry, ttl)}~~")
+                logger.info(f"{entry['ticker']}: daily cap — {day_reason}")
+                continue
+
+            # Persist the marker BEFORE the order so a crash mid-subprocess
+            # can never double-fire (at-most-once).
             if dry_run:
                 print(f"would execute: {' '.join(build_take_argv(entry))}")
                 continue

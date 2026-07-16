@@ -41,9 +41,12 @@ PRUNE_TERMINAL_AFTER_H = 48
 
 # Entry lifecycle. "executing" is the crash-safe marker persisted BEFORE the
 # order subprocess runs — an entry found in that state is never retried
-# (at-most-once), only surfaced for a manual fills check.
+# (at-most-once), only surfaced for a manual fills check. "capped" is a
+# fire refused by the portfolio-day cap — terminal, but it spent nothing
+# (kept out of NIGHT_LEDGER_STATUSES below).
 ACTIVE_STATUSES = ("pending", "posted")
-TERMINAL_STATUSES = ("executed", "expired", "repriced", "failed", "executing")
+TERMINAL_STATUSES = ("executed", "expired", "repriced", "failed", "executing",
+                     "capped")
 ENQUEUEABLE_KINDS = ("buy_winner", "sell_dead")
 
 # The only class pre-cleared for auto-execution (shadow-graded first): a
@@ -130,6 +133,23 @@ def night_spent_dollars(entries: dict, ticker: str) -> float:
                for e in entries.values()
                if e.get("ticker") and event_key(e["ticker"]) == key
                and e.get("status") in NIGHT_LEDGER_STATUSES)
+
+
+def day_spent_dollars(entries: dict, now_utc: datetime,
+                      exclude_id: str | None = None) -> float:
+    """Worst-case dollars committed across ALL stations this UTC day.
+
+    Staged (pending/posted) counts as committed — a button offered is money
+    promised; executing counts as spent (a crash mid-order is money out
+    until fills reconcile); expired/repriced/failed/capped release theirs.
+    `exclude_id` lets the approver's fire-time check leave the candidate
+    itself out of the sum (it is already staged in the queue)."""
+    today = now_utc.date().isoformat()
+    return sum(order_cost_dollars(e["action"], e["side"], e["count"], e["price_c"])
+               for eid, e in entries.items()
+               if eid != exclude_id
+               and e.get("status") in NIGHT_LEDGER_STATUSES
+               and (e.get("ts") or "").startswith(today))
 
 
 def parse_take_cmd(cmd: str) -> dict | None:
@@ -242,6 +262,7 @@ def enqueue_findings(findings: list[dict], source: str,
         return 0
     added = 0
     night_cap, night_why = risk.night_cap_detail(now_utc)
+    daily_cap, daily_why = risk.daily_cap_detail(now_utc)
     with _locked():
         queue = _load_unlocked()
         entries = queue["entries"]
@@ -250,21 +271,29 @@ def enqueue_findings(findings: list[dict], source: str,
         for entry in staged:
             if entry["ticker"] in active_tickers:
                 continue
-            # Per-station-night exposure cap: same-night brackets are one
-            # correlated bet — three max-size losses on one bankroll is the
-            # ruin path, not the 52%-vs-98% winrate spread (2026-07-14: a
-            # single button offered 34% of the bankroll).
+            # Two exposure caps, tighter one binds. Station-night: same-night
+            # brackets are one correlated bet — three max-size losses on one
+            # bankroll is the ruin path, not the 52%-vs-98% winrate spread
+            # (2026-07-14: a single button offered 34% of the bankroll).
+            # Portfolio-day: many station-nights can still stack; a button
+            # past the day budget is never offered.
             night_left = night_cap - night_spent_dollars(
                 entries, entry["ticker"])
+            daily_left = daily_cap - day_spent_dollars(entries, now_utc)
+            if night_left <= daily_left:
+                bound, why = "station-night", night_why
+            else:
+                bound, why = "portfolio-day", daily_why
             capped = clamp_count(entry["action"], entry["side"],
-                                 entry["count"], entry["price_c"], night_left)
+                                 entry["count"], entry["price_c"],
+                                 min(night_left, daily_left))
             if capped < 1:
-                logger.info(f"{entry['ticker']}: station-night cap reached "
-                            f"({night_why}) — not staged")
+                logger.info(f"{entry['ticker']}: {bound} cap reached "
+                            f"({why}) — not staged")
                 continue
             if capped < entry["count"]:
-                logger.info(f"{entry['ticker']}: night cap trims "
-                            f"{entry['count']}→{capped} ({night_why})")
+                logger.info(f"{entry['ticker']}: {bound} cap trims "
+                            f"{entry['count']}→{capped} ({why})")
                 entry["count"] = capped
             entries[entry["id"]] = entry
             active_tickers.add(entry["ticker"])

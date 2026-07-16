@@ -26,6 +26,8 @@ MAX_ENTRY_ASK_C = 20
 # them; every failure mode degrades here.
 DEFAULT_MAX_NOTIONAL = 50.0   # $ worst-case collateral per order
 DEFAULT_NIGHT_CAP = 25.0      # $ per station-night ≈ 15% of the 07-2026 bankroll
+DEFAULT_DAILY_CAP = 60.0      # $ portfolio-wide per UTC day ≈ 2.4 night caps
+                              # (the $30 auto-take cap sits inside it)
 
 # Bankroll-relative fractions (of CASH balance, which excludes deployed
 # collateral — caps shrink as money deploys intra-day, conservative by
@@ -33,6 +35,7 @@ DEFAULT_NIGHT_CAP = 25.0      # $ per station-night ≈ 15% of the 07-2026 bankr
 # fixed-dollar button offered 34% of the bankroll.
 PER_ORDER_PCT = 0.30
 NIGHT_CAP_PCT = 0.15
+DAILY_CAP_PCT = 0.35
 
 # live_watch.py (VPS cron */10) owns this snapshot and SKIPS writes on
 # degraded reads — staleness, not a false $0, is its failure signature.
@@ -102,6 +105,15 @@ def night_cap_detail(now_utc: datetime | None = None) -> tuple[float, str]:
 
 def night_cap_dollars(now_utc: datetime | None = None) -> float:
     return night_cap_detail(now_utc)[0]
+
+
+def daily_cap_detail(now_utc: datetime | None = None) -> tuple[float, str]:
+    return _cap_detail("TAKE_DAILY_CAP_DOLLARS", DEFAULT_DAILY_CAP,
+                       DAILY_CAP_PCT, now_utc)
+
+
+def daily_cap_dollars(now_utc: datetime | None = None) -> float:
+    return daily_cap_detail(now_utc)[0]
 
 
 def order_cost_dollars(action: str, side: str, count: int, price_c: int) -> float:

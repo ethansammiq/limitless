@@ -144,6 +144,12 @@ class TestBankrollDerivedCaps:
         _write_snapshot(balance=150.0)
         assert risk.night_cap_dollars(NOW) == pytest.approx(22.50)   # 15%
         assert risk.max_notional_dollars(NOW) == pytest.approx(45.0)  # 30%
+        assert risk.daily_cap_dollars(NOW) == pytest.approx(52.50)   # 35%
+
+    def test_daily_cap_fixed_fallback_and_ceiling(self):
+        assert risk.daily_cap_dollars(NOW) == risk.DEFAULT_DAILY_CAP  # no snap
+        _write_snapshot(balance=1000.0)
+        assert risk.daily_cap_dollars(NOW) == risk.DEFAULT_DAILY_CAP  # ceiling
 
     def test_high_bankroll_never_exceeds_the_fixed_caps(self):
         _write_snapshot(balance=1000.0)
