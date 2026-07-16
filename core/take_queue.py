@@ -96,17 +96,15 @@ def ttl_minutes() -> int:
 
 
 def max_notional() -> float:
-    try:
-        return float(os.getenv("TAKE_MAX_NOTIONAL", risk.DEFAULT_MAX_NOTIONAL))
-    except ValueError:
-        return risk.DEFAULT_MAX_NOTIONAL
+    """Bankroll-derived (never above the fixed $50) unless TAKE_MAX_NOTIONAL
+    overrides — see core/risk.py."""
+    return risk.max_notional_dollars()
 
 
 def night_cap_dollars() -> float:
-    try:
-        return float(os.getenv("TAKE_NIGHT_CAP_DOLLARS", risk.DEFAULT_NIGHT_CAP))
-    except ValueError:
-        return risk.DEFAULT_NIGHT_CAP
+    """Bankroll-derived (never above the fixed $25) unless
+    TAKE_NIGHT_CAP_DOLLARS overrides — see core/risk.py."""
+    return risk.night_cap_dollars()
 
 
 def event_key(ticker: str) -> str:
@@ -243,6 +241,7 @@ def enqueue_findings(findings: list[dict], source: str,
     if not staged:
         return 0
     added = 0
+    night_cap, night_why = risk.night_cap_detail(now_utc)
     with _locked():
         queue = _load_unlocked()
         entries = queue["entries"]
@@ -255,17 +254,17 @@ def enqueue_findings(findings: list[dict], source: str,
             # correlated bet — three max-size losses on one bankroll is the
             # ruin path, not the 52%-vs-98% winrate spread (2026-07-14: a
             # single button offered 34% of the bankroll).
-            night_left = night_cap_dollars() - night_spent_dollars(
+            night_left = night_cap - night_spent_dollars(
                 entries, entry["ticker"])
             capped = clamp_count(entry["action"], entry["side"],
                                  entry["count"], entry["price_c"], night_left)
             if capped < 1:
-                logger.info(f"{entry['ticker']}: station-night cap "
-                            f"(${night_cap_dollars():.0f}) reached — not staged")
+                logger.info(f"{entry['ticker']}: station-night cap reached "
+                            f"({night_why}) — not staged")
                 continue
             if capped < entry["count"]:
                 logger.info(f"{entry['ticker']}: night cap trims "
-                            f"{entry['count']}→{capped}")
+                            f"{entry['count']}→{capped} ({night_why})")
                 entry["count"] = capped
             entries[entry["id"]] = entry
             active_tickers.add(entry["ticker"])

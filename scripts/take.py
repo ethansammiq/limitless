@@ -11,9 +11,10 @@ Examples (the shapes the sniper/sweeper/live_watch alerts emit):
     take.py KXHIGHNY-26JUL02-T99    sell yes 20 22 --ioc
 
 Guards: price 1-99; notional (COUNT x PRICE, or the worst-case collateral on
-sells/no-sides) capped at $50 unless TAKE_MAX_NOTIONAL says otherwise; a
-y/N confirmation unless --yes. This is the ONLY order-placing entry point —
-automated jobs alert, humans execute.
+sells/no-sides) capped at 30% of the live bankroll, never above $50
+(core/risk.py; fixed $50 when the balance snapshot is missing/stale) unless
+TAKE_MAX_NOTIONAL says otherwise; a y/N confirmation unless --yes. This is
+the ONLY order-placing entry point — automated jobs alert, humans execute.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-from core.risk import DEFAULT_MAX_NOTIONAL, order_cost_dollars  # noqa: E402
+from core.risk import max_notional_dollars, order_cost_dollars  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
 
@@ -134,8 +135,7 @@ def main() -> None:
     ap.add_argument("--yes", action="store_true", help="skip confirmation")
     args = ap.parse_args()
 
-    max_notional = float(os.getenv("TAKE_MAX_NOTIONAL", DEFAULT_MAX_NOTIONAL))
-    problem = validate(args, max_notional)
+    problem = validate(args, max_notional_dollars())
     if problem:
         ap.error(problem)
 

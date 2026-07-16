@@ -45,7 +45,9 @@ drains by TTL — the feature is strictly additive to the existing alerts.
     DISCORD_TAKE_CHANNEL_ID=...      # channel the TAKE? prompts post to
     DISCORD_TAKE_APPROVER_IDS=1,2    # Discord user ids allowed to fire
     TAKE_APPROVE_TTL_MIN=15          # optional
-    TAKE_NIGHT_CAP_DOLLARS=25        # optional: $ staged per station-night
+    TAKE_NIGHT_CAP_DOLLARS=25        # optional OVERRIDE: $ per station-night —
+                                     # default derives from the live bankroll
+                                     # (15%, never above $25; core/risk.py)
     AUTO_TAKE_00Z=on                 # optional: live auto-fire (default shadow)
     AUTO_TAKE_MAX_PER_DAY=3          # optional: auto-fires allowed per UTC day
     AUTO_TAKE_DAILY_CAP=30           # optional: $ auto notional per UTC day

@@ -1,5 +1,12 @@
 """Tests for core/risk.py — the single source of money math and risk caps."""
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
 from core import risk
+
+NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class TestCostModel:
@@ -78,12 +85,94 @@ class TestOneSourceOfTruth:
         assert cli_sniper.WALL_ASK_DEPTH is walls.WALL_ASK_DEPTH
         assert metar_sniper.WALL_ASK_DEPTH is walls.WALL_ASK_DEPTH
 
-    def test_take_and_scorecard_source_the_fixed_notional_cap(self):
+    def test_scorecard_sources_the_fixed_notional_cap(self):
         from backtest import sniper_scorecard
-        from scripts import take
 
         assert risk.DEFAULT_MAX_NOTIONAL == 50.0
-        assert take.DEFAULT_MAX_NOTIONAL is risk.DEFAULT_MAX_NOTIONAL
-        # scorecard stays env-or-fixed (reproducible grading) but the fixed
-        # number comes from here
+        # scorecard stays env-or-fixed (reproducible grading regardless of
+        # the live balance at rerun time) but the fixed number comes from here
         assert sniper_scorecard.max_notional_dollars() == risk.DEFAULT_MAX_NOTIONAL
+
+
+def _write_snapshot(balance=150.0, age_min=5, **extra):
+    snap = {"updated": (NOW - timedelta(minutes=age_min)).isoformat(),
+            "balance": balance, **extra}
+    risk.BANKROLL_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+    risk.BANKROLL_SNAPSHOT.write_text(json.dumps(snap))
+
+
+class TestBankrollDollars:
+    """live_watch's snapshot is the only balance source; anything short of
+    a fresh, positive, tz-aware read is None — the caller degrades to the
+    fixed caps."""
+
+    def test_fresh_snapshot_reads(self):
+        _write_snapshot(balance=175.37)
+        assert risk.bankroll_dollars(NOW) == 175.37
+
+    def test_missing_file_is_none(self):
+        assert risk.bankroll_dollars(NOW) is None
+
+    def test_stale_snapshot_is_none(self):
+        # live_watch skips writes on degraded reads, so staleness IS the
+        # failure signature (2026-07-05: a false $0 once reached the curve)
+        _write_snapshot(age_min=risk.BANKROLL_MAX_AGE_MIN + 1)
+        assert risk.bankroll_dollars(NOW) is None
+
+    @pytest.mark.parametrize("balance", [None, 0, -5.0, "175.37", True])
+    def test_invalid_balance_is_none(self, balance):
+        _write_snapshot(balance=balance)
+        assert risk.bankroll_dollars(NOW) is None
+
+    def test_garbage_json_and_naive_timestamp_are_none(self):
+        risk.BANKROLL_SNAPSHOT.write_text("not json {")
+        assert risk.bankroll_dollars(NOW) is None
+        risk.BANKROLL_SNAPSHOT.write_text(json.dumps(
+            {"updated": "2026-07-16T11:55:00", "balance": 150.0}))  # no tz
+        assert risk.bankroll_dollars(NOW) is None
+
+    def test_never_raises_never_fetches(self):
+        risk.BANKROLL_SNAPSHOT.write_text(json.dumps({"balance": 150.0}))
+        assert risk.bankroll_dollars(NOW) is None  # no "updated" key
+
+
+class TestBankrollDerivedCaps:
+    """min(fixed, pct·bankroll): derivation only ever TIGHTENS — 'the caps
+    stay' (claude.md §4); growth past the fixed caps is a human decision."""
+
+    def test_low_bankroll_tightens_the_caps(self):
+        _write_snapshot(balance=150.0)
+        assert risk.night_cap_dollars(NOW) == pytest.approx(22.50)   # 15%
+        assert risk.max_notional_dollars(NOW) == pytest.approx(45.0)  # 30%
+
+    def test_high_bankroll_never_exceeds_the_fixed_caps(self):
+        _write_snapshot(balance=1000.0)
+        assert risk.night_cap_dollars(NOW) == risk.DEFAULT_NIGHT_CAP
+        assert risk.max_notional_dollars(NOW) == risk.DEFAULT_MAX_NOTIONAL
+
+    def test_tiny_bankroll_derives_tiny_caps(self):
+        _write_snapshot(balance=10.0)
+        assert risk.night_cap_dollars(NOW) == pytest.approx(1.50)
+
+    def test_no_snapshot_degrades_to_fixed(self):
+        assert risk.night_cap_dollars(NOW) == risk.DEFAULT_NIGHT_CAP
+        assert risk.max_notional_dollars(NOW) == risk.DEFAULT_MAX_NOTIONAL
+
+    def test_env_override_wins_and_may_exceed_fixed(self, monkeypatch):
+        # the documented human escape hatch (take.py:54)
+        _write_snapshot(balance=150.0)
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "100")
+        assert risk.night_cap_dollars(NOW) == 100.0
+
+    def test_garbage_env_falls_through_to_derivation(self, monkeypatch):
+        _write_snapshot(balance=150.0)
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "abc")
+        assert risk.night_cap_dollars(NOW) == pytest.approx(22.50)
+
+    def test_provenance_names_the_regime(self, monkeypatch):
+        _write_snapshot(balance=150.0)
+        assert "15% of $150.00 bankroll" in risk.night_cap_detail(NOW)[1]
+        risk.BANKROLL_SNAPSHOT.unlink()
+        assert "fixed" in risk.night_cap_detail(NOW)[1]
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "5")
+        assert "env" in risk.night_cap_detail(NOW)[1]
