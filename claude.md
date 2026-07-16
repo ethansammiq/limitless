@@ -26,10 +26,21 @@ Staging guards (2026-07-15, from the 52%-raw vs ≥95%-selected split):
 `stageable_class` — buttons only from ≥95% classes (sell_dead; CLI floor
 buys at drift ≥.95 or ≤20¢; METAR 00Z anchor only — midday groups are
 forecasts, graded 1-for-5 on 7/13), everything else alert-only. Night cap —
-`TAKE_NIGHT_CAP_DOLLARS` (default $25 ≈ 15% bankroll) per station-night
-(event prefix = the cluster-bootstrap unit); staging trims counts into the
-remaining budget, expired/repriced entries release theirs. Sizing, not
-winrate, is the ruin lever (7/14: one button offered 34% of bankroll).
+per STATION-night (2026-07-16: high+low ladders share one bucket, keyed
+(awips, date) via the ladders registry — the cluster-bootstrap unit; the
+v1 series key let sell_dead complement collateral double the exposure).
+Default derives from the live bankroll: 15% of cash, NEVER above the fixed
+$25 ("the caps stay" — §4); missing/stale live_account.json degrades to
+the fixed number; `TAKE_NIGHT_CAP_DOLLARS` is the human override. The
+per-order cap works the same (30%, ceiling $50, `TAKE_MAX_NOTIONAL`).
+Portfolio-day cap (2026-07-16) — `TAKE_DAILY_CAP_DOLLARS` (35% of
+bankroll, never above the fixed $60 ≈ 2.4 night caps; the $30 auto cap
+sits inside it) across ALL stations per UTC day: staging trims buttons
+into it, and take_approver re-checks at fire time for EVERY fire (manual
+tap and auto), resolving breaches as "capped" with no order. All in
+`core/risk.py`. Staging trims counts into the remaining budget,
+expired/repriced/capped entries release theirs. Sizing, not winrate, is
+the ruin lever (7/14: one button offered 34% of bankroll).
 **Auto-take carve-out (2026-07-14, SHADOW — the one amendment to the Core
 Rule, pre-registered before any live fire):** the 00Z-anchor METAR
 high-ladder buy_winner class ONLY (all four 6-hr groups in; day-max == final
@@ -194,6 +205,7 @@ information, not an excuse to tune (same rule as every other gate here).
 | `core/brackets.py` | Bracket subtitle parsing + deadness/contains logic |
 | `core/fees.py` | Kalshi taker fee (integer-cents, clamped) |
 | `core/io.py` | Atomic file writes (tmp+rename) |
+| `core/risk.py` | Money math + risk caps, one source: entry cap, bankroll-derived (tighten-only) per-order/night caps, station-night key |
 | `core/dsm.py` | ASOS Daily Summary Message fetch/parse (IEM AFOS) — the settlement oracle behind the sniper's DSM veto |
 | `core/drift.py` | Floor→final drift distribution from the journal — prices floor buy_winners (win prob + EV in alerts) |
 | `core/walls.py` | Certainty-wall detection from shadow books (defense vs penny-farm; adversary intel) |
@@ -204,7 +216,7 @@ information, not an excuse to tune (same rule as every other gate here).
 | `take_approver.py` | One-tap Discord approval → take.py subprocess (cron */1; ✅ allow-list, IOC only, live-book re-check) |
 | `dead_bracket_sweeper.py` | Obs-killed brackets still holding bids, all 40 ladders (cron */15) |
 | `peak_monitor.py` | Post-peak lock-in alerts, original 5 cities (cron */10, 13-22 ET) |
-| `live_watch.py` | Read-only live-account journal + sell-into-strength alert (cron */10) |
+| `live_watch.py` | Read-only live-account journal + sell-into-strength alert + low-ladder boundary watch near midnight LST (cron */10) |
 | `shadow_logger.py` | Dual-venue L2 depth capture for the Poly gate (cron */30) |
 | `backtest_collector.py` | Daily settlement ground truth → backtest/daily_data.jsonl (cron 8:00) |
 | `market_timeseries.py` | Intraday orderbook snapshots + shared ticker-date parsing (ad-hoc) |
