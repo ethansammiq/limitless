@@ -166,8 +166,11 @@ def cli_floor_crosscheck(extreme: metar.SixHrExtreme, awips: str, tz: str,
     target_date = metar.climate_date(extreme, tz)
     if target_date is None:
         return []
+    # skipped guard: DEN's pre-dawn same-day dailies journaled is_final=true
+    # (raw regex label) until 2026-07-16, muting busts/confirms all day —
+    # rows already on disk keep the flag, so filter here too.
     finals = {(e.get("awips"), e.get("summary_date"))
-              for e in cli_entries if e.get("is_final")}
+              for e in cli_entries if e.get("is_final") and not e.get("skipped")}
     if (awips, target_date) in finals:
         return []
     v = extreme.temp_f_rounded

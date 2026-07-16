@@ -100,6 +100,20 @@ SUPPRESS_LOW_FLOOR_BUYS = True
 # Outside issuance windows, stations with journaled findings in the last 24h
 # get a v1 re-fetch every ~20 min so a corrected re-issue is seen and alerted.
 CORRECTION_SWEEP_EVERY_MIN = 20
+# Reissue guard (2026-07-16 BOS): BOX printed a bogus MINIMUM of 51 (stamp
+# 162129), then silently re-issued 162139 with the real 69 — no CORRECTED
+# tag, correction field null — and the sniper staged a falsified sell_dead
+# on the live 83¢ favorite. forecast.weather.gov kept serving the stale
+# product for 14 more minutes, so re-fetching the page can't catch this
+# class; the IEM AFOS archive (NOAAPort ingest) had the re-issue within a
+# minute. Before staging, the newest same-date archive product is compared
+# against the print: a moved premise stamps `reissue_conflict` — blocks the
+# one-tap button and downgrades the alert to info-only (same gate family as
+# obs_kill/obs_warn/wall_ask). Fail open on IEM refusal: the guard only
+# removes suggestions (§8 principle 5). take_approver runs the same check
+# again at fire time, and a later run that sees the reissue supersedes any
+# still-active button (three layers; none adds latency to the money path).
+ARCHIVE_PRODUCT_LIMIT = 5
 
 MONTHS = {m: i + 1 for i, m in enumerate(
     ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY",
@@ -226,7 +240,12 @@ def classify(parsed: ParsedCLI, ladder: Ladder, markets: list[dict]) -> list[dic
         lo, hi = bounds
         base = {"ticker": ticker, "subtitle": mkt.get("subtitle") or mkt.get("yes_sub_title"),
                 "series": ladder.series, "ladder_kind": ladder.kind,
-                "printed": printed, "final": parsed.is_final}
+                "printed": printed, "final": parsed.is_final,
+                # Product provenance: the take queue stages these as the
+                # entry's premise so the approver can re-verify the print
+                # still stands at fire time (reissue guard).
+                "awips": parsed.awips, "stamp": parsed.stamp,
+                "summary_date": parsed.summary_date}
         if parsed.correction:
             base["corrected"] = parsed.correction
         if is_dead(ladder.kind, lo, hi, printed):
@@ -273,6 +292,213 @@ def apply_dsm_veto(findings: list[dict], reports: list[dsm.DSMReport],
         else:
             kept.append({**f, "dsm": extreme[0]})
     return kept, vetoed
+
+
+def _conflicts(kind: str, ladder_kind: str, is_final: bool,
+               v_old: int, v_new: int | None) -> bool:
+    """Does a re-issued extreme refute a finding premised on the old one?
+
+    Deadness is monotone on floors: a floor max can only legitimately RISE
+    (running max) and a floor min only FALL, and legit movement leaves
+    sell_dead brackets just as dead. Everything else refutes — any move
+    under a buy_winner (its bracket premise), any move on a FINAL (nothing
+    should move), a value scrubbed to MM, and an impossible-direction move
+    (max down / min up — the BOS 51→69 bogus-print signature).
+    """
+    if v_new == v_old:
+        return False
+    if kind == "sell_dead" and not is_final and v_new is not None:
+        return not (v_new > v_old if ladder_kind == "high" else v_new < v_old)
+    return True
+
+
+# AFOS blobs concatenate products; split on the control char or the
+# 3-digit sequence header before each WMO line (backtest/metar_leak_study
+# uses the same shape against this feed).
+_AFOS_SPLIT = re.compile(r"\x01|\n(?=\d{3}\s*\n\w{6}\s+K\w{3}\s+\d{6})")
+
+
+def fetch_archive_products(awips: str) -> list[ParsedCLI] | None:
+    """Recent CLI products for one station from the IEM AFOS archive — the
+    reissue guard's second opinion. None = feed unavailable (fail open),
+    a list (possibly empty) = the archive answered."""
+    try:
+        blob = dsm.afos_text(f"CLI{awips.upper()}", limit=ARCHIVE_PRODUCT_LIMIT)
+    except Exception as exc:  # noqa: BLE001 — the guard only removes suggestions
+        logger.warning(f"{awips}: CLI archive fetch failed: {exc}")
+        return None
+    return [p for chunk in _AFOS_SPLIT.split(blob or "")
+            if (p := parse_product(chunk)) is not None]
+
+
+def newer_archive_product(parsed: ParsedCLI, tz: str, now_utc: datetime,
+                          products: list[ParsedCLI] | None,
+                          ) -> tuple[str, ParsedCLI | None]:
+    """('newer'|'clear'|'unchecked', product): the newest archive product
+    STRICTLY newer than `parsed` for the same station/date/finality class.
+
+    Only a newer product can refute a print — an older archive copy that
+    differs is just the floor legitimately moving between issuances (and
+    IEM ingest lag must never suppress the freshest print's staging).
+    """
+    from backtest.cli_timing import stamp_to_utc
+
+    if products is None:
+        return "unchecked", None
+    ours = stamp_to_utc(parsed.stamp, now_utc)
+    if ours is None:
+        return "unchecked", None
+    newest, newest_t = None, None
+    for p in products:
+        if p.awips != parsed.awips or p.summary_date != parsed.summary_date:
+            continue
+        finality = effective_finality(p, tz, now_utc)
+        if finality == "skip" or (finality == "final") != parsed.is_final:
+            continue
+        t = stamp_to_utc(p.stamp, now_utc)
+        if t is None or t <= ours:
+            continue
+        if newest_t is None or t > newest_t:
+            newest, newest_t = p, t
+    return ("newer", newest) if newest is not None else ("clear", None)
+
+
+def apply_reissue_conflicts(findings: list[dict], newer: ParsedCLI) -> int:
+    """Stamp findings the newer product refutes; returns how many."""
+    stamped = 0
+    for f in findings:
+        if f.get("kind") not in ("sell_dead", "buy_winner"):
+            continue
+        v_new = newer.max_f if f["ladder_kind"] == "high" else newer.min_f
+        if _conflicts(f["kind"], f["ladder_kind"], f["final"],
+                      f["printed"], v_new):
+            f["reissue_conflict"] = (
+                f"reissued {newer.stamp}: "
+                f"{'max' if f['ladder_kind'] == 'high' else 'min'} "
+                f"{f['printed']}→{v_new if v_new is not None else 'MM'}")
+            stamped += 1
+    return stamped
+
+
+def check_premise(entry: dict, now_utc: datetime,
+                  products: list[ParsedCLI] | None = None) -> tuple[str, str]:
+    """Fire-time re-check of a staged entry's CLI premise vs the archive:
+    ('moved'|'clear'|'unchecked', reason). take_approver calls this just
+    before take.py — the last line of defense when a bogus print staged
+    BEFORE its silent re-issue existed anywhere (the stage-time guard
+    can't beat causality; this one runs minutes later, at money time)."""
+    premise = entry.get("premise") or {}
+    try:
+        pseudo = ParsedCLI(awips=premise["awips"], stamp=premise["stamp"],
+                           summary_date=premise["summary_date"],
+                           is_final=bool(premise["final"]),
+                           max_f=None, min_f=None)
+        printed, lk = premise["printed"], premise["ladder_kind"]
+    except (KeyError, TypeError):
+        return "unchecked", "no CLI premise on entry"
+    if printed is None or lk not in ("high", "low"):
+        return "unchecked", "no CLI premise on entry"
+    group = by_awips().get(pseudo.awips)
+    if group is None:
+        return "unchecked", f"unknown station {pseudo.awips}"
+    if products is None:
+        products = fetch_archive_products(pseudo.awips)
+    status, newer = newer_archive_product(pseudo, group[0].tz, now_utc, products)
+    if status == "unchecked":
+        return "unchecked", "CLI archive unavailable — passing (fail open)"
+    if newer is None:
+        return "clear", "no newer product in the archive"
+    v_new = newer.max_f if lk == "high" else newer.min_f
+    if _conflicts(entry.get("kind", ""), lk, pseudo.is_final, printed, v_new):
+        return "moved", (f"CLI reissued ({premise['stamp']}→{newer.stamp}): "
+                         f"{'max' if lk == 'high' else 'min'} "
+                         f"{printed}→{v_new if v_new is not None else 'MM'} "
+                         f"— premise dead")
+    return "clear", f"reissue {newer.stamp} keeps the premise"
+
+
+def _prior_journaled_product(awips: str, summary_date: str, want_final: bool,
+                             now_utc: datetime) -> dict | None:
+    """Most recent journaled product row (with findings, not skipped) for
+    this station-date-finality — the premise prior alerts/stages ran on."""
+    rows = [e for e in _recent_journal_entries(now_utc)
+            if e.get("awips") == awips and e.get("summary_date") == summary_date
+            and e.get("findings") and not e.get("skipped")
+            and bool(e.get("is_final")) == want_final]
+    return max(rows, key=lambda e: e.get("ts", "")) if rows else None
+
+
+def reissue_moves(prior: dict, parsed: ParsedCLI) -> dict[str, tuple]:
+    """{'high': (old, new), 'low': (old, new)} for moved extremes that a
+    prior journaled finding was actually premised on (a move on a ladder
+    kind nothing classified against is not an exit signal)."""
+    premised = {f.get("ladder_kind") for f in prior.get("findings") or []
+                if not f.get("suppressed")}
+    moves = {}
+    if (prior.get("max_f") is not None and prior.get("max_f") != parsed.max_f
+            and "high" in premised):
+        moves["high"] = (prior["max_f"], parsed.max_f)
+    if (prior.get("min_f") is not None and prior.get("min_f") != parsed.min_f
+            and "low" in premised):
+        moves["low"] = (prior["min_f"], parsed.min_f)
+    return moves
+
+
+def superseded_entry_ids(queue_entries: dict, parsed: ParsedCLI,
+                         now_utc: datetime) -> list[str]:
+    """Active cli_sniper queue entries whose staged premise this (newer)
+    product refutes — the buttons to retract when a reissue lands."""
+    from backtest.cli_timing import stamp_to_utc
+
+    from core import take_queue
+
+    ours = stamp_to_utc(parsed.stamp, now_utc)
+    out = []
+    for eid, e in queue_entries.items():
+        if (e.get("source") != "cli_sniper"
+                or e.get("status") not in take_queue.ACTIVE_STATUSES):
+            continue
+        pr = e.get("premise") or {}
+        if (pr.get("awips") != parsed.awips
+                or pr.get("summary_date") != parsed.summary_date
+                or bool(pr.get("final")) != parsed.is_final
+                or pr.get("printed") is None
+                or pr.get("ladder_kind") not in ("high", "low")):
+            continue
+        theirs = stamp_to_utc(pr.get("stamp") or "", now_utc)
+        if ours is None or theirs is None or ours <= theirs:
+            continue
+        v_new = parsed.max_f if pr["ladder_kind"] == "high" else parsed.min_f
+        if _conflicts(e.get("kind", ""), pr["ladder_kind"],
+                      bool(pr.get("final")), pr["printed"], v_new):
+            out.append(eid)
+    return out
+
+
+async def _retract_superseded(parsed: ParsedCLI, now_utc: datetime) -> int:
+    """Kill active buttons premised on a value this product moved; returns
+    how many were retracted. Never raises — retraction must not break the
+    alert path (same contract as staging)."""
+    try:
+        from core import take_queue
+
+        snapshot = take_queue.load_queue()["entries"]
+        ids = superseded_entry_ids(snapshot, parsed, now_utc)
+        if not ids:
+            return 0
+        reason = (f"CLI reissued {parsed.stamp} "
+                  f"(max {parsed.max_f} min {parsed.min_f}) — premise dead")
+        dead = take_queue.supersede_entries(ids, reason, now_utc)
+        for e in dead:
+            logger.warning(f"{e['ticker']}: staged take RETRACTED — {reason}")
+        if dead:
+            from take_approver import retract_buttons
+
+            await retract_buttons(dead, reason)
+        return len(dead)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"{parsed.awips}: supersede/retract failed: {exc}")
+        return 0
 
 
 def _fetch_product(wfo: str, awips: str, version: int = 1) -> str | None:
@@ -430,8 +656,25 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
     n_corr = sum(1 for o in opps if o["kind"] == "correction_notice")
     if n_corr:
         title += f", {n_corr} CORRECTION(s)"
+    n_re = sum(1 for o in opps if o["kind"] == "reissue_notice")
+    if n_re:
+        title += f", {n_re} REISSUE(s)"
     lines = []
     for o in opps:
+        if o["kind"] == "reissue_notice":
+            desc = ", ".join(
+                f"{'max' if k == 'high' else 'min'} "
+                f"{v[0]}→{v[1] if v[1] is not None else 'MM (removed)'}"
+                for k, v in (o.get("moves") or {}).items())
+            lines.append(
+                f"🛑 **REISSUE (no CORRECTED tag)** — {o['awips']} "
+                f"{o['summary_date']}: {desc} "
+                f"(stamp {o['prior_stamp']}→{o['stamp']}). Prior findings "
+                f"were premised on the old value"
+                + (f"; {o['retracted']} staged button(s) retracted"
+                   if o.get("retracted") else "")
+                + " — re-verify any open trade NOW.")
+            continue
         if o["kind"] == "correction_notice":
             lines.append(
                 f"🛑 **CORRECTION {o['corrected']}** — {o['awips']} "
@@ -473,14 +716,19 @@ def format_alert(opps: list[dict]) -> tuple[str, str]:
             if o.get("wall_ask"):
                 econ += (f"\n  🧱 {o['ask_depth']:.0f}-deep ask wall — "
                          f"walls are 5-0 vs floor signals, never fade")
+            if o.get("reissue_conflict"):
+                econ += (f"\n  🛑 **{o['reissue_conflict']}** — "
+                         f"do not trade this print")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — CLI printed **{o['printed']}°** "
                 f"[{cert}] → ask {o['ask']}¢ × {o['ask_depth']:.0f}{econ}\n  `{o['cmd']}`")
         else:
             levels = ", ".join(f"{p}¢×{q}" for p, q in o["levels"])
+            warn = (f"\n  🛑 **{o['reissue_conflict']}** — do not trade this print"
+                    if o.get("reissue_conflict") else "")
             lines.append(
                 f"**{o['ticker']}** ({o['subtitle']}) — dead vs CLI {o['printed']}° "
-                f"[{cert}] → bids {levels}, net ~${o['net_cents'] / 100:.2f}\n  `{o['cmd']}`")
+                f"[{cert}] → bids {levels}, net ~${o['net_cents'] / 100:.2f}{warn}\n  `{o['cmd']}`")
     lines.append("_Alert only — the CLI text is quoted in the journal; verify before trading._")
     return title, "\n".join(lines)
 
@@ -557,9 +805,14 @@ async def run(dry_run: bool, replay: str | None) -> None:
                 if not replay:
                     state["seen"][key] = now_utc.isoformat(timespec="seconds")
                 if not dry_run:
+                    # Journal the EFFECTIVE finality: DEN's pre-dawn same-day
+                    # dailies (12:3xZ) carry no VALID TODAY line, so the raw
+                    # regex marks them FINAL — and a false final for (awips,
+                    # date) poisoned metar_sniper's cli_floor_crosscheck
+                    # finals set, muting busts/confirms all day (2026-07-16).
                     _journal({"ts": now_utc.isoformat(timespec="seconds"),
-                              **asdict(parsed), "skipped": "intraday",
-                              "findings": []}, now_utc)
+                              **asdict(parsed), "is_final": False,
+                              "skipped": "intraday", "findings": []}, now_utc)
                 continue
             parsed.is_final = finality == "final"
             journal_entry = {"ts": now_utc.isoformat(timespec="seconds"),
@@ -569,6 +822,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
             obs_pair: tuple[float | None, float | None] = (None, None)
             obs_trend: dict | None = None
             obs_checked = False                # lazy, once per station
+            product_priced: list[dict] = []    # all priced findings, guard runs once
             for ladder in group:
                 markets, ok = await client.get_markets_checked(series_ticker=ladder.series)
                 if not ok:
@@ -612,9 +866,69 @@ async def run(dry_run: bool, replay: str | None) -> None:
                     except Exception as exc:  # noqa: BLE001 — annotation is fail-open
                         logger.warning(f"{parsed.awips}: obs fetch failed: {exc}")
                 _annotate_obs_context(priced, *obs_pair, trend=obs_trend)
-                journal_entry["findings"] += [
-                    {k: v for k, v in f.items() if k != "cmd"} for f in priced]
-                opportunities += [p for p in priced if not p.get("suppressed")]
+                product_priced += priced
+            # Stage-time reissue guard: one archive fetch per product that
+            # would offer a button (or print a runnable command) — a
+            # strictly-newer same-class product whose extreme moved stamps
+            # `reissue_conflict`: no button, info-only alert.
+            if any(p.get("cmd") and not (p.get("obs_kill") or p.get("obs_warn")
+                                         or p.get("wall_ask"))
+                   for p in product_priced):
+                archive = await asyncio.to_thread(
+                    fetch_archive_products, parsed.awips)
+                status, newer = newer_archive_product(
+                    parsed, group[0].tz, now_utc, archive)
+                if newer is not None:
+                    n = apply_reissue_conflicts(product_priced, newer)
+                    journal_entry["reissue_check"] = (
+                        f"newer:{newer.stamp}:conflicts={n}")
+                    if n:
+                        logger.warning(
+                            f"{parsed.awips}: REISSUE GUARD — newer product "
+                            f"{newer.stamp} (max={newer.max_f} "
+                            f"min={newer.min_f}) refutes {n} finding(s); "
+                            f"staging suppressed")
+                else:
+                    journal_entry["reissue_check"] = status
+            journal_entry["findings"] += [
+                {k: v for k, v in f.items() if k != "cmd"}
+                for f in product_priced]
+            opportunities += [p for p in product_priced
+                              if not p.get("suppressed")]
+            # Untagged-reissue watch: NWS re-issues without a CORRECTED tag
+            # (2026-07-16 BOS: min 51→69, correction field null). When a new
+            # stamp moves an extreme prior findings were premised on, the
+            # human may hold a position and a staged button may still be
+            # live — supersede the buttons and mirror the correction path
+            # with an exit-signal notice.
+            prior = _prior_journaled_product(
+                parsed.awips, parsed.summary_date, parsed.is_final, now_utc)
+            moves = (reissue_moves(prior, parsed)
+                     if prior and prior.get("stamp") != parsed.stamp else {})
+            if moves:
+                retracted = 0
+                if not dry_run and not replay:
+                    retracted = await _retract_superseded(parsed, now_utc)
+                if not parsed.correction:
+                    notice = {"kind": "reissue_notice",
+                              "ticker": f"REISSUE:{parsed.awips}"
+                                        f":{parsed.summary_date}:{parsed.stamp}",
+                              "awips": parsed.awips,
+                              "summary_date": parsed.summary_date,
+                              "prior_stamp": prior.get("stamp"),
+                              "stamp": parsed.stamp,
+                              "moves": {k: list(v) for k, v in moves.items()},
+                              "retracted": retracted,
+                              "final": parsed.is_final}
+                    journal_entry["findings"].append(notice)
+                    opportunities.append(notice)
+                    logger.warning(
+                        f"{parsed.awips}: untagged REISSUE for "
+                        f"{parsed.summary_date} — "
+                        + ", ".join(f"{k} {v[0]}→{v[1]}"
+                                    for k, v in moves.items())
+                        + (f"; {retracted} button(s) retracted"
+                           if retracted else ""))
             # A corrected re-issue of a product we previously found money on
             # is alert-worthy even when nothing re-classifies (e.g. a value
             # scrubbed to MM removes every finding) — the human may hold a
@@ -663,10 +977,11 @@ async def run(dry_run: bool, replay: str | None) -> None:
         # Phone-push (@mention) only when something is actually takeable —
         # trap-stamped or suppressed findings stay silent embeds.
         actionable = any(
-            o["kind"] == "correction_notice"
+            o["kind"] in ("correction_notice", "reissue_notice")
             or (o["kind"] in ("buy_winner", "sell_dead")
                 and not (o.get("suppressed") or o.get("obs_kill")
-                         or o.get("obs_warn") or o.get("wall_ask")))
+                         or o.get("obs_warn") or o.get("wall_ask")
+                         or o.get("reissue_conflict")))
             for o in fresh)
         try:
             from notifications import send_discord_alert
@@ -692,8 +1007,12 @@ async def run(dry_run: bool, replay: str | None) -> None:
         except Exception as exc:  # noqa: BLE001 — staging must not break alerting
             logger.warning(f"take queue enqueue failed: {exc}")
         for o in fresh:
+            # .get: notice kinds (correction/reissue) carry no printed value
+            # — o["printed"] here crashed the run after the alert but before
+            # the state save, re-alerting every product each */2 tick.
             state["alerted"][o["ticker"]] = {
-                "ts": now_utc.isoformat(timespec="seconds"), "printed": o["printed"]}
+                "ts": now_utc.isoformat(timespec="seconds"),
+                "printed": o.get("printed")}
         logger.info(f"cli sniper: alerted {len(fresh)} opportunity(ies)")
     _save_state(state)
 

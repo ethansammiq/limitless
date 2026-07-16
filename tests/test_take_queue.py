@@ -375,3 +375,90 @@ class TestDailyCap:
         monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "2")
         assert take_queue.enqueue_findings(
             [self._f("KXHIGHCHI-26JUL14-T94", 20, 18)], "cli_sniper", NOW) == 0
+
+
+class TestReissueGuardStaging:
+    """2026-07-16 BOS: a silently re-issued CLI (min 51→69, no CORRECTED
+    tag) had a falsified sell_dead staged on the live favorite."""
+
+    def test_reissue_conflict_never_gets_a_button(self):
+        f = _finding(reissue_conflict="reissued 162139: min 51→69")
+        assert take_queue.entry_from_finding(f, "cli_sniper", NOW) is None
+
+    def test_cli_finding_carries_its_premise(self):
+        f = _finding(awips="BOS", stamp="162129",
+                     summary_date="2026-07-16", ladder_kind="low",
+                     printed=51, final=False)
+        e = take_queue.entry_from_finding(f, "cli_sniper", NOW)
+        assert e["premise"] == {"awips": "BOS", "stamp": "162129",
+                                "summary_date": "2026-07-16", "printed": 51,
+                                "ladder_kind": "low", "final": False}
+
+    def test_finding_without_provenance_stages_premiseless(self):
+        e = take_queue.entry_from_finding(_finding(kind="sell_dead"),
+                                          "metar_sniper", NOW)
+        assert e is not None and "premise" not in e
+
+
+class TestSupersede:
+    def _staged_id(self):
+        take_queue.enqueue_findings([_finding()], "cli_sniper", NOW)
+        return next(iter(take_queue.load_queue()["entries"]))
+
+    def test_active_entry_superseded_and_returned(self):
+        eid = self._staged_id()
+        take_queue.update_entries({eid: {"status": "posted",
+                                         "message_id": "m1"}}, NOW)
+        dead = take_queue.supersede_entries([eid], "CLI reissued 162139", NOW)
+        assert [e["id"] for e in dead] == [eid]
+        assert dead[0]["message_id"] == "m1"
+        e = take_queue.load_queue()["entries"][eid]
+        assert e["status"] == "superseded"
+        assert e["result"] == "CLI reissued 162139"
+
+    def test_superseded_releases_the_night_budget(self):
+        eid = self._staged_id()
+        entries = take_queue.load_queue()["entries"]
+        assert take_queue.night_spent_dollars(
+            entries, "KXHIGHTMIN-26JUL12-T91") > 0
+        take_queue.supersede_entries([eid], "reissue", NOW)
+        entries = take_queue.load_queue()["entries"]
+        assert take_queue.night_spent_dollars(
+            entries, "KXHIGHTMIN-26JUL12-T91") == 0
+
+    def test_terminal_and_unknown_ids_untouched(self):
+        eid = self._staged_id()
+        take_queue.update_entries({eid: {"status": "executed"}}, NOW)
+        assert take_queue.supersede_entries([eid, "ghost"], "r", NOW) == []
+        assert take_queue.load_queue()["entries"][eid]["status"] == "executed"
+
+
+class TestClaimForExecution:
+    def _posted_id(self):
+        take_queue.enqueue_findings([_finding()], "cli_sniper", NOW)
+        eid = next(iter(take_queue.load_queue()["entries"]))
+        take_queue.update_entries({eid: {"status": "posted",
+                                         "message_id": "m1"}}, NOW)
+        return eid
+
+    def test_posted_entry_claims_once(self):
+        eid = self._posted_id()
+        assert take_queue.claim_for_execution(eid, False, NOW) is True
+        e = take_queue.load_queue()["entries"][eid]
+        assert e["status"] == "executing" and e["auto_fired"] is False
+        # at-most-once: a second claimer must lose
+        assert take_queue.claim_for_execution(eid, False, NOW) is False
+
+    def test_pending_and_unknown_never_claim(self):
+        take_queue.enqueue_findings([_finding()], "cli_sniper", NOW)
+        eid = next(iter(take_queue.load_queue()["entries"]))
+        assert take_queue.claim_for_execution(eid, False, NOW) is False
+        assert take_queue.claim_for_execution("ghost", False, NOW) is False
+
+    def test_supersede_beats_the_claim(self):
+        # The race the atomic claim closes: a reissue supersede lands after
+        # the approver's snapshot — the fire must be refused.
+        eid = self._posted_id()
+        take_queue.supersede_entries([eid], "CLI reissued", NOW)
+        assert take_queue.claim_for_execution(eid, False, NOW) is False
+        assert take_queue.load_queue()["entries"][eid]["status"] == "superseded"

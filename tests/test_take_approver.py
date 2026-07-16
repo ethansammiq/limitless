@@ -517,3 +517,30 @@ class TestRunActivitySignal:
         import json as _json
         self.tq.QUEUE_FILE.write_text(_json.dumps({"entries": {old["id"]: old}}))
         assert _asyncio.run(take_approver.run(dry_run=False)) is False
+
+
+class TestPremiseVerdict:
+    """Fire-time reissue guard: the staged CLI premise is re-checked against
+    the archive just before take.py (2026-07-16 BOS: min 51→69)."""
+
+    NOW = datetime(2026, 7, 16, 21, 50, tzinfo=timezone.utc)
+    ENTRY = {"ticker": "KXLOWTBOS-26JUL16-T68", "kind": "sell_dead",
+             "premise": {"awips": "BOS", "stamp": "162129",
+                         "summary_date": "2026-07-16", "printed": 51,
+                         "ladder_kind": "low", "final": False}}
+
+    def test_moved_verdict_passes_through(self, monkeypatch):
+        import cli_sniper
+        monkeypatch.setattr(cli_sniper, "check_premise",
+                            lambda entry, now: ("moved", "min 51→69"))
+        assert take_approver.premise_verdict(dict(self.ENTRY), self.NOW) == (
+            "moved", "min 51→69")
+
+    def test_check_failure_fails_open(self, monkeypatch):
+        import cli_sniper
+
+        def boom(entry, now):
+            raise OSError("HTTP Error 429")
+        monkeypatch.setattr(cli_sniper, "check_premise", boom)
+        verdict, _ = take_approver.premise_verdict(dict(self.ENTRY), self.NOW)
+        assert verdict == "unchecked"

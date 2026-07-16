@@ -244,6 +244,44 @@ def decide(entry: dict, now_utc: datetime, reactor_ids: set[str],
     return "execute", "auto-approved (00Z class)" if auto_approved else "approved"
 
 
+def premise_verdict(entry: dict, now_utc: datetime) -> tuple[str, str]:
+    """('moved'|'clear'|'unchecked', reason): does the CLI print this entry
+    was staged on still stand in the IEM archive?
+
+    The fire-time layer of the reissue guard (2026-07-16 BOS: bogus min 51
+    silently re-issued as 69 — a staged sell_dead on the live favorite must
+    die here even when it staged before the re-issue existed anywhere).
+    Lazy import keeps the approver importable without the sniper's module
+    graph; ANY failure passes open — the guard only removes, and the human
+    tap (or the shadow-graded auto class) already authorized the order."""
+    try:
+        from cli_sniper import check_premise
+
+        return check_premise(entry, now_utc)
+    except Exception as exc:  # noqa: BLE001 — fail open at money time
+        logger.warning(f"{entry.get('ticker')}: premise check failed: {exc}")
+        return "unchecked", f"premise check failed: {exc}"
+
+
+async def retract_buttons(entries: list[dict], reason: str) -> None:
+    """Edit already-posted TAKE? prompts for superseded entries so a stale
+    button can't invite a tap. The queue status already blocks execution
+    (claim_for_execution refuses non-posted entries) — this is the
+    human-facing half. Called by the snipers after supersede_entries."""
+    cfg = _config()
+    posted = [e for e in entries if e.get("message_id")]
+    if cfg is None or not posted:
+        return
+    import aiohttp
+
+    ttl = take_queue.ttl_minutes()
+    async with aiohttp.ClientSession() as session:
+        for e in posted:
+            await edit_message(session, cfg, e["message_id"],
+                               f"🛑 RETRACTED — {reason}\n"
+                               f"~~{format_prompt(e, ttl)}~~")
+
+
 def build_take_argv(entry: dict) -> list[str]:
     """argv for the staged order — list form, no shell, no injection surface."""
     return [sys.executable, str(TAKE_SCRIPT), entry["ticker"], entry["action"],
@@ -538,14 +576,34 @@ async def run(dry_run: bool, quiet_idle: bool = False) -> bool:
                 logger.info(f"{entry['ticker']}: daily cap — {day_reason}")
                 continue
 
-            # Persist the marker BEFORE the order so a crash mid-subprocess
-            # can never double-fire (at-most-once).
             if dry_run:
                 print(f"would execute: {' '.join(build_take_argv(entry))}")
                 continue
+            # Fire-time reissue guard: entries staged from a CLI print carry
+            # its premise — re-check the archive so a silently re-issued
+            # value can never be traded (fail open on archive refusal).
+            if entry.get("premise"):
+                p_verdict, p_reason = await asyncio.to_thread(
+                    premise_verdict, entry, now_utc)
+                if p_verdict == "moved":
+                    _mut(eid, status="superseded", result=p_reason,
+                         resolved_ts=now_utc.isoformat(timespec="seconds"))
+                    await edit_message(session, cfg, entry["message_id"],
+                                       f"🛑 NOT EXECUTED — {p_reason}\n"
+                                       f"~~{format_prompt(entry, ttl)}~~")
+                    logger.warning(f"{entry['ticker']}: premise moved — "
+                                   f"{p_reason}")
+                    continue
+            # Persist the marker BEFORE the order so a crash mid-subprocess
+            # can never double-fire (at-most-once). The claim is atomic on
+            # status=="posted": a supersede that landed after our snapshot
+            # wins, and the order is never placed.
             marker = {"status": "executing", "auto_fired": auto_fire,
                       "resolved_ts": now_utc.isoformat(timespec="seconds")}
-            take_queue.update_entries({eid: marker})
+            if not take_queue.claim_for_execution(eid, auto_fire, now_utc):
+                logger.warning(f"{entry['ticker']}: not fired — entry was "
+                               f"resolved elsewhere between snapshot and claim")
+                continue
             # Same dict object as queue["entries"][eid] — keeps this run's
             # auto_allowance arithmetic honest for later entries.
             entry.update(marker)

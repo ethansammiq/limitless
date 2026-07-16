@@ -43,10 +43,12 @@ PRUNE_TERMINAL_AFTER_H = 48
 # order subprocess runs — an entry found in that state is never retried
 # (at-most-once), only surfaced for a manual fills check. "capped" is a
 # fire refused by the portfolio-day cap — terminal, but it spent nothing
-# (kept out of NIGHT_LEDGER_STATUSES below).
+# (kept out of NIGHT_LEDGER_STATUSES below). "superseded" is a premise
+# killed by a CLI reissue (2026-07-16 BOS: bogus min 51 re-issued as 69
+# with no CORRECTED tag) — terminal, spent nothing, button retracted.
 ACTIVE_STATUSES = ("pending", "posted")
 TERMINAL_STATUSES = ("executed", "expired", "repriced", "failed", "executing",
-                     "capped")
+                     "capped", "superseded")
 ENQUEUEABLE_KINDS = ("buy_winner", "sell_dead")
 
 # The only class pre-cleared for auto-execution (shadow-graded first): a
@@ -218,10 +220,13 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
     want the other side, or to verify) but a one-tap buy button on an
     observed-dead bracket — or INTO a certainty wall (5-0, never fade; the
     2026-07-13 CHI T87 5000×1¢ button was a fade dispenser) — is never staged.
+    reissue_conflict joins the same family (2026-07-16 BOS: a silently
+    re-issued CLI moved min 51→69 under a staged sell_dead on the live
+    favorite): the print the finding is premised on no longer stands.
     """
     if (finding.get("kind") not in ENQUEUEABLE_KINDS or finding.get("suppressed")
             or finding.get("obs_kill") or finding.get("obs_warn")
-            or finding.get("wall_ask")):
+            or finding.get("wall_ask") or finding.get("reissue_conflict")):
         return None
     if not stageable_class(finding, source):
         return None
@@ -238,13 +243,24 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
     if "drift_prob" in finding:
         summary_bits.append(f"drift {finding['drift_prob']:.0%} "
                             f"EV {finding.get('drift_ev_c', 0):+.0f}¢")
-    return {"id": f"{source}:{parsed['ticker']}:{ts}",
-            "ts": ts, "source": source, "kind": finding["kind"],
-            **parsed, "count": count,
-            "summary": " · ".join(b for b in summary_bits if b),
-            "auto_eligible": is_auto_eligible(finding, source),
-            "status": "pending", "message_id": None,
-            "posted_ts": None, "resolved_ts": None, "result": None}
+    entry = {"id": f"{source}:{parsed['ticker']}:{ts}",
+             "ts": ts, "source": source, "kind": finding["kind"],
+             **parsed, "count": count,
+             "summary": " · ".join(b for b in summary_bits if b),
+             "auto_eligible": is_auto_eligible(finding, source),
+             "status": "pending", "message_id": None,
+             "posted_ts": None, "resolved_ts": None, "result": None}
+    if finding.get("awips") and finding.get("stamp"):
+        # The CLI print this button is premised on — the approver re-checks
+        # it against the archive at fire time, and a later sniper run that
+        # sees a reissue supersedes the entry through it (reissue guard).
+        entry["premise"] = {
+            "awips": finding["awips"], "stamp": finding["stamp"],
+            "summary_date": finding.get("summary_date"),
+            "printed": finding.get("printed"),
+            "ladder_kind": finding.get("ladder_kind"),
+            "final": bool(finding.get("final"))}
+    return entry
 
 
 def enqueue_findings(findings: list[dict], source: str,
@@ -320,6 +336,48 @@ def update_entries(mutations: dict[str, dict],
                 queue["entries"][eid].update(fields)
         _prune(queue["entries"], now_utc)
         atomic_write_json(QUEUE_FILE, queue, indent=1)
+
+
+def supersede_entries(entry_ids: list[str], reason: str,
+                      now_utc: datetime | None = None) -> list[dict]:
+    """Terminal-mark still-active entries whose CLI premise died (reissue
+    guard). Returns the superseded entries (with message_id) so the caller
+    can retract their Discord buttons. Their night/day budget is released
+    (superseded is not in NIGHT_LEDGER_STATUSES)."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    out = []
+    with _locked():
+        queue = _load_unlocked()
+        for eid in entry_ids:
+            e = queue["entries"].get(eid)
+            if not e or e.get("status") not in ACTIVE_STATUSES:
+                continue
+            e.update(status="superseded", result=reason,
+                     resolved_ts=now_utc.isoformat(timespec="seconds"))
+            out.append(dict(e))
+        if out:
+            atomic_write_json(QUEUE_FILE, queue, indent=1)
+    return out
+
+
+def claim_for_execution(entry_id: str, auto_fired: bool = False,
+                        now_utc: datetime | None = None) -> bool:
+    """Atomically move a POSTED entry to the crash-safe "executing" marker.
+
+    Status check and write happen under one lock, so a supersede (or any
+    other resolution) landing between the approver's snapshot and its fire
+    can never be overwritten — False means someone else resolved the entry
+    first and the order must NOT be placed."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    with _locked():
+        queue = _load_unlocked()
+        e = queue["entries"].get(entry_id)
+        if not e or e.get("status") != "posted":
+            return False
+        e.update(status="executing", auto_fired=auto_fired,
+                 resolved_ts=now_utc.isoformat(timespec="seconds"))
+        atomic_write_json(QUEUE_FILE, queue, indent=1)
+    return True
 
 
 def is_expired(entry: dict, now_utc: datetime, ttl_min: int | None = None) -> bool:

@@ -552,3 +552,309 @@ class TestDriftEconomics:
         e = self._entry()
         cs._attach_drift_economics(e)
         assert "drift_prob" not in e
+
+
+# ─── Reissue guard (2026-07-16 BOS: bogus min 51 silently re-issued as 69) ──
+
+BOS_LOW = Ladder(series="KXLOWTBOS", kind="low", awips="BOS", wfo="BOX",
+                 station_icao="KBOS", tz="America/New_York")
+GUARD_NOW = datetime(2026, 7, 16, 21, 42, 1, tzinfo=timezone.utc)
+BOS_MARKETS = [
+    _mkt("KXLOWTBOS-26JUL16-T68", "69° or above"),
+    _mkt("KXLOWTBOS-26JUL16-B67.5", "67° to 68°"),
+    _mkt("KXLOWTBOS-26JUL16-T61", "60° or below"),
+]
+
+
+def _bos_product(stamp: str, min_f, max_f=89) -> str:
+    min_line = f"  MINIMUM         {min_f}    509 AM\n" if min_f is not None else ""
+    return (f"000\nCDUS41 KBOX {stamp}\nCLIBOS\n\n"
+            f"CLIMATE REPORT\nNATIONAL WEATHER SERVICE BOSTON, MA\n\n"
+            f"...THE BOSTON MA CLIMATE SUMMARY FOR JULY 16 2026...\n"
+            f"VALID TODAY AS OF 0400 PM LOCAL TIME.\n\n"
+            f"TEMPERATURE (F)\n TODAY\n"
+            f"  MAXIMUM         {max_f}    435 PM\n{min_line}")
+
+
+def _floor(parsed):
+    """Mirror run()'s effective-finality override before classification."""
+    parsed.is_final = cs.effective_finality(
+        parsed, "America/New_York", GUARD_NOW) == "final"
+    return parsed
+
+
+class TestConflictRule:
+    def test_no_move_never_conflicts(self):
+        assert not cs._conflicts("sell_dead", "low", False, 51, 51)
+        assert not cs._conflicts("buy_winner", "high", True, 94, 94)
+
+    def test_impossible_direction_kills_sell_dead(self):
+        # A floor min can only FALL between prints; 51→69 = bogus print.
+        assert cs._conflicts("sell_dead", "low", False, 51, 69)
+        # A floor max can only RISE; 94→92 = bogus print.
+        assert cs._conflicts("sell_dead", "high", False, 94, 92)
+
+    def test_legit_direction_keeps_sell_dead(self):
+        # Deadness is monotone: a higher max / lower min only strengthens it.
+        assert not cs._conflicts("sell_dead", "high", False, 94, 95)
+        assert not cs._conflicts("sell_dead", "low", False, 69, 67)
+
+    def test_any_move_kills_buy_winner(self):
+        assert cs._conflicts("buy_winner", "high", False, 94, 95)
+        assert cs._conflicts("buy_winner", "low", False, 69, 67)
+
+    def test_any_move_on_a_final_kills_everything(self):
+        assert cs._conflicts("sell_dead", "high", True, 94, 95)
+        assert cs._conflicts("sell_dead", "low", True, 69, 67)
+
+    def test_scrubbed_to_mm_kills_everything(self):
+        assert cs._conflicts("sell_dead", "low", False, 51, None)
+        assert cs._conflicts("buy_winner", "high", False, 94, None)
+
+
+class TestArchiveFetchAndSplit:
+    def test_splits_multi_product_blob(self, monkeypatch):
+        blob = _bos_product("162139", 69) + "\x01" + _bos_product("162129", 51)
+        from core import dsm
+        monkeypatch.setattr(dsm, "afos_text", lambda pil, **kw: blob)
+        products = cs.fetch_archive_products("BOS")
+        assert [(p.stamp, p.min_f) for p in products] == [
+            ("162139", 69), ("162129", 51)]
+
+    def test_splits_on_sequence_header_without_control_char(self, monkeypatch):
+        blob = _bos_product("162139", 69) + "\n" + _bos_product("162129", 51)
+        from core import dsm
+        monkeypatch.setattr(dsm, "afos_text", lambda pil, **kw: blob)
+        assert len(cs.fetch_archive_products("BOS")) == 2
+
+    def test_fetch_failure_returns_none(self, monkeypatch):
+        from core import dsm
+
+        def boom(pil, **kw):
+            raise OSError("HTTP Error 429")
+        monkeypatch.setattr(dsm, "afos_text", boom)
+        assert cs.fetch_archive_products("BOS") is None
+
+
+class TestNewerArchiveProduct:
+    def _parse(self, stamp, min_f):
+        return _floor(cs.parse_product(_bos_product(stamp, min_f)))
+
+    def test_finds_the_silent_reissue(self):
+        bogus = self._parse("162129", 51)
+        archive = [self._parse("162139", 69), self._parse("162129", 51)]
+        status, newer = cs.newer_archive_product(
+            bogus, "America/New_York", GUARD_NOW, archive)
+        assert status == "newer" and newer.stamp == "162139"
+        assert newer.min_f == 69
+
+    def test_older_archive_copy_cannot_refute(self):
+        # IEM lag: processing the CORRECT reissue while the archive still
+        # holds only the bogus original must not suppress its staging.
+        good = self._parse("162139", 69)
+        archive = [self._parse("162129", 51)]
+        status, newer = cs.newer_archive_product(
+            good, "America/New_York", GUARD_NOW, archive)
+        assert status == "clear" and newer is None
+
+    def test_same_stamp_is_clear(self):
+        bogus = self._parse("162129", 51)
+        status, newer = cs.newer_archive_product(
+            bogus, "America/New_York", GUARD_NOW, [self._parse("162129", 51)])
+        assert status == "clear" and newer is None
+
+    def test_unavailable_archive_is_unchecked(self):
+        bogus = self._parse("162129", 51)
+        status, _ = cs.newer_archive_product(
+            bogus, "America/New_York", GUARD_NOW, None)
+        assert status == "unchecked"
+
+    def test_other_station_or_date_ignored(self):
+        bogus = self._parse("162129", 51)
+        other = self._parse("162139", 69)
+        other.awips = "NYC"
+        status, _ = cs.newer_archive_product(
+            bogus, "America/New_York", GUARD_NOW, [other])
+        assert status == "clear"
+
+
+class TestReissueSequence51To69:
+    """End-to-end mirror of the live incident: classify off the bogus 51,
+    guard against the archived 162139/69, staging must die."""
+
+    def _findings(self):
+        bogus = _floor(cs.parse_product(_bos_product("162129", 51)))
+        found = cs.classify(bogus, BOS_LOW, BOS_MARKETS)
+        by = {f["ticker"]: f for f in found}
+        # The falsified premise: the live favorite marked dead, plus a
+        # bogus buy_winner on the 60-or-below bracket.
+        assert by["KXLOWTBOS-26JUL16-T68"]["kind"] == "sell_dead"
+        assert by["KXLOWTBOS-26JUL16-T61"]["kind"] == "buy_winner"
+        return bogus, found, by
+
+    def test_findings_carry_the_premise(self):
+        _, _, by = self._findings()
+        f = by["KXLOWTBOS-26JUL16-T68"]
+        assert (f["awips"], f["stamp"], f["summary_date"]) == (
+            "BOS", "162129", "2026-07-16")
+
+    def test_conflicts_stamped_and_staging_blocked(self):
+        from core import take_queue
+
+        bogus, found, by = self._findings()
+        newer = _floor(cs.parse_product(_bos_product("162139", 69)))
+        n = cs.apply_reissue_conflicts(found, newer)
+        assert n == len(found)          # min ROSE: impossible, all refuted
+        sell = by["KXLOWTBOS-26JUL16-T68"]
+        assert "51→69" in sell["reissue_conflict"]
+        sell["cmd"] = (".venv/bin/python scripts/take.py "
+                       "KXLOWTBOS-26JUL16-T68 sell yes 424 31")
+        assert take_queue.entry_from_finding(sell, "cli_sniper", GUARD_NOW) is None
+
+    def test_legit_floor_rise_keeps_sell_dead_staging(self):
+        high = Ladder(series="KXHIGHNY", kind="high", awips="NYC", wfo="OKX",
+                      station_icao="KNYC", tz="America/New_York")
+        p = _floor(cs.parse_product(_bos_product("162129", 51, max_f=94)))
+        p.awips = "NYC"
+        markets = [_mkt("KXHIGHNY-26JUL16-T90", "89° or below"),
+                   _mkt("KXHIGHNY-26JUL16-B94.5", "94° to 95°")]
+        found = cs.classify(p, high, markets)
+        newer = _floor(cs.parse_product(_bos_product("162140", 51, max_f=95)))
+        cs.apply_reissue_conflicts(found, newer)
+        by = {f["ticker"]: f for f in found}
+        assert "reissue_conflict" not in by["KXHIGHNY-26JUL16-T90"]   # still dead
+        assert "reissue_conflict" in by["KXHIGHNY-26JUL16-B94.5"]     # bracket premise moved
+
+
+class TestCheckPremise:
+    ENTRY = {"kind": "sell_dead",
+             "premise": {"awips": "BOS", "stamp": "162129",
+                         "summary_date": "2026-07-16", "printed": 51,
+                         "ladder_kind": "low", "final": False}}
+
+    def _products(self, *specs):
+        return [_floor(cs.parse_product(_bos_product(s, m))) for s, m in specs]
+
+    def test_moved_premise_refuses_the_fire(self):
+        verdict, reason = cs.check_premise(
+            self.ENTRY, GUARD_NOW, products=self._products(("162139", 69)))
+        assert verdict == "moved"
+        assert "51→69" in reason
+
+    def test_unmoved_reissue_is_clear(self):
+        verdict, _ = cs.check_premise(
+            self.ENTRY, GUARD_NOW, products=self._products(("162139", 51)))
+        assert verdict == "clear"
+
+    def test_archive_unavailable_fails_open(self, monkeypatch):
+        monkeypatch.setattr(cs, "fetch_archive_products", lambda awips: None)
+        verdict, _ = cs.check_premise(self.ENTRY, GUARD_NOW)
+        assert verdict == "unchecked"
+
+    def test_entry_without_premise_is_unchecked(self):
+        verdict, _ = cs.check_premise({"kind": "sell_dead"}, GUARD_NOW,
+                                      products=self._products(("162139", 69)))
+        assert verdict == "unchecked"
+
+
+class TestSupersededEntryIds:
+    def _entry(self, **over):
+        base = {"source": "cli_sniper", "status": "posted",
+                "kind": "sell_dead", "ticker": "KXLOWTBOS-26JUL16-T68",
+                "premise": {"awips": "BOS", "stamp": "162129",
+                            "summary_date": "2026-07-16", "printed": 51,
+                            "ladder_kind": "low", "final": False}}
+        base.update(over)
+        return base
+
+    def _reissue(self):
+        return _floor(cs.parse_product(_bos_product("162139", 69)))
+
+    def test_bos_button_is_superseded(self):
+        ids = cs.superseded_entry_ids({"e1": self._entry()}, self._reissue(),
+                                      GUARD_NOW)
+        assert ids == ["e1"]
+
+    def test_terminal_metar_other_station_and_same_stamp_ignored(self):
+        entries = {
+            "done": self._entry(status="executed"),
+            "metar": self._entry(source="metar_sniper"),
+            "other": self._entry(premise={**self._entry()["premise"],
+                                          "awips": "NYC"}),
+            "same": self._entry(premise={**self._entry()["premise"],
+                                         "stamp": "162139"}),
+        }
+        assert cs.superseded_entry_ids(entries, self._reissue(), GUARD_NOW) == []
+
+    def test_legit_move_keeps_sell_dead_button(self):
+        e = self._entry(kind="sell_dead",
+                        premise={"awips": "BOS", "stamp": "162129",
+                                 "summary_date": "2026-07-16", "printed": 72,
+                                 "ladder_kind": "low", "final": False})
+        # Reissue min 69 < premise 72: the min legitimately fell — brackets
+        # above 72 are still dead, the button stands.
+        assert cs.superseded_entry_ids({"e": e}, self._reissue(), GUARD_NOW) == []
+
+
+class TestPriorJournalAndMoves:
+    NOW = datetime(2026, 7, 16, 21, 56, 1, tzinfo=timezone.utc)
+
+    def _write(self, tmp_path, monkeypatch, rows):
+        import json as _json
+        monkeypatch.setattr(cs, "JOURNAL_DIR", tmp_path)
+        with (tmp_path / "2026-07-16.jsonl").open("w") as fh:
+            for r in rows:
+                fh.write(_json.dumps(r) + "\n")
+
+    FLOOR_ROW = {"ts": "2026-07-16T21:42:01+00:00", "awips": "BOS",
+                 "stamp": "162129", "summary_date": "2026-07-16",
+                 "is_final": False, "max_f": 89, "min_f": 51,
+                 "findings": [{"ticker": "KXLOWTBOS-26JUL16-T68",
+                               "kind": "sell_dead", "ladder_kind": "low",
+                               "printed": 51}]}
+
+    def test_prior_floor_found_and_moves_detected(self, tmp_path, monkeypatch):
+        skipped = {"ts": "2026-07-16T12:30:02+00:00", "awips": "BOS",
+                   "stamp": "161229", "summary_date": "2026-07-16",
+                   "is_final": True, "max_f": 73, "min_f": 68,
+                   "skipped": "intraday", "findings": []}
+        self._write(tmp_path, monkeypatch, [skipped, self.FLOOR_ROW])
+        prior = cs._prior_journaled_product("BOS", "2026-07-16", False, self.NOW)
+        assert prior is not None and prior["stamp"] == "162129"
+        reissue = _floor(cs.parse_product(_bos_product("162139", 69)))
+        assert cs.reissue_moves(prior, reissue) == {"low": (51, 69)}
+
+    def test_move_on_unpremised_kind_ignored(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, [self.FLOOR_ROW])
+        prior = cs._prior_journaled_product("BOS", "2026-07-16", False, self.NOW)
+        # max also differs (89→88) but no high-ladder finding was premised
+        # on it — only the low move is an exit signal.
+        reissue = _floor(cs.parse_product(_bos_product("162139", 69, max_f=88)))
+        assert cs.reissue_moves(prior, reissue) == {"low": (51, 69)}
+
+    def test_no_prior_without_findings(self, tmp_path, monkeypatch):
+        row = dict(self.FLOOR_ROW, findings=[])
+        self._write(tmp_path, monkeypatch, [row])
+        assert cs._prior_journaled_product(
+            "BOS", "2026-07-16", False, self.NOW) is None
+
+
+class TestReissueAlertFormat:
+    def test_notice_line(self):
+        notice = {"kind": "reissue_notice", "ticker": "REISSUE:BOS:2026-07-16:162139",
+                  "awips": "BOS", "summary_date": "2026-07-16",
+                  "prior_stamp": "162129", "stamp": "162139",
+                  "moves": {"low": [51, 69]}, "retracted": 1, "final": False}
+        title, body = cs.format_alert([notice])
+        assert "REISSUE" in title
+        assert "min 51→69" in body and "162129→162139" in body
+        assert "1 staged button(s) retracted" in body
+
+    def test_conflicted_sell_line_carries_the_stop(self):
+        o = {"kind": "sell_dead", "ticker": "KXLOWTBOS-26JUL16-T68",
+             "subtitle": "69° or above", "printed": 51, "final": False,
+             "ladder_kind": "low", "net_cents": 19430,
+             "levels": [[83, 10]], "cmd": "x",
+             "reissue_conflict": "reissued 162139: min 51→69"}
+        _, body = cs.format_alert([o])
+        assert "🛑" in body and "do not trade this print" in body

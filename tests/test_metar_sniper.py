@@ -183,6 +183,17 @@ class TestCliFloorCrosscheck:
         assert ms.cli_floor_crosscheck(
             self._extreme(23, 317), "MSP", "America/Chicago", entries) == []
 
+    def test_skipped_intraday_pseudo_final_does_not_mute(self):
+        # DEN 2026-07-16: pre-dawn same-day dailies journaled is_final=true
+        # (raw regex label) with skipped:"intraday" — rows already on disk
+        # must not enter the finals set and mute a day of busts/confirms.
+        entries = self.CLI_ENTRIES + [
+            {"awips": "MSP", "summary_date": "2026-07-11", "is_final": True,
+             "skipped": "intraday", "findings": []}]
+        out = ms.cli_floor_crosscheck(
+            self._extreme(23, 317), "MSP", "America/Chicago", entries)
+        assert [o["kind"] for o in out] == ["cli_confirm"]
+
     def test_suppressed_and_low_and_other_station_ignored(self):
         out = ms.cli_floor_crosscheck(
             self._extreme(23, 317), "MIA", "America/New_York", self.CLI_ENTRIES)
