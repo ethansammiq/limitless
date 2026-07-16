@@ -1,20 +1,13 @@
-"""Tests for scripts/take.py guards (no network, no orders)."""
+"""Tests for scripts/take.py guards (no network, no orders).
+
+The cost model itself is covered in test_risk.py — take.py imports it."""
 import argparse
 
-from scripts.take import order_cost_dollars, summarize_order_fills, validate
+from scripts.take import summarize_order_fills, validate
 
 
 def _args(action="buy", side="yes", count=10, price_c=20):
     return argparse.Namespace(action=action, side=side, count=count, price_c=price_c)
-
-
-class TestCostModel:
-    def test_buy_yes_costs_price(self):
-        assert order_cost_dollars("buy", "yes", 40, 16) == 6.40
-
-    def test_sell_collateralizes_complement(self):
-        # selling YES at 22c: worst case is the 78c complement per contract
-        assert order_cost_dollars("sell", "yes", 20, 22) == 15.60
 
 
 class TestValidate:

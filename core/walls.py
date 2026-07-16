@@ -18,6 +18,14 @@ WALL_SINGLE_LEVEL_MIN = 1000.0
 WALL_LADDER_LEVELS = 3
 WALL_LADDER_LEVEL_MIN = 500.0
 
+# A deep top-of-book ask on the ENTRY side of a "winner" — the snipers'
+# buy-path trap flag (5-0 vs floor signals through 2026-07-12: MIA, MSP×2,
+# DAL, AUS). Distinct from the resting-BID structure detect_wall() measures
+# on shadow-book L2 (adversary intel): one asks "who is selling certainty
+# into my entry", the other "who is defending a settlement thesis". Same
+# adversary, different signature — do not merge the thresholds.
+WALL_ASK_DEPTH = 10_000
+
 
 def detect_wall(levels: list | None) -> dict | None:
     """Wall metrics for one side's resting bids; None when no wall.

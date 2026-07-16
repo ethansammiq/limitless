@@ -59,6 +59,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from core import drift, dsm  # noqa: E402
 from core.brackets import contains, is_dead, parse_subtitle  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
+from core.walls import WALL_ASK_DEPTH  # noqa: E402
 from core.obs import (  # noqa: E402
     annotate_floor_buys, corroborated_extreme, fetch_day_obs_timed, trend_class)
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
@@ -88,9 +89,8 @@ ALERTED_MAX_AGE_H = 48
 BUY_MAX_ASK_FINAL_C = 85          # certain winner: buy up to this ask
 BUY_MAX_ASK_FLOOR_C = 70          # floor leader: residual warming risk
 MIN_SELL_NET_C = 100              # dead-bid alert floor, cents ($1)
-# A deep opposing ask on a "winner" is the certainty-wall signature (5-0 vs
-# floor signals through 2026-07-12: MIA, MSP×2, DAL, AUS) — flag, never fade.
-WALL_ASK_DEPTH = 10_000
+# WALL_ASK_DEPTH (core/walls.py): a deep opposing ask on a "winner" is the
+# certainty-wall signature — flag, never fade.
 # A LOW ladder's afternoon print locks nothing — the min can still fall until
 # midnight LST, so "bracket contains printed min" is an open forecast bet.
 # Scorecard 2026-07-08: this class realized -30.8¢/contract over 6 settles

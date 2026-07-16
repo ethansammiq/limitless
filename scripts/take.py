@@ -31,16 +31,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-DEFAULT_MAX_NOTIONAL = 50.0
+from core.risk import DEFAULT_MAX_NOTIONAL, order_cost_dollars  # noqa: E402
+
 ET = ZoneInfo("America/New_York")
-
-
-def order_cost_dollars(action: str, side: str, count: int, price_c: int) -> float:
-    """Worst-case collateral: buys cost price; sells of YES you hold cost 0
-    but selling short / buying NO collateralizes the complement. Be
-    conservative and cap on the larger leg."""
-    leg = price_c if action == "buy" else 100 - price_c
-    return count * leg / 100
 
 
 def validate(args, max_notional: float) -> str | None:

@@ -172,16 +172,25 @@ def ladder_kind(series: str) -> str:
 
 
 def max_notional_dollars() -> float:
-    """The executable-size cap — same env override as scripts/take.py."""
+    """The executable-size cap — same env override as scripts/take.py.
+
+    Deliberately env-or-fixed, never bankroll-derived: grading history must
+    be reproducible regardless of the live balance at rerun time."""
     import os
+
+    from core.risk import DEFAULT_MAX_NOTIONAL
     try:
-        return float(os.getenv("TAKE_MAX_NOTIONAL", 50.0))
+        return float(os.getenv("TAKE_MAX_NOTIONAL", DEFAULT_MAX_NOTIONAL))
     except ValueError:
-        return 50.0
+        return DEFAULT_MAX_NOTIONAL
 
 
 def clamp_size(size: int, collateral_per_contract_c: float) -> int:
-    """Largest executable count: worst-case collateral fits the notional cap."""
+    """Largest executable count: worst-case collateral fits the notional cap.
+
+    Floors at 1 (grading assumes you'd take at least one contract) — unlike
+    risk.clamp_count, which floors at 0 because staging a zero-size order
+    is a refusal, not a trade."""
     if collateral_per_contract_c <= 0:
         return size
     return max(1, min(size, int(max_notional_dollars() * 100

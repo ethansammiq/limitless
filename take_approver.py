@@ -69,9 +69,9 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from core import take_queue  # noqa: E402
+from core.risk import order_cost_dollars  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from log_setup import get_logger  # noqa: E402
-from scripts.take import order_cost_dollars  # noqa: E402
 
 logger = get_logger(__name__)
 

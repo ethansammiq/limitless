@@ -50,22 +50,6 @@ class TestParseTakeCmd:
         assert take_queue.parse_take_cmd("") is None
 
 
-class TestClampCount:
-    def test_buy_clamps_to_notional_cap(self):
-        # the 2026-07-12 DAL alert: 60134 × 1¢ = $601 book depth, $50 cap
-        assert take_queue.clamp_count("buy", "yes", 60134, 1, 50.0) == 5000
-
-    def test_sell_clamps_on_complement_collateral(self):
-        # selling YES at 22¢ collateralizes 78¢/contract → 64 fit in $50
-        assert take_queue.clamp_count("sell", "yes", 100, 22, 50.0) == 64
-
-    def test_small_orders_pass_through(self):
-        assert take_queue.clamp_count("buy", "yes", 23, 18, 50.0) == 23
-
-    def test_unaffordable_single_contract_is_zero(self):
-        assert take_queue.clamp_count("buy", "yes", 10, 99, 0.5) == 0
-
-
 class TestEntryFromFinding:
     def test_buy_winner_becomes_entry(self):
         e = take_queue.entry_from_finding(_finding(), "cli_sniper", NOW)

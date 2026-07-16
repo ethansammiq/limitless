@@ -55,6 +55,8 @@ from core.fees import kalshi_taker_fee_cents  # noqa: E402
 from core.io import atomic_write_json  # noqa: E402
 from core.obs import (  # noqa: E402
     annotate_floor_buys, corroborated_extreme, fetch_day_obs_timed, trend_class)
+from core.risk import MAX_ENTRY_ASK_C  # noqa: E402
+from core.walls import WALL_ASK_DEPTH  # noqa: E402
 from dead_bracket_sweeper import bid_proceeds_cents  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402
 from ladders import Ladder, by_station  # noqa: E402
@@ -76,10 +78,9 @@ WINDOW_AFTER_MIN = 45     # until HH:45
 
 SEEN_MAX_AGE_H = 36
 ALERTED_MAX_AGE_H = 48
-MAX_BUY_ASK_C = 20        # user standing rule: 20¢ max suggested entry —
-                          # doubles as the repriced-already filter
+MAX_BUY_ASK_C = MAX_ENTRY_ASK_C  # the standing entry cap (core/risk.py) —
+                                 # doubles as the repriced-already filter
 MIN_SELL_NET_C = 100      # dead-bid alert floor, cents ($1)
-WALL_ASK_DEPTH = 10_000   # certainty-wall signature (5-0 through 2026-07-12)
 
 
 def in_fetch_window(now_utc: datetime) -> bool:

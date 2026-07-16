@@ -24,9 +24,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from core import risk
 from core.io import atomic_write_json
+from core.risk import clamp_count, order_cost_dollars  # noqa: F401 — shared money math
 from log_setup import get_logger
-from scripts.take import order_cost_dollars
 
 logger = get_logger(__name__)
 
@@ -35,9 +36,7 @@ QUEUE_FILE = PROJECT_ROOT / "take_queue.json"
 QUEUE_LOCK = PROJECT_ROOT / ".take_queue.lock"
 
 DEFAULT_TTL_MIN = 15
-DEFAULT_MAX_NOTIONAL = 50.0      # mirrors scripts/take.py's cap
-DEFAULT_NIGHT_CAP = 25.0         # $ per station-night ≈ 15% of the 07-2026 bankroll
-MAX_STAGE_ASK_C = 20             # the 2026-07-11 standing entry cap
+MAX_STAGE_ASK_C = risk.MAX_ENTRY_ASK_C
 PRUNE_TERMINAL_AFTER_H = 48
 
 # Entry lifecycle. "executing" is the crash-safe marker persisted BEFORE the
@@ -98,16 +97,16 @@ def ttl_minutes() -> int:
 
 def max_notional() -> float:
     try:
-        return float(os.getenv("TAKE_MAX_NOTIONAL", DEFAULT_MAX_NOTIONAL))
+        return float(os.getenv("TAKE_MAX_NOTIONAL", risk.DEFAULT_MAX_NOTIONAL))
     except ValueError:
-        return DEFAULT_MAX_NOTIONAL
+        return risk.DEFAULT_MAX_NOTIONAL
 
 
 def night_cap_dollars() -> float:
     try:
-        return float(os.getenv("TAKE_NIGHT_CAP_DOLLARS", DEFAULT_NIGHT_CAP))
+        return float(os.getenv("TAKE_NIGHT_CAP_DOLLARS", risk.DEFAULT_NIGHT_CAP))
     except ValueError:
-        return DEFAULT_NIGHT_CAP
+        return risk.DEFAULT_NIGHT_CAP
 
 
 def event_key(ticker: str) -> str:
@@ -154,20 +153,6 @@ def parse_take_cmd(cmd: str) -> dict | None:
                 "count": count_i, "price_c": price_i}
     except (StopIteration, IndexError, ValueError):
         return None
-
-
-def clamp_count(action: str, side: str, count: int, price_c: int,
-                cap_dollars: float) -> int:
-    """Largest count ≤ `count` whose worst-case collateral fits the cap.
-
-    Same money math as take.py's validate() — the alert sizes to full book
-    depth (60k×1¢ observed 2026-07-12), the staged order sizes to the cap.
-    take.py re-validates as the final backstop.
-    """
-    per_contract = order_cost_dollars(action, side, 1, price_c)
-    if per_contract <= 0:
-        return 0
-    return min(count, int(cap_dollars / per_contract))
 
 
 def _load_unlocked() -> dict:
