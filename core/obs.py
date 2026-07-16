@@ -89,6 +89,16 @@ def climate_day_start(tz: ZoneInfo, now: datetime | None = None) -> datetime:
     return now_local.replace(hour=0, minute=0, second=0, microsecond=0) + dst
 
 
+def climate_day_end(tz: ZoneInfo, now: datetime | None = None) -> datetime:
+    """End of the current CLI climate day: the next midnight LOCAL STANDARD
+    TIME. A low ladder's min is only locked here — an evening crash that
+    misses this cutoff belongs to TOMORROW's climate day (the MIA-JUL07
+    short died on exactly that hour: forecast crash at 2 AM EDT, boundary
+    at 1). +24h from the start is exact except across a DST transition
+    night, where settlement is ambiguous anyway."""
+    return climate_day_start(tz, now) + timedelta(hours=24)
+
+
 def is_precise_celsius(celsius: float) -> bool:
     """Only 0.1°C-resolution (METAR T-group) readings support certainty math.
 

@@ -1,5 +1,6 @@
 """Tests for live_watch pure helpers (no network)."""
 import json
+from datetime import datetime, timezone
 
 import live_watch as lw
 
@@ -148,3 +149,74 @@ class TestOverdueSettlements:
         state["overdue:T1"] = "2026-07-10"
         assert lw.should_alert_overdue(state, "T1", "2026-07-10") is False
         assert lw.should_alert_overdue(state, "T1", "2026-07-11") is True
+
+
+class TestBoundaryWatch:
+    """BOS-26JUL16 shape: overnight min 69.1, evening push toward the
+    leading bracket's 69° floor, boundary (midnight LST) at 05:00Z."""
+
+    DAY_END = datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc)
+    MARKETS = [
+        {"ticker": "KXLOWTBOS-26JUL16-T68", "yes_sub_title": "69° or above"},
+        {"ticker": "KXLOWTBOS-26JUL16-B67.5", "yes_sub_title": "67° to 68°"},
+        {"ticker": "KXLOWTBOS-26JUL16-T61", "yes_sub_title": "60° or below"},
+    ]
+
+    @staticmethod
+    def _obs(*rows):
+        return [(datetime(2026, 7, d, h, m, tzinfo=timezone.utc), f)
+                for d, h, m, f in rows]
+
+    def _evening(self, latest_f):
+        return self._obs((16, 8, 54, 69.1), (16, 19, 54, 88.0),
+                         (17, 2, 54, 73.0), (17, 3, 54, latest_f))
+
+    def test_leading_bracket_within_margin(self):
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        cands = lw.boundary_candidates(self.MARKETS, self._evening(69.5),
+                                       now, self.DAY_END)
+        assert [c["ticker"] for c in cands] == ["KXLOWTBOS-26JUL16-T68"]
+        c = cands[0]
+        assert c["floor_f"] == 69 and c["gap_f"] == 0.5
+        assert c["run_min_f"] == 69.1 and c["minutes_left"] == 50
+
+    def test_wide_gap_stays_silent(self):
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        assert lw.boundary_candidates(self.MARKETS, self._evening(72.0),
+                                      now, self.DAY_END) == []
+
+    def test_or_below_bracket_has_no_floor(self):
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        assert lw.boundary_candidates([self.MARKETS[2]], self._evening(69.5),
+                                      now, self.DAY_END) == []
+
+    def test_past_boundary_empty(self):
+        now = datetime(2026, 7, 17, 5, 1, tzinfo=timezone.utc)
+        assert lw.boundary_candidates(self.MARKETS, self._evening(69.5),
+                                      now, self.DAY_END) == []
+
+    def test_no_obs_empty(self):
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        assert lw.boundary_candidates(self.MARKETS, [], now, self.DAY_END) == []
+
+    def test_corroborated_dead_is_the_sweepers_job(self):
+        # Two obs at 66.5/66.8 lock the settle <= 67: T68 (floor 69) drops
+        # out; the watch follows the ladder down to B67.5 (floor 67).
+        obs = self._obs((16, 8, 54, 69.1), (17, 2, 54, 66.5), (17, 3, 54, 66.8))
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        cands = lw.boundary_candidates(self.MARKETS, obs, now, self.DAY_END)
+        assert [c["ticker"] for c in cands] == ["KXLOWTBOS-26JUL16-B67.5"]
+
+    def test_lone_spike_keeps_watching(self):
+        # An uncorroborated 66.0 down-spike (2026-07-04 KMSY class) must not
+        # silently kill the watch on the 83c bracket.
+        obs = self._obs((16, 8, 54, 69.1), (17, 2, 54, 66.0), (17, 3, 54, 69.5))
+        now = datetime(2026, 7, 17, 4, 10, tzinfo=timezone.utc)
+        cands = lw.boundary_candidates(self.MARKETS, obs, now, self.DAY_END)
+        assert "KXLOWTBOS-26JUL16-T68" in [c["ticker"] for c in cands]
+
+    def test_dedupe_first_then_closer_step(self):
+        assert lw.should_alert_boundary({}, "T", 1.9)
+        state = {"boundary:T": {"gap_f": 1.9}}
+        assert not lw.should_alert_boundary(state, "T", 1.5)
+        assert lw.should_alert_boundary(state, "T", 0.9)
