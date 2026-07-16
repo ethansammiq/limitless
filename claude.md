@@ -91,6 +91,25 @@ separate from button conversion (Goal 1 keeps counting taps only).
   peak sat 3.1°F above the next hourly ob and named the final 97). Either
   keeps the alert but blocks one-tap staging. Asks ≥10k deep are flagged 🧱
   (certainty-wall signature, 5-0 — same-side oracle, never the counterparty).
+- **Reissue guard (2026-07-16):** NWS re-issues CLI products with NO
+  CORRECTED tag (BOX printed a bogus min 51 at stamp 162129, silently
+  re-issued 69 at 162139; a falsified sell_dead staged on the live 83¢
+  favorite). The page served the stale product 14+ min past the re-issue,
+  so page re-fetches can't catch it — every layer checks the IEM AFOS
+  archive (`CLI{awips}`, ingest ~1 min) instead, and none adds latency to
+  the money path. Three layers: STAGE-TIME — a strictly-newer same-class
+  archive product whose extreme moved stamps `reissue_conflict` (blocks
+  the button + downgrades the alert; same family as obs_kill/obs_warn/
+  wall_ask; fail open on IEM refusal). FIRE-TIME — queue entries carry
+  their CLI `premise`; take_approver re-checks it just before take.py
+  (`check_premise`), and `claim_for_execution` makes supersede-vs-fire
+  atomic. CATCH-UP — a later run seeing an untagged reissue that moves a
+  journaled premise posts a `reissue_notice` (exit signal, mirrors
+  correction_notice), supersedes active buttons and retracts their
+  Discord prompts. Direction-aware: floors move legitimately one way
+  (max↑/min↓), so a legit move keeps sell_dead buttons; ANY move kills a
+  buy premise, and an impossible-direction move (the 51→69 signature)
+  kills everything.
 - **Journal-first rule (manual trades):** before ANY manual bracket trade, grep
   the journal for an existing print on that station/day. 2026-07-09: a 1¢
   "leading bracket" was bought 29 min after its kill-print was already on disk.
@@ -262,6 +281,9 @@ information, not an excuse to tune (same rule as every other gate here).
   (DSM{awips}, CLI{awips}, historical products — the settlement-forensics feed)
 - **Daily summaries:** `/api/1/daily.json` · **hourly ASOS:** `/cgi-bin/request/asos.py`
 - One request per station per run, generous timeouts, always fail open on refusal
+- Shared AFOS getter (`core/dsm.py: afos_text`) retries a 429 once after a
+  short backoff; peak_monitor's 5-city burst does the same (2026-07-16:
+  CHI/MIA/LAX/DEN refused serially inside one second)
 
 ### NWS (free, no auth, rate-limited)
 - **CLI products:** `api.weather.gov/products/types/CLI/locations/{WFO}`
