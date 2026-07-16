@@ -428,10 +428,19 @@ def _prior_journaled_product(awips: str, summary_date: str, want_final: bool,
     return max(rows, key=lambda e: e.get("ts", "")) if rows else None
 
 
-def reissue_moves(prior: dict, parsed: ParsedCLI) -> dict[str, tuple]:
+def reissue_moves(prior: dict, parsed: ParsedCLI,
+                  now_utc: datetime) -> dict[str, tuple]:
     """{'high': (old, new), 'low': (old, new)} for moved extremes that a
     prior journaled finding was actually premised on (a move on a ladder
-    kind nothing classified against is not an exit signal)."""
+    kind nothing classified against is not an exit signal). Only a
+    STRICTLY NEWER product moves a premise — replaying or re-serving an
+    older stamp must never read as a reissue."""
+    from backtest.cli_timing import stamp_to_utc
+
+    ours = stamp_to_utc(parsed.stamp, now_utc)
+    theirs = stamp_to_utc(prior.get("stamp") or "", now_utc)
+    if ours is None or theirs is None or ours <= theirs:
+        return {}
     premised = {f.get("ladder_kind") for f in prior.get("findings") or []
                 if not f.get("suppressed")}
     moves = {}
@@ -903,8 +912,7 @@ async def run(dry_run: bool, replay: str | None) -> None:
             # with an exit-signal notice.
             prior = _prior_journaled_product(
                 parsed.awips, parsed.summary_date, parsed.is_final, now_utc)
-            moves = (reissue_moves(prior, parsed)
-                     if prior and prior.get("stamp") != parsed.stamp else {})
+            moves = reissue_moves(prior, parsed, now_utc) if prior else {}
             if moves:
                 retracted = 0
                 if not dry_run and not replay:

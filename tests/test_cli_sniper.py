@@ -822,7 +822,16 @@ class TestPriorJournalAndMoves:
         prior = cs._prior_journaled_product("BOS", "2026-07-16", False, self.NOW)
         assert prior is not None and prior["stamp"] == "162129"
         reissue = _floor(cs.parse_product(_bos_product("162139", 69)))
-        assert cs.reissue_moves(prior, reissue) == {"low": (51, 69)}
+        assert cs.reissue_moves(prior, reissue, self.NOW) == {"low": (51, 69)}
+
+    def test_older_stamp_never_reads_as_a_reissue(self, tmp_path, monkeypatch):
+        # Replaying (or a page regression to) an OLDER product must not
+        # fire an exit-signal notice against the newer journaled premise.
+        newer_row = dict(self.FLOOR_ROW, stamp="162139", min_f=69)
+        self._write(tmp_path, monkeypatch, [newer_row])
+        prior = cs._prior_journaled_product("BOS", "2026-07-16", False, self.NOW)
+        older = _floor(cs.parse_product(_bos_product("162129", 51)))
+        assert cs.reissue_moves(prior, older, self.NOW) == {}
 
     def test_move_on_unpremised_kind_ignored(self, tmp_path, monkeypatch):
         self._write(tmp_path, monkeypatch, [self.FLOOR_ROW])
@@ -830,7 +839,7 @@ class TestPriorJournalAndMoves:
         # max also differs (89→88) but no high-ladder finding was premised
         # on it — only the low move is an exit signal.
         reissue = _floor(cs.parse_product(_bos_product("162139", 69, max_f=88)))
-        assert cs.reissue_moves(prior, reissue) == {"low": (51, 69)}
+        assert cs.reissue_moves(prior, reissue, self.NOW) == {"low": (51, 69)}
 
     def test_no_prior_without_findings(self, tmp_path, monkeypatch):
         row = dict(self.FLOOR_ROW, findings=[])
