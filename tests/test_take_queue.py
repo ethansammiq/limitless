@@ -244,6 +244,52 @@ class TestNightCap:
                if e["ticker"].startswith("KXHIGHCHI")][0]
         assert chi["count"] == 20  # full size — separate budget
 
+    def test_high_and_low_ladders_share_one_station_night_budget(self, monkeypatch):
+        # Pre-2026-07-16 the v1 series-date key counted a city's high and
+        # low ladders separately, so one station-night could absorb 2× the
+        # cap (sell_dead stages on low ladders at complement collateral;
+        # final CLI low buys ≤20¢ stage too).
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        assert take_queue.enqueue_findings(
+            [self._f("KXLOWTNYC-26JUL14-B70.5", 20, 99)], "cli_sniper", NOW) == 0
+
+    def test_low_ladder_entry_is_trimmed_into_the_shared_budget(self, monkeypatch):
+        # $4 cap − $3.60 on the HIGH ladder leaves $0.40 → 2×18¢ on the LOW
+        # (the v1 key would have granted the LOW its own fresh $4)
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        take_queue.enqueue_findings(
+            [self._f("KXLOWTNYC-26JUL14-B70.5", 20, 18)], "cli_sniper", NOW)
+        low = [e for e in take_queue.load_queue()["entries"].values()
+               if e["ticker"].startswith("KXLOWTNYC")][0]
+        assert low["count"] == 2
+
+    def test_sell_dead_complement_consumes_the_shared_budget(self, monkeypatch):
+        # selling a 5¢ dead bracket books the 95¢ complement per contract
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "10")
+        sell = _finding(
+            kind="sell_dead", ticker="KXLOWTNYC-26JUL14-B70.5",
+            cmd=".venv/bin/python scripts/take.py KXLOWTNYC-26JUL14-B70.5 sell yes 10 5")
+        assert take_queue.enqueue_findings([sell], "cli_sniper", NOW) == 1
+        # $9.50 of the $10 station-night is committed on the LOW ladder:
+        # the HIGH buy is trimmed to the $0.50 remainder (2×18¢), not
+        # granted a fresh budget
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        high = [e for e in take_queue.load_queue()["entries"].values()
+                if e["ticker"].startswith("KXHIGHNY")][0]
+        assert high["count"] == 2
+
+    def test_same_city_other_night_is_a_fresh_budget(self, monkeypatch):
+        monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "4")
+        take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL14-T90", 20, 18)], "cli_sniper", NOW)
+        assert take_queue.enqueue_findings(
+            [self._f("KXHIGHNY-26JUL15-T90", 20, 18)], "cli_sniper", NOW) == 1
+
     def test_repriced_entry_releases_its_budget(self, monkeypatch):
         monkeypatch.setenv("TAKE_NIGHT_CAP_DOLLARS", "5")
         take_queue.enqueue_findings(

@@ -27,6 +27,35 @@ class TestClampCount:
         assert risk.clamp_count("buy", "yes", 10, 99, 0.5) == 0
 
 
+class TestStationNightKey:
+    """One cap bucket per station-night — high and low ladders included.
+    Series names are irregular, so the registry does the mapping."""
+
+    def test_high_and_low_ladders_share_the_station_night(self):
+        assert (risk.station_night_key("KXHIGHNY-26JUL14-T90")
+                == risk.station_night_key("KXLOWTNYC-26JUL14-B70.5")
+                == "NYC:26JUL14")
+
+    def test_asymmetric_series_pairs_resolve_via_the_registry(self):
+        for high, low, awips in (("KXHIGHCHI", "KXLOWTCHI", "MDW"),
+                                 ("KXHIGHTDAL", "KXLOWTDAL", "DFW"),
+                                 ("KXHIGHTMIN", "KXLOWTMIN", "MSP")):
+            assert (risk.station_night_key(f"{high}-26JUL14-T90")
+                    == risk.station_night_key(f"{low}-26JUL14-B70.5")
+                    == f"{awips}:26JUL14")
+
+    def test_different_nights_stay_separate(self):
+        assert (risk.station_night_key("KXHIGHNY-26JUL14-T90")
+                != risk.station_night_key("KXHIGHNY-26JUL15-T90"))
+
+    def test_unknown_series_falls_back_to_the_v1_key(self):
+        assert risk.station_night_key("KXFOO-26JUL14-T90") == "KXFOO-26JUL14"
+
+    def test_malformed_ticker_never_raises(self):
+        assert risk.station_night_key("T1") == "T1"
+        assert risk.station_night_key("") == ""
+
+
 class TestOneSourceOfTruth:
     """The constants exist exactly once; consumers alias, never redefine."""
 

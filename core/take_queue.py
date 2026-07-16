@@ -110,11 +110,14 @@ def night_cap_dollars() -> float:
 
 
 def event_key(ticker: str) -> str:
-    """KXHIGHNY-26JUL14-T90 → KXHIGHNY-26JUL14 — the station-night, i.e.
-    the cluster-bootstrap unit: same-night brackets are ONE correlated bet.
-    (High and low ladders of a city are separate events and count
-    separately — a v1 simplification, documented not accidental.)"""
-    return ticker.rsplit("-", 1)[0]
+    """One cap bucket per STATION-night: a city's high AND low ladders
+    share it, matching the scorecard's cluster unit (awips, summary_date).
+    The v1 series-date key counted them separately ("documented not
+    accidental" — but sell_dead stages on low ladders at complement
+    collateral and final CLI low buys ≤20¢ stage too, so one station-night
+    could absorb 2× the cap; retired 2026-07-16). Unknown series falls
+    back to the v1 key."""
+    return risk.station_night_key(ticker)
 
 
 # Statuses that hold or have spent money against the night budget. Expired,
