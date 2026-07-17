@@ -25,7 +25,12 @@ cron one-shots under the run lock; exits when the queue idles.
 Staging guards (2026-07-15, from the 52%-raw vs ≥95%-selected split):
 `stageable_class` — buttons only from ≥95% classes (sell_dead; CLI floor
 buys at drift ≥.95 or ≤20¢; METAR 00Z anchor only — midday groups are
-forecasts, graded 1-for-5 on 7/13), everything else alert-only. Night cap —
+forecasts, graded 1-for-5 on 7/13), everything else alert-only.
+Consequence, measured 2026-07-16: the METAR clause is INERT — 00Z emits no
+high-ladder buys at all (see the falsified carve-out below), so metar_sniper
+is alert-only in practice and every button now comes from cli_sniper. That is
+the correct outcome, not a gap to close: the METAR anchors that do emit buys
+(18Z/12Z) are the forecast class the evidence rejects. Night cap —
 per STATION-night (2026-07-16: high+low ladders share one bucket, keyed
 (awips, date) via the ladders registry — the cluster-bootstrap unit; the
 v1 series key let sell_dead complement collateral double the exposure).
@@ -41,19 +46,34 @@ tap and auto), resolving breaches as "capped" with no order. All in
 `core/risk.py`. Staging trims counts into the remaining budget,
 expired/repriced/capped entries release theirs. Sizing, not winrate, is
 the ruin lever (7/14: one button offered 34% of bankroll).
-**Auto-take carve-out (2026-07-14, SHADOW — the one amendment to the Core
-Rule, pre-registered before any live fire):** the 00Z-anchor METAR
-high-ladder buy_winner class ONLY (all four 6-hr groups in; day-max == final
-98.4%, 815/828 — vs the 18Z batch that would have gone 1-for-5 on
-2026-07-13). The queue marks these `auto_eligible`; take_approver journals
-the would-fire decision (live-book re-check + caps) to
-logs/take_approver/*.jsonl while the button keeps working. AUTO_TAKE_00Z=on
-enables live auto-fire behind extra caps (default 3 fires/$30 per UTC day,
-on top of the per-order clamp; take.py stays the only order path, IOC only).
-**Flip-on gate (do not relax):** ≥7 days of shadow rows, would-execute
-entries grade ≥ +5¢/contract against settlement, zero trap-class
-would-fires. Auto fills grade in the scorecard as their own edge class,
-separate from button conversion (Goal 1 keeps counting taps only).
+**Auto-take carve-out (2026-07-14) — FALSIFIED 2026-07-16, DO NOT REBUILD.**
+The carve-out pre-registered ONE auto-executable class: the 00Z-anchor METAR
+high-ladder buy_winner (all four 6-hr groups in; day-max == final CLI 98.4%,
+815/828 — vs the 18Z batch that would have gone 1-for-5 on 2026-07-13). Its
+flip-on gate wanted ≥7 days of shadow rows. **The class emits nothing.** Five
+days of journal (2026-07-12..16), high-ladder buy_winners by anchor:
+`00Z: 0` · `18Z: 28 (median ask 6¢)` · `12Z: 13 (4¢)` · `06Z: 5 (1¢)`.
+The 00Z anchor emits only `buy_winner/low` (41, killed by the low-floor
+suppression) and `cli_confirm`/`cli_bust` on the high side — hold/exit
+signals, never an entry. Zero entries were ever marked `auto_eligible`; zero
+shadow rows were ever written (logs/take_approver/ never got created); the
+gate was unsatisfiable by construction and would have "failed" on Jul 21 for
+lack of data, not lack of edge.
+**WHY, and the lesson that outlives the carve-out:** 00Z is 8 PM ET. Its 6-hr
+max group covers 2-8 PM — the day's peak — which is exactly why it names the
+final 98.4% of the time. But the CLI floor printed hours earlier (~16:36-17:41
+local) and the market has already repriced the winning bracket to ~99¢, so
+the ≤20¢ buy filter finds nothing. **The 98.4% study measured ACCURACY, not
+EDGE** — the fact is true and arrives after the market prices it. The anchors
+that do carry cheap asks (18Z/12Z) are cheap *because the day isn't over*:
+they are forecast bets, the 1-for-5 class. There is no cheap-and-certain
+METAR class; the leak pays only where it is genuinely ahead of the CLI, and
+that window carries the warming risk. Re-targeting auto at 18Z would automate
+the exact class the evidence rejects — a strictly worse idea than the original.
+Auto-execution therefore has NO pre-cleared class. It returns to the Core Rule
+(human-in-the-loop, take.py only) until some *other* class earns its own
+pre-registered gate on measured edge. Retired per Principle 6 (deletion is a
+feature) and the anti-goal clause: a miss is information, not an excuse to tune.
 
 ## 2. THE WORKING STRATEGIES (settlement-source, 2026-07)
 
