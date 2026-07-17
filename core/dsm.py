@@ -101,9 +101,12 @@ def _throttle() -> None:
     _last_request_monotonic = time.monotonic()
 
 
-def _backoff_delay(retry: int) -> float:
+def iem_backoff_delay(retry: int) -> float:
     """Exponential with ±50% jitter: the aligned crons must not retry in
-    lockstep (a fixed delay just reschedules the same collision)."""
+    lockstep (a fixed delay just reschedules the same collision).
+
+    Public because peak_monitor's aiohttp path needs the SAME policy — one
+    rate-limit policy, two transports (stdlib here, async there)."""
     return IEM_429_BACKOFF_S * (2 ** retry) * (0.5 + random.random())
 
 
@@ -116,7 +119,7 @@ def _get(url: str, timeout: int) -> str:
                 return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             if exc.code == 429 and attempt < IEM_429_ATTEMPTS - 1:
-                time.sleep(_backoff_delay(attempt))
+                time.sleep(iem_backoff_delay(attempt))
                 continue
             raise
     raise AssertionError("unreachable")

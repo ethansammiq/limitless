@@ -5,7 +5,10 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
+import pytest
 
+
+import peak_monitor
 from peak_monitor import (
     CityPeakState,
     Observation,
@@ -649,3 +652,70 @@ class TestRunSinglePoll:
 
         asyncio.run(run_single_poll(city_filter="LAX", quiet=True))
         poll_mock.assert_awaited_once()
+
+
+class TestIemRateLimitPolicy:
+    """The 5-city sweep IS the burst IEM refuses (2026-07-16: CHI/MIA/LAX
+    all 429'd inside one second, and again after core.dsm alone was fixed —
+    this path has its own transport and needed the same policy)."""
+
+    def _resp(self, status, text="ok"):
+        class R:
+            def __init__(self):
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def text(self):
+                return text
+        return R()
+
+    def _session(self, statuses):
+        calls = {"n": 0}
+
+        class S:
+            def get(_self, url, timeout=None):
+                calls["n"] += 1
+                return TestIemRateLimitPolicy()._resp(
+                    statuses[min(calls["n"] - 1, len(statuses) - 1)])
+        return S(), calls
+
+    def test_shares_core_dsm_policy_not_a_local_copy(self):
+        # a second constant drifts out of sync; there must be one policy
+        assert not hasattr(peak_monitor, "IEM_429_BACKOFF_S")
+        assert peak_monitor.dsm.IEM_429_ATTEMPTS >= 2
+
+    def test_throttle_spaces_back_to_back_cities(self, monkeypatch):
+        naps = []
+        clock = {"t": 500.0}
+        monkeypatch.setattr(peak_monitor.time, "monotonic", lambda: clock["t"])
+
+        async def fake_sleep(s):
+            naps.append(s)
+        monkeypatch.setattr(peak_monitor.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(peak_monitor, "_last_iem_monotonic", 0.0)
+
+        asyncio.run(peak_monitor._iem_throttle())   # after idle: no wait
+        assert naps == []
+        asyncio.run(peak_monitor._iem_throttle())   # immediately again: wait
+        assert naps and naps[0] == pytest.approx(peak_monitor.dsm.IEM_MIN_INTERVAL_S)
+
+    def test_429_retries_jittered_then_gives_up_returning_empty(self, monkeypatch):
+        naps = []
+
+        async def fake_sleep(s):
+            naps.append(s)
+        monkeypatch.setattr(peak_monitor.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(peak_monitor, "_iem_throttle", AsyncMock())
+        session, calls = self._session([429])
+
+        obs = asyncio.run(peak_monitor.fetch_iem_observations(session, "NYC"))
+
+        assert obs == []                                   # fails open, never raises
+        assert calls["n"] == peak_monitor.dsm.IEM_429_ATTEMPTS
+        assert len(naps) == peak_monitor.dsm.IEM_429_ATTEMPTS - 1
+        assert naps[1] > naps[0] * 0.5                     # grows, not fixed

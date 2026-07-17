@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,6 +56,7 @@ from config import (
     PEAK_LATEST_HOUR,
     PEAK_POLL_INTERVAL_SEC,
 )
+from core import dsm
 from core.obs import climate_day_start
 from market_timeseries import extract_target_date_from_ticker
 from notifications import send_discord_embeds
@@ -67,7 +69,21 @@ logger = get_logger(__name__)
 
 NWS_OBS_LIMIT = 30             # Fetch last 30 observations (covers ~24h)
 IEM_BASE_URL = "https://mesonet.agron.iastate.edu"
-IEM_429_BACKOFF_S = 3.0        # IEM refuses same-second bursts; retry once
+# Rate-limit policy is core.dsm's — one policy, two transports (stdlib there,
+# aiohttp here). This sweep IS the burst IEM refuses: five cities served
+# back-to-back from one loop landed CHI/MIA/LAX in the same second
+# (2026-07-16, still refused after core.dsm alone was throttled).
+_last_iem_monotonic = 0.0
+
+
+async def _iem_throttle() -> None:
+    """Space this process's IEM hits by dsm.IEM_MIN_INTERVAL_S. The serial
+    city loop has no concurrency, so a plain timestamp is enough."""
+    global _last_iem_monotonic
+    gap = dsm.IEM_MIN_INTERVAL_S - (time.monotonic() - _last_iem_monotonic)
+    if gap > 0:
+        await asyncio.sleep(gap)
+    _last_iem_monotonic = time.monotonic()
 
 # State file for tracking across cron invocations
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -211,15 +227,14 @@ async def fetch_iem_observations(
     )
 
     text = None
-    for attempt in (0, 1):
+    for attempt in range(dsm.IEM_429_ATTEMPTS):
+        await _iem_throttle()
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 429 and attempt == 0:
-                    # IEM rate-limits the 5-city burst (all requests land in
-                    # the same second — CHI/MIA/LAX serially refused
-                    # 2026-07-16); one short backoff clears the window and
-                    # also staggers the remaining cities.
-                    await asyncio.sleep(IEM_429_BACKOFF_S)
+                if resp.status == 429 and attempt < dsm.IEM_429_ATTEMPTS - 1:
+                    # Jittered, not fixed: every aligned cron refused in the
+                    # same second must not retry in the same second too.
+                    await asyncio.sleep(dsm.iem_backoff_delay(attempt))
                     continue
                 if resp.status != 200:
                     logger.warning("IEM %s returned %d", city_key, resp.status)

@@ -237,10 +237,10 @@ class TestAfosGetter:
         # in a wider, randomised band than the last.
         for retry in (0, 1, 2):
             base = dsm.IEM_429_BACKOFF_S * (2 ** retry)
-            draws = {dsm._backoff_delay(retry) for _ in range(50)}
+            draws = {dsm.iem_backoff_delay(retry) for _ in range(50)}
             assert len(draws) > 1, "delay must be jittered, not fixed"
             assert all(0.5 * base <= d <= 1.5 * base for d in draws)
-        assert min(dsm._backoff_delay(1) for _ in range(50)) \
+        assert min(dsm.iem_backoff_delay(1) for _ in range(50)) \
             >= dsm.IEM_429_BACKOFF_S * 0.5  # retry 1 never undercuts retry 0's floor
 
     def test_throttle_spaces_requests_and_never_sleeps_when_idle(self, monkeypatch):
