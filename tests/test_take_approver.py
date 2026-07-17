@@ -54,135 +54,6 @@ class TestDecide:
         assert decide(e, NOW, {"111"}, APPROVERS, 12, TTL)[0] == "execute"
 
 
-class TestAutoDecide:
-    def test_auto_approval_substitutes_only_for_the_tap(self):
-        # no reactors at all, yet the order clears every remaining guard
-        verdict, reason = decide(_entry(), NOW, set(), APPROVERS, 18, TTL,
-                                 auto_approved=True)
-        assert verdict == "execute" and "auto" in reason
-
-    def test_auto_never_beats_expiry_book_or_reprice(self):
-        late = NOW + timedelta(minutes=TTL + 1)
-        assert decide(_entry(), late, set(), APPROVERS, 18, TTL,
-                      auto_approved=True)[0] == "expire"
-        assert decide(_entry(), NOW, set(), APPROVERS, None, TTL,
-                      auto_approved=True)[0] == "wait"
-        assert decide(_entry(), NOW, set(), APPROVERS, 19, TTL,
-                      auto_approved=True)[0] == "reprice"
-
-
-class TestAutoAllowance:
-    def _fired(self, n, price_c=18, count=23):
-        return {f"e{i}": {"action": "buy", "side": "yes", "count": count,
-                          "price_c": price_c, "auto_fired": True,
-                          "resolved_ts": NOW.isoformat(timespec="seconds")}
-                for i in range(n)}
-
-    def test_first_fire_of_the_day_is_allowed(self):
-        ok, reason = take_approver.auto_allowance(_entry(), {}, NOW)
-        assert ok and "0 fire(s)" in reason
-
-    def test_fires_per_day_cap(self, monkeypatch):
-        monkeypatch.delenv("AUTO_TAKE_MAX_PER_DAY", raising=False)
-        ok, reason = take_approver.auto_allowance(_entry(), self._fired(3), NOW)
-        assert not ok and "3 auto-fires" in reason
-
-    def test_daily_notional_cap(self, monkeypatch):
-        monkeypatch.delenv("AUTO_TAKE_DAILY_CAP", raising=False)
-        # two fires at $13.86 each = $27.72 spent; +$4.14 more breaches $30
-        entries = self._fired(2, price_c=18, count=77)
-        ok, reason = take_approver.auto_allowance(_entry(), entries, NOW)
-        assert not ok and "$30.00 daily auto cap" in reason
-
-    def test_yesterdays_fires_do_not_count(self):
-        entries = self._fired(3)
-        for e in entries.values():
-            e["resolved_ts"] = (NOW - timedelta(days=1)).isoformat(
-                timespec="seconds")
-        ok, _ = take_approver.auto_allowance(_entry(), entries, NOW)
-        assert ok
-
-    def test_executing_marker_counts_as_spent(self, monkeypatch):
-        # a crash mid-order is money out the door until fills reconcile
-        monkeypatch.setenv("AUTO_TAKE_MAX_PER_DAY", "1")
-        stuck = self._fired(1)
-        stuck["e0"]["status"] = "executing"
-        ok, _ = take_approver.auto_allowance(_entry(), stuck, NOW)
-        assert not ok
-
-
-class TestDailyAllowance:
-    """The portfolio-day cap gates EVERY fire — manual tap and auto alike."""
-
-    def _committed(self, n, price_c=18, count=77, status="executed"):
-        # $13.86 each at the defaults
-        return {f"d{i}": {"action": "buy", "side": "yes", "count": count,
-                          "price_c": price_c, "status": status,
-                          "ts": NOW.isoformat(timespec="seconds")}
-                for i in range(n)}
-
-    def test_first_fire_of_the_day_is_allowed(self):
-        ok, reason = take_approver.daily_allowance(_entry(), {}, NOW)
-        assert ok and "$0.00 committed" in reason
-
-    def test_breach_is_blocked_with_the_cap_provenance(self, monkeypatch):
-        monkeypatch.delenv("TAKE_DAILY_CAP_DOLLARS", raising=False)
-        # 5 × $13.86 = $69.30 > the fixed $60 — already over; any fire blocked
-        entries = self._committed(5)
-        ok, reason = take_approver.daily_allowance(_entry(), entries, NOW)
-        assert not ok and "portfolio-day" in reason and "fixed" in reason
-
-    def test_candidate_is_not_double_counted(self, monkeypatch):
-        # $4.14 candidate already staged in the queue; $54 spent besides.
-        # 54 + 4.14 < 60 must pass — counting the candidate twice would fail.
-        monkeypatch.delenv("TAKE_DAILY_CAP_DOLLARS", raising=False)
-        entries = self._committed(1, price_c=90, count=60)  # $54.00
-        cand = _entry()
-        entries[cand["id"]] = dict(cand, ts=NOW.isoformat(timespec="seconds"))
-        ok, _ = take_approver.daily_allowance(cand, entries, NOW)
-        assert ok
-
-    def test_staged_and_executing_count_as_committed(self, monkeypatch):
-        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "20")
-        for status in ("posted", "executing"):
-            entries = self._committed(1, status=status)  # $13.86
-            ok, _ = take_approver.daily_allowance(
-                _entry(count=77), entries, NOW)  # +$13.86 > $20
-            assert not ok
-
-    def test_yesterdays_fires_do_not_count(self, monkeypatch):
-        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "20")
-        entries = self._committed(5)
-        for e in entries.values():
-            e["ts"] = (NOW - timedelta(days=1)).isoformat(timespec="seconds")
-        ok, _ = take_approver.daily_allowance(_entry(), entries, NOW)
-        assert ok
-
-
-class TestShadowRecord:
-    def test_record_carries_the_would_verdict_and_caps(self):
-        rec = take_approver.shadow_record(
-            _entry(source="metar_sniper", auto_eligible=True), 18,
-            "execute", "auto-approved (00Z class)", True, "0 fire(s)", NOW)
-        assert rec["kind"] == "auto_shadow"
-        assert rec["would"] == "execute" and rec["live_px"] == 18
-        assert rec["caps_ok"] is True
-        assert rec["cost_dollars"] == 4.14
-        assert rec["ts"].startswith("2026-07-12")
-
-
-class TestAutoMode:
-    def test_default_is_shadow(self, monkeypatch):
-        monkeypatch.delenv("AUTO_TAKE_00Z", raising=False)
-        assert take_approver.auto_mode() == "shadow"
-        monkeypatch.setenv("AUTO_TAKE_00Z", "true")   # anything but "on"
-        assert take_approver.auto_mode() == "shadow"
-
-    def test_on_flips_live(self, monkeypatch):
-        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
-        assert take_approver.auto_mode() == "on"
-
-
 class TestPrompt:
     def test_prompt_carries_ledger_tag_ticker_cost_and_expiry(self):
         text = format_prompt(_entry(), TTL)
@@ -194,14 +65,8 @@ class TestPrompt:
     def test_prompt_includes_the_drift_summary(self):
         assert "drift 88%" in format_prompt(_entry(), TTL)
 
-    def test_auto_eligible_entry_declares_itself(self, monkeypatch):
-        monkeypatch.delenv("AUTO_TAKE_00Z", raising=False)
-        text = format_prompt(_entry(auto_eligible=True), TTL)
-        assert "🤖 auto-eligible" in text and "shadow" in text
-        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
-        assert "no tap needed" in format_prompt(_entry(auto_eligible=True), TTL)
-
-    def test_plain_entries_carry_no_auto_line(self):
+    def test_prompt_carries_no_robot_banner(self):
+        # the auto class was falsified 2026-07-16 — every button is a tap
         assert "🤖" not in format_prompt(_entry(), TTL)
 
 
@@ -246,8 +111,8 @@ class TestConfig:
         assert cfg["approvers"] == {"111", "222"}
 
 
-class TestRunAutoIntegration:
-    """run() wiring for the auto path — Discord and Kalshi stubbed out."""
+class TestRunIntegration:
+    """run() wiring — Discord and Kalshi stubbed out."""
 
     @pytest.fixture(autouse=True)
     def _rig(self, tmp_path, monkeypatch):
@@ -255,12 +120,9 @@ class TestRunAutoIntegration:
 
         monkeypatch.setattr(take_queue, "QUEUE_FILE", tmp_path / "q.json")
         monkeypatch.setattr(take_queue, "QUEUE_LOCK", tmp_path / ".q.lock")
-        monkeypatch.setattr(take_approver, "SHADOW_JOURNAL_DIR",
-                            tmp_path / "shadow")
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
         monkeypatch.setenv("DISCORD_TAKE_CHANNEL_ID", "42")
         monkeypatch.setenv("DISCORD_TAKE_APPROVER_IDS", "111")
-        monkeypatch.delenv("AUTO_TAKE_00Z", raising=False)
 
         async def _no_reactors(session, cfg, mid):
             return set()
@@ -286,52 +148,14 @@ class TestRunAutoIntegration:
         self.tmp = tmp_path
         self.tq = take_queue
 
-    def _stage_posted_auto_entry(self):
+    def _stage_posted_entry(self):
         finding = {"kind": "buy_winner", "ticker": "T1", "subtitle": "89-90°",
-                   "printed": 90, "ladder_kind": "high",
-                   "synoptic_anchor_utc": 0,
+                   "printed": 90, "ladder_kind": "high", "ask": 18,
                    "cmd": ".venv/bin/python scripts/take.py T1 buy yes 23 18"}
-        assert self.tq.enqueue_findings([finding], "metar_sniper") == 1
+        assert self.tq.enqueue_findings([finding], "cli_sniper") == 1
         eid = next(iter(self.tq.load_queue()["entries"]))
         self.tq.update_entries({eid: {"status": "posted", "message_id": "m1"}})
         return eid
-
-    def _shadow_rows(self):
-        files = sorted((self.tmp / "shadow").glob("*.jsonl"))
-        import json as _json
-        return [_json.loads(line) for f in files
-                for line in f.read_text().splitlines()]
-
-    def test_shadow_journals_once_and_leaves_the_button_live(self):
-        import asyncio as _asyncio
-        eid = self._stage_posted_auto_entry()
-        _asyncio.run(take_approver.run(dry_run=False))
-        rows = self._shadow_rows()
-        assert len(rows) == 1
-        assert rows[0]["would"] == "execute" and rows[0]["caps_ok"] is True
-        e = self.tq.load_queue()["entries"][eid]
-        assert e["status"] == "posted" and e.get("auto_shadow")
-        # second tick: no duplicate row, entry still awaiting a tap
-        _asyncio.run(take_approver.run(dry_run=False))
-        assert len(self._shadow_rows()) == 1
-
-    def test_auto_take_on_fires_without_a_tap(self, monkeypatch):
-        import asyncio as _asyncio
-        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
-        fired = []
-
-        def _fake_take(entry):
-            fired.append(entry["ticker"])
-            return True, "FILLED 23/23 @ 18c"
-
-        monkeypatch.setattr(take_approver, "run_take", _fake_take)
-        eid = self._stage_posted_auto_entry()
-        _asyncio.run(take_approver.run(dry_run=False))
-        assert fired == ["T1"]
-        e = self.tq.load_queue()["entries"][eid]
-        assert e["status"] == "executed" and e["auto_fired"] is True
-        assert any("🤖 AUTO-FIRED" in c for c in self.edits)
-        assert not self._shadow_rows()  # live mode does not shadow
 
     def test_tapped_fire_past_the_daily_cap_resolves_capped(self, monkeypatch):
         # the human tap does NOT bypass the portfolio-day cap
@@ -344,7 +168,7 @@ class TestRunAutoIntegration:
         monkeypatch.setattr(take_approver, "run_take",
                             lambda e: (_ for _ in ()).throw(
                                 AssertionError("order fired past the daily cap")))
-        eid = self._stage_posted_auto_entry()
+        eid = self._stage_posted_entry()
         # cap tightened AFTER staging (env change mid-flight) — staging
         # couldn't trim for it, so the fire-time backstop must refuse
         monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "1")  # cost is $4.14
@@ -352,35 +176,6 @@ class TestRunAutoIntegration:
         e = self.tq.load_queue()["entries"][eid]
         assert e["status"] == "capped"
         assert any("🧢 NOT EXECUTED" in c for c in self.edits)
-
-    def test_auto_fire_past_the_daily_cap_is_blocked_too(self, monkeypatch):
-        # auto's own $30 cap would pass — the portfolio cap still gates it
-        import asyncio as _asyncio
-        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
-        monkeypatch.setattr(take_approver, "run_take",
-                            lambda e: (_ for _ in ()).throw(
-                                AssertionError("auto-fired past the daily cap")))
-        eid = self._stage_posted_auto_entry()
-        monkeypatch.setenv("TAKE_DAILY_CAP_DOLLARS", "1")  # tightened post-stage
-        _asyncio.run(take_approver.run(dry_run=False))
-        assert self.tq.load_queue()["entries"][eid]["status"] == "capped"
-
-    def test_non_eligible_entry_never_auto_fires(self, monkeypatch):
-        import asyncio as _asyncio
-        monkeypatch.setenv("AUTO_TAKE_00Z", "on")
-        monkeypatch.setattr(take_approver, "run_take",
-                            lambda e: (_ for _ in ()).throw(
-                                AssertionError("order fired without a tap")))
-        finding = {"kind": "buy_winner", "ticker": "T2", "subtitle": "89-90°",
-                   "printed": 90, "ladder_kind": "high", "ask": 18,
-                   "synoptic_anchor_utc": 18,   # PM anchor: warming risk
-                   "cmd": ".venv/bin/python scripts/take.py T2 buy yes 23 18"}
-        assert self.tq.enqueue_findings([finding], "cli_sniper") == 1
-        eid = next(iter(self.tq.load_queue()["entries"]))
-        self.tq.update_entries({eid: {"status": "posted", "message_id": "m2"}})
-        _asyncio.run(take_approver.run(dry_run=False))
-        assert self.tq.load_queue()["entries"][eid]["status"] == "posted"
-
 
 class TestPostPromptMentions:
     """The button must @mention approvers — Discord mobile only pushes on
@@ -480,7 +275,6 @@ class TestRunActivitySignal:
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
         monkeypatch.setenv("DISCORD_TAKE_CHANNEL_ID", "42")
         monkeypatch.setenv("DISCORD_TAKE_APPROVER_IDS", "111")
-        monkeypatch.delenv("AUTO_TAKE_00Z", raising=False)
 
         async def _no_reactors(session, cfg, mid):
             return set()

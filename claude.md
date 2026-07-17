@@ -74,6 +74,15 @@ Auto-execution therefore has NO pre-cleared class. It returns to the Core Rule
 (human-in-the-loop, take.py only) until some *other* class earns its own
 pre-registered gate on measured edge. Retired per Principle 6 (deletion is a
 feature) and the anti-goal clause: a miss is information, not an excuse to tune.
+**Code DELETED 2026-07-16** (same week, per Principle 6): `is_auto_eligible`/
+`AUTO_ANCHOR_UTC`, `auto_mode`/`auto_allowance`/`auto_max_fires`/
+`auto_daily_cap`, `shadow_record`/`_journal_shadow`/`SHADOW_JOURNAL_DIR`, the
+`auto_approved` branch in `decide`, the `auto_fired` ledger field, and the
+`AUTO_TAKE_*` env keys. `stageable_class` now returns False for ALL
+metar_sniper buys (sell_dead still stages from either sniper) — the honest
+encoding of "no cheap-and-certain METAR class". Every fire is a human tap.
+Do not resurrect the scaffolding to "keep it for reference": the reasoning is
+here, and dead code rots into false context for the next session.
 
 ## 2. THE WORKING STRATEGIES (settlement-source, 2026-07)
 

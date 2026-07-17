@@ -51,42 +51,26 @@ TERMINAL_STATUSES = ("executed", "expired", "repriced", "failed", "executing",
                      "capped", "superseded")
 ENQUEUEABLE_KINDS = ("buy_winner", "sell_dead")
 
-# The only class pre-cleared for auto-execution (shadow-graded first): a
-# METAR high-ladder buy_winner from the 00Z synoptic group — the one anchor
-# at which all four of the day's 6-hr groups exist (day-max == final CLI
-# 98.4%, 815/828). Earlier anchors carry post-window warming risk: the
-# 2026-07-13 18Z batch would have gone 1-for-5 against the finals.
-AUTO_ANCHOR_UTC = 0
-
-
-def is_auto_eligible(finding: dict, source: str) -> bool:
-    """Does this finding fall in the pre-cleared auto-take class?
-
-    Trap flags (obs_kill/obs_warn/wall_ask) never reach here — they block
-    staging entirely in entry_from_finding.
-    """
-    return (source == "metar_sniper"
-            and finding.get("kind") == "buy_winner"
-            and finding.get("ladder_kind") == "high"
-            and finding.get("synoptic_anchor_utc") == AUTO_ANCHOR_UTC)
-
-
 def stageable_class(finding: dict, source: str) -> bool:
     """Only classes with ≥95% measured base rates get a button; everything
     else stays alert-only. The raw feed grades 52% (scorecard 2026-07-14)
     — SELECTION is the edge, and it must be mechanical, not discipline:
-      - sell_dead: obs-certain by construction
+      - sell_dead: obs-certain by construction, from either sniper
       - CLI floor buys: floor-at-bottom drift class (≥.95), or within the
         20¢ standing entry cap (cheap asymmetric floor-at-top stays legal)
-      - METAR buys: the 00Z anchor only (day-max == final 98.4%) — the
-        11:53/17:53 groups are forecasts, not settlements (the 18Z batch
-        graded 1-for-5 on 2026-07-13; a full day of 7/14 morning buttons
-        graded as warming traps)
+      - METAR buys: NEVER. This was the 00Z anchor only (day-max == final
+        98.4%) until 2026-07-16 measured that anchor emitting zero
+        high-ladder buys across five days — by 00Z (8 PM ET) the CLI floor
+        printed hours ago and the market already priced the winner ~99¢, so
+        the study measured accuracy, not edge. The anchors that DO emit
+        cheap buys (18Z/12Z) are cheap because the day isn't over: the
+        forecast class that graded 1-for-5 on 2026-07-13 and dispensed a
+        full day of warming traps on 7/14. See claude.md §1.
     """
     if finding.get("kind") == "sell_dead":
         return True
     if source == "metar_sniper":
-        return is_auto_eligible(finding, source)
+        return False
     if finding.get("drift_prob", 0.0) >= 0.95:
         return True
     ask = finding.get("ask")
@@ -247,7 +231,6 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
              "ts": ts, "source": source, "kind": finding["kind"],
              **parsed, "count": count,
              "summary": " · ".join(b for b in summary_bits if b),
-             "auto_eligible": is_auto_eligible(finding, source),
              "status": "pending", "message_id": None,
              "posted_ts": None, "resolved_ts": None, "result": None}
     if finding.get("awips") and finding.get("stamp"):
@@ -360,7 +343,7 @@ def supersede_entries(entry_ids: list[str], reason: str,
     return out
 
 
-def claim_for_execution(entry_id: str, auto_fired: bool = False,
+def claim_for_execution(entry_id: str,
                         now_utc: datetime | None = None) -> bool:
     """Atomically move a POSTED entry to the crash-safe "executing" marker.
 
@@ -374,7 +357,7 @@ def claim_for_execution(entry_id: str, auto_fired: bool = False,
         e = queue["entries"].get(entry_id)
         if not e or e.get("status") != "posted":
             return False
-        e.update(status="executing", auto_fired=auto_fired,
+        e.update(status="executing",
                  resolved_ts=now_utc.isoformat(timespec="seconds"))
         atomic_write_json(QUEUE_FILE, queue, indent=1)
     return True

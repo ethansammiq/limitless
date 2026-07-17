@@ -84,39 +84,6 @@ class TestEntryFromFinding:
         assert take_queue.entry_from_finding(f, "metar_sniper", NOW) is None
 
 
-class TestAutoEligible:
-    def _metar_finding(self, **over):
-        return _finding(**{"ladder_kind": "high", "synoptic_anchor_utc": 0,
-                           **over})
-
-    def test_00z_metar_high_buy_winner_is_eligible(self):
-        assert take_queue.is_auto_eligible(self._metar_finding(), "metar_sniper")
-        e = take_queue.entry_from_finding(self._metar_finding(),
-                                          "metar_sniper", NOW)
-        assert e["auto_eligible"] is True
-
-    def test_earlier_anchors_are_not(self):
-        # 2026-07-13: the 18Z batch would have gone 1-for-5 vs the finals
-        for anchor in (6, 12, 18):
-            f = self._metar_finding(synoptic_anchor_utc=anchor)
-            assert not take_queue.is_auto_eligible(f, "metar_sniper")
-
-    def test_missing_anchor_low_ladder_and_other_sources_are_not(self):
-        f = self._metar_finding()
-        del f["synoptic_anchor_utc"]
-        assert not take_queue.is_auto_eligible(f, "metar_sniper")
-        assert not take_queue.is_auto_eligible(
-            self._metar_finding(ladder_kind="low"), "metar_sniper")
-        assert not take_queue.is_auto_eligible(
-            self._metar_finding(kind="sell_dead"), "metar_sniper")
-        assert not take_queue.is_auto_eligible(self._metar_finding(),
-                                               "cli_sniper")
-
-    def test_non_metar_entries_stage_as_not_eligible(self):
-        e = take_queue.entry_from_finding(_finding(), "cli_sniper", NOW)
-        assert e["auto_eligible"] is False
-
-
 class TestEnqueue:
     def test_enqueue_and_reload(self):
         assert take_queue.enqueue_findings([_finding()], "cli_sniper", NOW) == 1
@@ -191,14 +158,20 @@ class TestStageableClass:
         f = _finding(drift_prob=0.886, ask=18)
         assert take_queue.stageable_class(f, "cli_sniper") is True
 
-    def test_metar_00z_anchor_stages_and_midday_does_not(self):
+    def test_metar_buys_never_stage_at_any_anchor(self):
+        # 2026-07-16: the 00Z class was falsified — it emits zero high-ladder
+        # buys (the CLI floor beat it and the market already priced ~99¢),
+        # and 18Z/12Z are the 1-for-5 forecast class.
         base = dict(_finding(), ladder_kind="high")
+        for anchor in (0, 6, 12, 18, None):
+            f = dict(base, synoptic_anchor_utc=anchor) if anchor is not None else base
+            assert take_queue.stageable_class(f, "metar_sniper") is False
+            assert take_queue.entry_from_finding(f, "metar_sniper", NOW) is None
+
+    def test_metar_sell_dead_still_stages(self):
+        # the riskless class is obs-certain from either sniper
         assert take_queue.stageable_class(
-            dict(base, synoptic_anchor_utc=0), "metar_sniper") is True
-        # a full day of 2026-07-14 morning/afternoon buttons graded as traps
-        assert take_queue.stageable_class(
-            dict(base, synoptic_anchor_utc=18), "metar_sniper") is False
-        assert take_queue.stageable_class(base, "metar_sniper") is False
+            _finding(kind="sell_dead"), "metar_sniper") is True
 
     def test_sell_dead_always_stages(self):
         f = _finding(kind="sell_dead")
@@ -443,22 +416,22 @@ class TestClaimForExecution:
 
     def test_posted_entry_claims_once(self):
         eid = self._posted_id()
-        assert take_queue.claim_for_execution(eid, False, NOW) is True
+        assert take_queue.claim_for_execution(eid, NOW) is True
         e = take_queue.load_queue()["entries"][eid]
-        assert e["status"] == "executing" and e["auto_fired"] is False
+        assert e["status"] == "executing"
         # at-most-once: a second claimer must lose
-        assert take_queue.claim_for_execution(eid, False, NOW) is False
+        assert take_queue.claim_for_execution(eid, NOW) is False
 
     def test_pending_and_unknown_never_claim(self):
         take_queue.enqueue_findings([_finding()], "cli_sniper", NOW)
         eid = next(iter(take_queue.load_queue()["entries"]))
-        assert take_queue.claim_for_execution(eid, False, NOW) is False
-        assert take_queue.claim_for_execution("ghost", False, NOW) is False
+        assert take_queue.claim_for_execution(eid, NOW) is False
+        assert take_queue.claim_for_execution("ghost", NOW) is False
 
     def test_supersede_beats_the_claim(self):
         # The race the atomic claim closes: a reissue supersede lands after
         # the approver's snapshot — the fire must be refused.
         eid = self._posted_id()
         take_queue.supersede_entries([eid], "CLI reissued", NOW)
-        assert take_queue.claim_for_execution(eid, False, NOW) is False
+        assert take_queue.claim_for_execution(eid, NOW) is False
         assert take_queue.load_queue()["entries"][eid]["status"] == "superseded"
