@@ -198,26 +198,65 @@ class TestAfosGetter:
                     return b"payload"
             return R()
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dsm, "_throttle", lambda: None)
         monkeypatch.setattr(dsm.time, "sleep", naps.append)
         assert dsm._get("http://x", 5) == "payload"
-        assert calls["n"] == 2 and naps == [dsm.IEM_429_BACKOFF_S]
+        assert calls["n"] == 2
+        # one backoff, in the jittered band around the base delay
+        assert len(naps) == 1
+        assert 0.5 * dsm.IEM_429_BACKOFF_S <= naps[0] <= 1.5 * dsm.IEM_429_BACKOFF_S
 
-    def test_second_429_and_other_codes_raise(self, monkeypatch):
+    def test_exhausted_429s_and_other_codes_raise(self, monkeypatch):
         import io
         import urllib.error
         import urllib.request
 
+        calls = {"n": 0}
+
         def always_429(req, timeout):
+            calls["n"] += 1
             raise urllib.error.HTTPError(
                 "u", 429, "Too Many Requests", None, io.BytesIO(b""))
         monkeypatch.setattr(urllib.request, "urlopen", always_429)
+        monkeypatch.setattr(dsm, "_throttle", lambda: None)
         monkeypatch.setattr(dsm.time, "sleep", lambda s: None)
         with pytest.raises(urllib.error.HTTPError):
             dsm._get("http://x", 5)
+        assert calls["n"] == dsm.IEM_429_ATTEMPTS  # tried, then gave up
 
         def forbidden(req, timeout):
             raise urllib.error.HTTPError(
                 "u", 403, "Forbidden", None, io.BytesIO(b""))
         monkeypatch.setattr(urllib.request, "urlopen", forbidden)
         with pytest.raises(urllib.error.HTTPError):
-            dsm._get("http://x", 5)
+            dsm._get("http://x", 5)  # a non-429 never retries
+
+    def test_backoff_grows_and_is_jittered(self, monkeypatch):
+        # Fixed delays make the aligned crons (*/2, */5, */10, */15 all fire
+        # at :00) retry in lockstep and collide again — each retry must land
+        # in a wider, randomised band than the last.
+        for retry in (0, 1, 2):
+            base = dsm.IEM_429_BACKOFF_S * (2 ** retry)
+            draws = {dsm._backoff_delay(retry) for _ in range(50)}
+            assert len(draws) > 1, "delay must be jittered, not fixed"
+            assert all(0.5 * base <= d <= 1.5 * base for d in draws)
+        assert min(dsm._backoff_delay(1) for _ in range(50)) \
+            >= dsm.IEM_429_BACKOFF_S * 0.5  # retry 1 never undercuts retry 0's floor
+
+    def test_throttle_spaces_requests_and_never_sleeps_when_idle(self, monkeypatch):
+        # peak_monitor's 5-city sweep was arriving as five same-second hits.
+        naps = []
+        clock = {"t": 100.0}
+        monkeypatch.setattr(dsm.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(dsm.time, "sleep", naps.append)
+        monkeypatch.setattr(dsm, "_last_request_monotonic", 0.0)
+
+        dsm._throttle()          # first call after a long idle: no wait
+        assert naps == []
+        dsm._throttle()          # immediately again: must wait the full gap
+        assert naps and naps[0] == pytest.approx(dsm.IEM_MIN_INTERVAL_S)
+
+        naps.clear()
+        clock["t"] += dsm.IEM_MIN_INTERVAL_S * 2   # enough time has passed
+        dsm._throttle()
+        assert naps == []

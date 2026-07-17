@@ -281,9 +281,15 @@ information, not an excuse to tune (same rule as every other gate here).
   (DSM{awips}, CLI{awips}, historical products — the settlement-forensics feed)
 - **Daily summaries:** `/api/1/daily.json` · **hourly ASOS:** `/cgi-bin/request/asos.py`
 - One request per station per run, generous timeouts, always fail open on refusal
-- Shared AFOS getter (`core/dsm.py: afos_text`) retries a 429 once after a
-  short backoff; peak_monitor's 5-city burst does the same (2026-07-16:
-  CHI/MIA/LAX/DEN refused serially inside one second)
+- Shared AFOS getter (`core/dsm.py: afos_text`) — one getter, one User-Agent,
+  two defences (2026-07-16: CHI/MIA/LAX/DEN refused serially inside one second,
+  and a BOS premise check still 429'd through a single fixed retry):
+  **`_throttle`** spaces this process's IEM hits by `IEM_MIN_INTERVAL_S` (the
+  burst is what earns the 429 — serialising beats retrying), and retries use
+  **jittered exponential backoff** (`IEM_429_ATTEMPTS`/`IEM_429_BACKOFF_S`).
+  Jitter is load-bearing: the crons align (*/2, */5, */10, */15 and the
+  approver all fire at :00), so a fixed delay just reschedules the collision.
+  Verified live: the 5-city burst went 5/5 in 4.2s, zero refusals.
 
 ### NWS (free, no auth, rate-limited)
 - **CLI products:** `api.weather.gov/products/types/CLI/locations/{WFO}`

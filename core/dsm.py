@@ -28,6 +28,7 @@ falls, so either already contradicting a CLI floor is decisive.
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import urllib.error
@@ -40,8 +41,22 @@ NWS_LIST_URL = "https://api.weather.gov/products/types/DSM/locations/{awips}"
 NWS_PRODUCT_LIMIT = 6
 USER_AGENT = "WeatherEdgeDSM/1.0"
 # IEM refuses bursts with 429s (2026-07-16: CHI/MIA/LAX/DEN all refused
-# inside the same second); one short backoff usually clears the window.
-IEM_429_BACKOFF_S = 3.0
+# inside the same second). Two defences, because one retry wasn't enough —
+# a BOS premise check still 429'd through it the same evening:
+#   1. THROTTLE the burst at the source. Every caller in this process queues
+#      behind a minimum gap, so peak_monitor's 5-city sweep stops arriving as
+#      five same-second hits.
+#   2. JITTER the retries. The crons align (*/2, */5, */10, */15 and the
+#      approver all fire at :00), so a fixed delay makes every refused process
+#      retry in the same instant and collide again. Randomised exponential
+#      backoff decorrelates them.
+# Both stay well inside the tap→fire budget: the premise check fails open, so
+# a refusal costs a blind guard, never a blocked order.
+IEM_MIN_INTERVAL_S = 1.0
+IEM_429_ATTEMPTS = 3
+IEM_429_BACKOFF_S = 3.0   # base delay; doubles per retry, ±50% jitter
+
+_last_request_monotonic = 0.0
 
 _REPORT = re.compile(
     r"^\s*K?(\w{3})\s+DS\s+(?:\d{4}\s+)?(\d{2})/(\d{2})\s+"
@@ -76,15 +91,32 @@ def parse_dsm_text(text: str) -> list[DSMReport]:
     return out
 
 
+def _throttle() -> None:
+    """Space this process's IEM requests by IEM_MIN_INTERVAL_S — the burst is
+    what earns the 429, so serialising costs less than retrying."""
+    global _last_request_monotonic
+    gap = IEM_MIN_INTERVAL_S - (time.monotonic() - _last_request_monotonic)
+    if gap > 0:
+        time.sleep(gap)
+    _last_request_monotonic = time.monotonic()
+
+
+def _backoff_delay(retry: int) -> float:
+    """Exponential with ±50% jitter: the aligned crons must not retry in
+    lockstep (a fixed delay just reschedules the same collision)."""
+    return IEM_429_BACKOFF_S * (2 ** retry) * (0.5 + random.random())
+
+
 def _get(url: str, timeout: int) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    for attempt in (0, 1):
+    for attempt in range(IEM_429_ATTEMPTS):
+        _throttle()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt == 0:
-                time.sleep(IEM_429_BACKOFF_S)
+            if exc.code == 429 and attempt < IEM_429_ATTEMPTS - 1:
+                time.sleep(_backoff_delay(attempt))
                 continue
             raise
     raise AssertionError("unreachable")
