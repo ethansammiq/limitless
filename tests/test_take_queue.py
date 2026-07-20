@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from core import take_queue
+from core import risk, take_queue
 
 NOW = datetime(2026, 7, 12, 21, 32, 1, tzinfo=timezone.utc)
 CMD = ".venv/bin/python scripts/take.py KXHIGHTMIN-26JUL12-T91 buy yes 23 18"
@@ -435,3 +435,56 @@ class TestClaimForExecution:
         take_queue.supersede_entries([eid], "CLI reissued", NOW)
         assert take_queue.claim_for_execution(eid, NOW) is False
         assert take_queue.load_queue()["entries"][eid]["status"] == "superseded"
+
+
+class TestAttentionFloor:
+    """2026-07-19: five buttons, all expired untapped, three worth <$9.
+    A button that isn't worth an interrupt trains the next one to be
+    ignored — so sub-floor findings alert and journal, but never post."""
+
+    def test_production_default_is_25(self, monkeypatch):
+        monkeypatch.delenv("TAKE_MIN_PAYOFF_DOLLARS", raising=False)
+        assert risk.min_payoff_dollars() == 25.0
+
+    def test_payoff_math_buy_is_upside_sell_is_the_credit(self):
+        assert risk.max_payoff_dollars("buy", "yes", 16, 46) == pytest.approx(8.64)
+        assert risk.max_payoff_dollars("sell", "yes", 19, 21) == pytest.approx(3.99)
+
+    def test_the_81_cent_button_never_posts(self, monkeypatch):
+        # KXHIGHTOKC-26JUL19-B92.5: 1 contract @19c, best case 81c.
+        monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "25")
+        cmd = ".venv/bin/python scripts/take.py T1 buy yes 1 19"
+        assert take_queue.entry_from_finding(
+            _finding(ticker="T1", cmd=cmd, ask=19, ask_depth=1),
+            "cli_sniper", NOW) is None
+
+    def test_a_worthwhile_button_still_posts(self, monkeypatch):
+        monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "25")
+        cmd = ".venv/bin/python scripts/take.py T1 buy yes 60 20"
+        e = take_queue.entry_from_finding(
+            _finding(ticker="T1", cmd=cmd, ask=20, ask_depth=60),
+            "cli_sniper", NOW)
+        assert e is not None and e["count"] == 60          # $48 best case
+
+    def test_floor_applies_to_riskless_sells_too(self, monkeypatch):
+        # Free money is still an interrupt: the 2026-07-16 SFO dead-bid
+        # sell was 19@21c = $3.99 and expired untapped like the rest.
+        monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "25")
+        cmd = ".venv/bin/python scripts/take.py T1 sell yes 19 21"
+        assert take_queue.entry_from_finding(
+            _finding(kind="sell_dead", ticker="T1", cmd=cmd, ask=21, ask_depth=19),
+            "cli_sniper", NOW) is None
+
+    def test_floor_uses_the_clamped_count_not_the_asked_one(self, monkeypatch):
+        # Book offers 5000 @1c ($49.50 raw) but the night cap clamps to 20
+        # ($19.80) -> below floor. Order matters: clamp first, then gate.
+        monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "25")
+        monkeypatch.setenv("TAKE_MAX_NOTIONAL", "0.20")
+        cmd = ".venv/bin/python scripts/take.py T1 buy yes 5000 1"
+        assert take_queue.entry_from_finding(
+            _finding(ticker="T1", cmd=cmd, ask=1, ask_depth=5000),
+            "cli_sniper", NOW) is None
+
+    def test_garbage_env_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "twenty-five")
+        assert risk.min_payoff_dollars() == 25.0

@@ -29,6 +29,11 @@ DEFAULT_NIGHT_CAP = 25.0      # $ per station-night ≈ 15% of the 07-2026 bankr
 DEFAULT_DAILY_CAP = 60.0      # $ portfolio-wide per UTC day ≈ 2.4 night caps
                               # (the $30 auto-take cap sits inside it)
 
+# Attention floor (2026-07-19): a button worth less than this never posts.
+# Unlike the caps above this is a FLOOR on reward, not a ceiling on risk —
+# see min_payoff_dollars() for the measurement behind the number.
+DEFAULT_MIN_PAYOFF = 25.0     # $ best-case win below which a tap isn't worth it
+
 # Bankroll-relative fractions (of CASH balance, which excludes deployed
 # collateral — caps shrink as money deploys intra-day, conservative by
 # construction). Sizing, not winrate, is the ruin lever: on 2026-07-14 a
@@ -114,6 +119,48 @@ def daily_cap_detail(now_utc: datetime | None = None) -> tuple[float, str]:
 
 def daily_cap_dollars(now_utc: datetime | None = None) -> float:
     return daily_cap_detail(now_utc)[0]
+
+
+def max_payoff_dollars(action: str, side: str, count: int, price_c: int) -> float:
+    """Best case if the contract resolves your way: what a tap is WORTH.
+
+    A buy at p wins (100-p) per contract; a sell collects p (the credit is
+    kept when the bracket dies). Both are the gross win — fees shave a few
+    cents and are ignored: this gates attention, not P&L."""
+    leg = (100 - price_c) if action == "buy" else price_c
+    return count * leg / 100
+
+
+def min_payoff_dollars() -> float:
+    """Attention floor: below this a button is not worth a human interrupt.
+
+    2026-07-19, measured, not theorized: 5 buttons staged over two days,
+    ALL expired untapped, three worth under $9 and two under $1 — one
+    asked Ethan to stop his evening to make 81¢. He reads the mentions;
+    the trades just aren't worth the interrupt. Five dead buttons don't
+    merely fail to convert, they TRAIN the sixth to be ignored, and the
+    sixth might be the $30 one — so the fix is fewer buttons, not louder
+    ones. Sub-floor findings still alert and still journal uncensored
+    (the scorecard grades them exactly as before); they just never
+    become a tap request.
+
+    Because payoff scales with the night cap, this is self-reactivating:
+    at the 2026-07-19 bankroll ($50 → $7.56/station-night) essentially
+    nothing clears $25, and buttons resume on their own once the bankroll
+    passes ~$167 — no config change and no memory of this decision
+    required. That silence is the honest signal that the button system
+    has nothing worth offering yet, NOT a reason to loosen the caps: the
+    edge is +17.9¢/contract at a 52% hit rate and ~50¢/contract SD
+    (n=31), so sizing up to make taps feel worthwhile would be betting
+    to boredom rather than to evidence (claude.md §4, "the caps stay").
+    """
+    env = os.getenv("TAKE_MIN_PAYOFF_DOLLARS")
+    if env is not None:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return DEFAULT_MIN_PAYOFF
 
 
 def order_cost_dollars(action: str, side: str, count: int, price_c: int) -> float:

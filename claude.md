@@ -46,6 +46,21 @@ tap and auto), resolving breaches as "capped" with no order. All in
 `core/risk.py`. Staging trims counts into the remaining budget,
 expired/repriced/capped entries release theirs. Sizing, not winrate, is
 the ruin lever (7/14: one button offered 34% of bankroll).
+**Attention floor (2026-07-19) — `TAKE_MIN_PAYOFF_DOLLARS`, default $25:**
+a button whose BEST CASE is under the floor never posts; the finding still
+alerts and still journals uncensored (the scorecard is untouched). This is
+a floor on reward, not a ceiling on risk — the first cap here that exists
+to protect attention rather than capital. Measured, not theorized: five
+buttons staged 7/18-7/19, ALL expired untapped, three worth <$9 and two
+<$1 (one asked for a human interrupt to make 81¢); Ethan reads the
+mentions and correctly judges them not worth it. Dead buttons train the
+NEXT one to be ignored, so the fix is fewer buttons, not louder ones.
+Self-reactivating: payoff scales with the night cap, so at the 7/19
+bankroll ($50 → $7.56/station-night) essentially nothing clears $25 and
+buttons resume on their own past ~$167 bankroll — no config change
+required. **Button silence at a small bankroll is the honest signal, NOT
+a reason to loosen caps**: +17.9¢/contract at 52% hit and ~50¢ SD (n=31)
+does not justify sizing up to make taps feel worthwhile (§4).
 **Auto-take carve-out (2026-07-14) — FALSIFIED 2026-07-16, DO NOT REBUILD.**
 The carve-out pre-registered ONE auto-executable class: the 00Z-anchor METAR
 high-ladder buy_winner (all four 6-hr groups in; day-max == final CLI 98.4%,

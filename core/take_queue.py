@@ -207,6 +207,10 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
     reissue_conflict joins the same family (2026-07-16 BOS: a silently
     re-issued CLI moved min 51→69 under a staged sell_dead on the live
     favorite): the print the finding is premised on no longer stands.
+
+    Last gate is the attention floor (risk.min_payoff_dollars): a button
+    whose best case is smaller than a human interrupt is worth never
+    posts. Alert and journal are untouched — this gates taps, not data.
     """
     if (finding.get("kind") not in ENQUEUEABLE_KINDS or finding.get("suppressed")
             or finding.get("obs_kill") or finding.get("obs_warn")
@@ -220,6 +224,14 @@ def entry_from_finding(finding: dict, source: str, now_utc: datetime) -> dict | 
     count = clamp_count(parsed["action"], parsed["side"], parsed["count"],
                         parsed["price_c"], max_notional())
     if count < 1:
+        return None
+    # Attention floor — clamped size decides the payoff, so this runs AFTER
+    # the clamp: a button is only worth a human interrupt if winning it is.
+    # Sub-floor findings keep their alert and their journal row (the
+    # scorecard is unaffected); they just never ask for a tap.
+    payoff = risk.max_payoff_dollars(parsed["action"], parsed["side"],
+                                     count, parsed["price_c"])
+    if payoff < risk.min_payoff_dollars():
         return None
     ts = now_utc.isoformat(timespec="seconds")
     summary_bits = [finding.get("subtitle") or "",

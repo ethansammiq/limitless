@@ -26,3 +26,8 @@ def _isolated_risk_caps(tmp_path, monkeypatch):
                         tmp_path / "live_account.json")
     monkeypatch.delenv("TAKE_MAX_NOTIONAL", raising=False)
     monkeypatch.delenv("TAKE_NIGHT_CAP_DOLLARS", raising=False)
+    # The attention floor is OFF by default in tests: it gates on reward,
+    # so leaving it live would silently un-stage every fixture built
+    # before 2026-07-19. Floor behaviour has its own tests, which set the
+    # env explicitly (and pin the production default).
+    monkeypatch.setenv("TAKE_MIN_PAYOFF_DOLLARS", "0")
